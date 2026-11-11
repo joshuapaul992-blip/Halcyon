@@ -172,9 +172,15 @@ static void l_term(void) { app_terminal(); }
 static void l_notepad(void) { app_notepad(NULL); }
 static void l_paint(void) { app_paint(NULL); }
 static void l_sysinfo(void) { app_sysinfo(); }
-static void l_calc(void) { app_calc(); }
+/* Calculator and Sonar are user programs now; the built-in versions remain
+ * for when the program cannot run (no C:\PROGRAMS, or no timer interrupt
+ * in the fully polled mode) */
+static void run_or(const char *path, void (*builtin)(void)) {
+    if (proc_spawn(path, NULL, NULL, NULL) < 0) builtin();
+}
+static void l_calc(void) { run_or("C:/PROGRAMS/CALC.EXE", app_calc); }
 static void l_control(void) { app_control(); }
-static void l_mines(void) { app_mines(); }
+static void l_mines(void) { run_or("C:/PROGRAMS/SONAR.EXE", app_mines); }
 static void l_about(void) { app_about(); }
 static void l_taskmgr(void) { shell_run("C:/PROGRAMS/TASKMGR.EXE", NULL); }
 

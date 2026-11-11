@@ -32,7 +32,7 @@
 - **Address space:** each process has its own PML4. Entry 0 (the identity-mapped
   first 4 GiB, supervisor-only) and any other kernel entries are shared; user
   memory lives at 0x2000_0000_0000 and above (PML4 entries 64..255) in 4 KiB
-  pages allocated from the kernel heap.
+  pages from a page pool (1 MiB chunks taken from the kernel heap).
 - **CPU setup:** GDT with user code/data segments and a TSS (RSP0 = the current
   thread's kernel stack, IST for double fault / NMI); `syscall`/`sysret`.
 - **Programs:** static position-independent ELF64 executables (`.EXE` files)
@@ -51,3 +51,30 @@
   process that hangs.
 - **Programs shipped:** a console Hello, Calculator and Sonar moved to user mode,
   and a Crash Test program that deliberately misbehaves.
+
+## As built: protection, limits and known gaps
+
+- **Memory protection:** user pages are user-only and, when the CPU has NX,
+  not executable unless the ELF segment says so (code is not writable). The
+  kernel turns on CR0.WP, and SMEP, SMAP and UMIP when the CPU reports them; it
+  reaches program memory only by translating through the program's page tables
+  into the identity map, after checking every pointer and length. Device
+  memory is never mapped into the user half.
+- **Bounded work per call:** drawing coordinates and radii are clamped; a
+  program's canvases share an 8M-pixel quota, a window takes at most 256
+  controls, and GUI allocations leave 32 MiB of kernel heap untouched. At most
+  4 message boxes per program; a program waiting in one can still be ended.
+  Program file dialogs (modal) run one at a time. Programs are capped in number
+  and need a working timer interrupt (so a loop cannot freeze the desktop).
+- **Message boxes and crash reports** are ordinary windows: the program's
+  thread waits, the GUI thread never nests a loop on a program's behalf.
+- **Kernel stacks** (32 KiB per thread, and the boot stack) carry a canary
+  checked on every switch.
+- **Calculator and Sonar** are `CALC.EXE` and `SONAR.EXE`; the Start menu
+  starts them. The menu bars became button strips (the user API has no menus
+  yet). The built-in versions stay in the kernel and are used only when the
+  program cannot run (no `C:\PROGRAMS`, or interrupts disabled).
+- **Known gap: no permissions between programs.** Every program runs with the
+  same rights: it can read and write every file and end any other program
+  (`SYS_KILL`), as on a single-user Windows 9x/XP desktop without accounts. The
+  separation is about faults, not about trust.

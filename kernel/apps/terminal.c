@@ -117,6 +117,10 @@ static int con_read(void *ctx, char *buf, int n) {
     c->in_ready = 0;
     return len;
 }
+static int calc_program(void) {
+    vfs_dirent_t st;
+    return vfs_stat("C:/PROGRAMS/CALC.EXE", &st) == 0 && idle_enabled();
+}
 static void con_attach(void *ctx, u32 pid) { ((tcon_t *)ctx)->refs++; (void)pid; }
 static void con_exited(void *ctx, u32 pid, int code) {
     tcon_t *c = ctx;
@@ -683,7 +687,7 @@ static void execute(term_t *t, int argc, char **argv, const char *rest) {
         if (argc > 1 && resolve(t, argv[1], p, sizeof p) == 0) shell_open(p); else tputs(t, "usage: start file\n");
     }
     else if (!strcasecmp(c, "paint")) app_paint(NULL);
-    else if (!strcasecmp(c, "calc")) app_calc();
+    else if (!strcasecmp(c, "calc") && !calc_program()) app_calc();     /* else CALC.EXE below */
     else if (!strcasecmp(c, "sysinfo") || !strcasecmp(c, "msinfo")) app_sysinfo();
     else if (!strcasecmp(c, "control")) app_control();
     else if (!strcasecmp(c, "exit")) wm_close(t->win);

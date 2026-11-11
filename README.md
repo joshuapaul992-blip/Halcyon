@@ -13,7 +13,7 @@ its own drivers for USB, SATA and FAT file systems.
 |------|-------------|
 | Boot | Custom MBR plus stage 2 for BIOS (unreal mode, reads `\HALCYON\KERNEL.BIN` from FAT32 via INT 13h), and a UEFI loader (`\EFI\BOOT\BOOTX64.EFI`, GOP framebuffer). One image boots both ways. |
 | Kernel | 64-bit, identity mapped, TSC timing, PCI enumeration, ACPI S5 power-off, PS/2 keyboard and mouse. |
-| Threads and programs | Kernel threads with a scheduler (copies, moves and deletes run in the background with a progress dialog and Cancel). Programs run in user mode in their own address space: static position-independent ELF64 `.EXE` files loaded from disk (`C:\PROGRAMS`), preempted every 10 ms, with system calls for files, memory, processes, the console and windows (an early-2000s style window, drawing and controls API). A program that crashes gets a "has encountered a problem and needs to close" dialog and takes nothing else down. Task Manager (Ctrl+Alt+Del) ends programs that hang. |
+| Threads and programs | Kernel threads with a scheduler (copies, moves and deletes run in the background with a progress dialog and Cancel). Programs run in user mode in their own address space: static position-independent ELF64 `.EXE` files loaded from disk (`C:\PROGRAMS`), preempted every 10 ms, with system calls for files, memory, processes, the console and windows (an early-2000s style window, drawing and controls API). Pages are no-execute unless they hold code; SMEP, SMAP and UMIP are on where the CPU has them. A program that crashes gets a "has encountered a problem and needs to close" dialog and takes nothing else down. Task Manager (Ctrl+Alt+Del) ends programs that hang. Calculator and Sonar are user programs. |
 | Interrupts | Local APIC (xAPIC or x2APIC) and I/O APICs from the ACPI MADT, or the 8259 PICs. MSI-X and MSI for xHCI and AHCI. PCI INTx for UHCI, OHCI and EHCI: without an AML interpreter the routing is learned from which device raised an interrupt. The CPU halts when there is nothing to do: a one-shot local APIC (or PIT) timer wakes it for the next deadline. A device whose interrupt does not work is polled. |
 | USB | Host controllers: UHCI and OHCI (USB 1.1), EHCI (USB 2.0, with companion hand-off), and xHCI (USB 3.x, SuperSpeed). Class drivers: hubs (USB 2 and SuperSpeed), HID keyboards (boot protocol), HID mice and tablets (report descriptor parsing), and mass storage (Bulk-Only Transport plus SCSI). Hot-plug. |
 | Storage | AHCI SATA (LBA48, multiple controllers). NVMe SSDs (MSI-X, MSI, INTx or polled; every active namespace with 512- or 4096-byte blocks becomes a disk, `nvme0`, `nvme1`, ...; flushed when the drive has a volatile cache, shutdown notification on Turn Off/Restart). CD/DVD drives on SATA (ATAPI): read-only drive letters, discs detected when inserted, ejected or swapped, Eject in the drive's right-click menu. Block layer with MBR (including extended partitions), GPT and superfloppy detection. |
@@ -125,7 +125,10 @@ message boxes and file dialogs. `make` builds each into `build/user/NAME.exe` an
 puts it on the image as `C:\PROGRAMS\NAME.EXE`. Type its name in the Command Prompt
 (console output and input go to that window) or double-click it in Explorer.
 `HELLO.EXE` is a console example; `CRASHME.EXE` (Crash Test) fails in nine
-different ways on purpose; `TASKMGR.EXE` is Task Manager.
+different ways on purpose; `TASKMGR.EXE` is Task Manager; `CALC.EXE` and
+`SONAR.EXE` are full GUI programs (they draw into their own pixel buffer and
+blit it, then add text). `SELFTEST.EXE` checks the system calls (`selftest` in
+the Command Prompt; the QEMU `user` test variant runs it).
 
 ## Layout
 
@@ -149,8 +152,11 @@ tests/host   host-side storage tests and fuzzer
   user programs are preempted. Without a working timer interrupt (F8 "Disable
   interrupts") programs are not preempted, so one that loops forever hangs the
   desktop.
-- Programs can't create threads or share memory yet, and the built-in
+- Programs can't create threads or share memory yet, and the other built-in
   applications (Explorer, Notepad, Paint...) still run in the kernel.
+- No permissions between programs: any program can read or write any file and
+  end any other program. Isolation protects against crashes, not against a
+  hostile program.
 - PCI INTx routes are learned, not read from ACPI (no AML interpreter). A device
   that shares its line with a device that has no driver may stay polled.
 - x2APIC mode is written to spec but QEMU 8.2's emulator cannot run it.

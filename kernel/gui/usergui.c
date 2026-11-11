@@ -404,6 +404,9 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
     case SYS_WIN_RESIZE: {
         if (!(u = uwin(p, (int)a1))) return E_INVAL;
         resize_job_t j = { u, (int)CLAMP((i64)a2, 32, 2048), (int)CLAMP((i64)a3, 16, 1536) };
+        ustate_t *s = p->gui;
+        u64 oldpx = u->canvas ? (u64)u->canvas->w * u->canvas->h : 0, newpx = (u64)j.cw * j.ch;
+        if (!s || s->pixels - oldpx + newpx > MAX_PIXELS) return E_NOMEM;
         gui_call(job_resize, &j);
         return 0;
     }
