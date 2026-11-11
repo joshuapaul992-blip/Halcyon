@@ -62,7 +62,8 @@ void hwreport_late(void) {
     }
     for (blockdev_t *bd = blockdev_first(); bd; bd = bd->next)
         kprintf("hw: disk %s: %s, %lu x %u%s\n", bd->name, bd->model, bd->sector_count, bd->sector_size,
-                bd->type == BDEV_PART ? " (partition)" : "");
+                bd->type == BDEV_PART ? " (partition)" : bd->type == BDEV_DISK_NVME ? ", NVMe" :
+                bd->type == BDEV_DISK_SATA ? ", SATA" : bd->type == BDEV_DISK_USB ? ", USB" : "");
     for (int i = 0; i < vfs_volume_count(); i++) {
         volume_t *v = vfs_volume(i);
         kprintf("hw: volume %c: %s '%s' on %s%s\n", v->letter, v->fs_name, v->label, v->bd ? v->bd->name : "?", v->is_boot ? " (boot)" : "");

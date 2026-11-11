@@ -2,8 +2,8 @@
 """Boot Halcyon in QEMU for a matrix of USB controllers / firmware and check
 the kernel serial log.
 
-usage: tools/boottest.py [CONFIG ...]     CONFIG = hc:fw[:variant], e.g. xhci:uefi
-       (default: the full matrix)
+usage: tools/boottest.py [CONFIG ...]     CONFIG = hc:fw[:variant[+variant]], e.g. xhci:uefi,
+       xhci:bios:nvme+nomsi (default: the full matrix)
 
 Each boot must reach "gui: desktop ready", mount the boot stick as C:, mount
 the SATA test disk, write \\HALCYON\\BOOT.LOG, and log no exception/panic.
@@ -11,8 +11,13 @@ With interrupts on, the idle desktop must also leave QEMU mostly idle (the
 guest halts the CPU), and the USB controller must get a working interrupt.
 Variants add boot flags through QEMU fw_cfg (see qemu_boot_flags()):
   pic    legacy 8259 PICs instead of the I/O APIC
-  nomsi  no MSI: xHCI / AHCI fall back to (learned) INTx
+  nomsi  no MSI: xHCI / AHCI / NVMe fall back to (learned) INTx
   noirq  no interrupts at all: the old fully polled mode
+or replace the SATA disk with an NVMe disk (a scratch copy of a test image),
+which must mount as a volume "on nvme0" without NVMe errors and, with
+interrupts on, get a working interrupt:
+  nvme    fat32gpt.img on an NVMe controller (512-byte LBAs)
+  nvme4k  fat32_4k.img on an NVMe namespace with 4096-byte LBAs
 Exit status is the number of failed configurations.
 """
 import os
@@ -23,8 +28,10 @@ import time
 BUILD = os.environ.get("BUILD", "build")
 MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "uhci:uefi", "ehci:uefi", "ich9:uefi", "xhci:uefi",
-          "xhci:bios:nomsi", "uhci:bios:pic", "xhci:uefi:pic", "ehci:bios:noirq"]
-VARIANTS = {"": 0, "pic": 0x200, "nomsi": 0x100, "noirq": 0x80}
+          "xhci:bios:nomsi", "uhci:bios:pic", "xhci:uefi:pic", "ehci:bios:noirq",
+          "xhci:bios:nvme", "xhci:uefi:nvme4k", "xhci:bios:nvme+nomsi", "xhci:uefi:nvme+noirq"]
+VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0}
+NVME_ERRORS = ["failed", "timed out", "fatal", "offline", "not responding", "no interrupt seen"]
 IDLE_MAX_CPU = 40      # % of one host CPU used by QEMU at the idle desktop
 TIMEOUT = {"uhci": 90, "ohci": 60}
 CHECKS = [
@@ -47,15 +54,34 @@ def cpu_seconds(pid):
 def run(cfg):
     parts = cfg.split(":")
     hc, fw = parts[0], parts[1]
-    variant = parts[2] if len(parts) > 2 else ""
-    flags = VARIANTS[variant]
+    opts = [v for v in (parts[2] if len(parts) > 2 else "").split("+") if v]
+    flags = 0
+    for v in opts:
+        flags |= VARIANTS[v]
+    irqmode = next((v for v in opts if v in ("pic", "nomsi", "noirq")), "")
+    nvme = next((v for v in opts if v.startswith("nvme")), None)
     log = os.path.join(BUILD, "serial.log")
     if os.path.exists(log):
         os.remove(log)
-    sata = os.path.join(BUILD, "ci_sata.img")
-    subprocess.run(["cp", os.path.join(BUILD, "fat32gpt.img"), sata], check=True)
-    extra = ("-device usb-tablet,bus=usb.0 -drive if=none,id=d0,format=raw,file=%s "
-             "-device ide-hd,drive=d0,bus=ide.0" % sata)
+    extra = "-device usb-tablet,bus=usb.0 "
+    checks = list(CHECKS)
+    if nvme:
+        disk = os.path.join(BUILD, "ci_nvme.img")
+        src = "fat32_4k.img" if nvme == "nvme4k" else "fat32gpt.img"
+        subprocess.run(["cp", "--sparse=always", os.path.join(BUILD, src), disk], check=True)
+        if nvme == "nvme4k":
+            extra += ("-device nvme,id=nvme0,serial=HALC0002 -drive if=none,id=nv0,format=raw,file=%s "
+                      "-device nvme-ns,drive=nv0,bus=nvme0,nsid=1,logical_block_size=4096,"
+                      "physical_block_size=4096" % disk)
+            checks.append(("4K namespace", "blocks x 4096 bytes"))
+        else:
+            extra += ("-drive if=none,id=nv0,format=raw,file=%s "
+                      "-device nvme,serial=HALC0001,drive=nv0" % disk)
+        checks = [c if c[0] != "SATA volume" else ("NVMe volume", "on nvme0") for c in checks]
+    else:
+        sata = os.path.join(BUILD, "ci_sata.img")
+        subprocess.run(["cp", os.path.join(BUILD, "fat32gpt.img"), sata], check=True)
+        extra += "-drive if=none,id=d0,format=raw,file=%s -device ide-hd,drive=d0,bus=ide.0" % sata
     if flags:
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
     env = dict(os.environ, HEADLESS="1", BUILD=BUILD, EXTRA=extra)
@@ -95,13 +121,20 @@ def run(cfg):
         p.wait(5)
     except subprocess.TimeoutExpired:
         p.kill()
-    failures = [name for name, pat in CHECKS if pat not in text]
+    failures = [name for name, pat in checks if pat not in text]
     failures += ["log contains '%s'" % b for b in BAD if b in text]
     want_mode = {"": "irq: mode I/O APIC", "pic": "irq: mode 8259 PIC", "nomsi": "irq: mode I/O APIC",
-                 "noirq": "interrupts disabled by boot option"}[variant]
+                 "noirq": "interrupts disabled by boot option"}[irqmode]
     if want_mode not in text:
         failures.append("interrupt mode ('%s' missing)" % want_mode)
-    if variant != "noirq":
+    if nvme:
+        bad = [l for l in text.splitlines() if l.startswith("nvme: ") and any(e in l for e in NVME_ERRORS)]
+        if bad:
+            failures.append("NVMe error ('%s')" % bad[0])
+        if irqmode != "noirq" and not any("NVMe" in l and ("INTx on" in l or "MSI" in l)
+                                          for l in text.splitlines() if l.startswith("irq: ")):
+            failures.append("no NVMe interrupt")
+    if irqmode != "noirq":
         if "CPU idle off" in text:
             failures.append("no idle timer")
         usb = {"uhci": "UHCI", "ohci": "OHCI", "ehci": "EHCI", "ich9": "EHCI", "xhci": "xHCI"}[hc]

@@ -3,6 +3,8 @@
 #   $BUILD/fat12.img     1.44 MB superfloppy (no partition table), FAT12, label FLOPPY
 #   $BUILD/fat16.img     32 MiB, MBR, one FAT16 partition at LBA 2048, label DATA16
 #   $BUILD/fat32gpt.img  64 MiB, GPT, one FAT32 partition at LBA 2048, label GPTDISK
+#   $BUILD/fat32_4k.img  320 MiB (sparse), 4096-byte sectors, GPT, FAT32 partition at
+#                        LBA 256 (1 MiB), label NVME4K (for a 4Kn NVMe namespace)
 # Every image holds the same sample tree:
 #   README.TXT                       8.3 name, known text
 #   Long File Name Example.txt       long name with spaces
@@ -10,7 +12,7 @@
 #   Folder With Spaces/Nested Dir/deep file.txt
 #   SUBDIR/HELLO.TXT
 #   SUBDIR/pattern.bin               (32 KiB: bytes 0..255 repeated)
-# Needs mkfs.fat, mtools, sfdisk.
+# Needs mkfs.fat, mtools, sfdisk, fdisk.
 set -e
 BUILD=${BUILD:-build}
 mkdir -p "$BUILD"
@@ -64,3 +66,14 @@ printf 'label: gpt\nstart=2048, size=%s, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699
 mkfs.fat --offset=2048 -F 32 -s 1 -n GPTDISK "$IMG" $((SECT / 2)) >/dev/null 2>&1
 populate "$IMG@@1M"
 echo "Built $IMG (64 MiB GPT, FAT32 partition at LBA 2048, label GPTDISK)"
+
+# ---- FAT32 on a 4096-byte-sector disk (4Kn NVMe namespace), GPT ----
+# sfdisk cannot write a GPT for another sector size; fdisk -b can.
+IMG=$BUILD/fat32_4k.img
+rm -f "$IMG"
+dd if=/dev/zero of="$IMG" bs=1M count=0 seek=320 2>/dev/null
+printf 'g\nn\n1\n256\n\nt\nEBD0A0A2-B9E5-4433-87C0-68B6B72699C7\nw\n' | fdisk -b 4096 "$IMG" >/dev/null 2>&1
+SECT=$(fdisk -b 4096 -l "$IMG" | awk '$1 == "'"$IMG"'1" { print $4 }')
+mkfs.fat --offset=256 -S 4096 -F 32 -s 1 -n NVME4K "$IMG" $((SECT * 4)) >/dev/null 2>&1
+populate "$IMG@@1M"
+echo "Built $IMG (320 MiB, 4096-byte sectors, GPT, FAT32 partition at LBA 256, label NVME4K)"

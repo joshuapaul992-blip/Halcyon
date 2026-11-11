@@ -483,13 +483,14 @@ extern const u8 halcyon_tramp_start[], halcyon_tramp_end[];
 struct opt { const char *label; u32 flag; };
 static const struct opt opts[] = {
     { "Start Halcyon normally", 0 },
-    { "Safe Mode (no USB, SATA or interrupts; verbose)", 0 },
+    { "Safe Mode (no USB, SATA, NVMe or interrupts; verbose)", 0 },
     { "Start with the options below", 0 },
     { "Verbose boot: show kernel messages on screen", BOOTF_VERBOSE },
     { "Disable USB 3.x controllers (xHCI)", BOOTF_NO_XHCI },
     { "Disable USB 2.0 controllers (EHCI)", BOOTF_NO_EHCI },
     { "Disable USB 1.1 controllers (UHCI/OHCI)", BOOTF_NO_USB11 },
     { "Disable SATA controllers (AHCI)", BOOTF_NO_AHCI },
+    { "Disable NVMe controllers", BOOTF_NO_NVME },
     { "Disable ACPI", BOOTF_NO_ACPI },
     { "Disable interrupts (poll all devices, no CPU idle)", BOOTF_NO_IRQ },
     { "Disable MSI (PCI devices use INTx)", BOOTF_NO_MSI },
@@ -530,8 +531,9 @@ static u32 boot_menu(void) {
             line[n] = 0;
             at(6, 6 + i + (i >= 3 ? 1 : 0), line, i == sel ? 0x70 : 0x07);
         }
-        at(4, 21, "The kernel log is saved to \\HALCYON\\BOOT.LOG on the boot drive", 0x08);
-        at(4, 22, "once Halcyon reaches the desktop.", 0x08);
+        /* options use rows 6-8 and 10-20 */
+        at(4, 22, "The kernel log is saved to \\HALCYON\\BOOT.LOG on the boot drive", 0x08);
+        at(4, 23, "once Halcyon reaches the desktop.", 0x08);
         o->SetAttribute(o, 0x07);
         EFI_INPUT_KEY k;
         while (!read_key(&k)) BS->Stall(10000);

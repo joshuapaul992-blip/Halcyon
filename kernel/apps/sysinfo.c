@@ -119,7 +119,8 @@ static void build(si_t *s) {
             add(s, 2, ICON_FILE_SYS, CAT_DISKS, d, "%s: partition %d (%s)", b->name, b->part_index, sz);
         } else {
             snprintf(d, 2048, "%s\n\nDevice: %s\nInterface: %s\nSector size: %u bytes\nSectors: %lu\nCapacity: %s\nRemovable: %s\nWrite protected: %s",
-                     b->model, b->name, b->type == BDEV_DISK_USB ? "USB mass storage" : b->type == BDEV_DISK_SATA ? "SATA (AHCI)" : "RAM",
+                     b->model, b->name, b->type == BDEV_DISK_USB ? "USB mass storage" : b->type == BDEV_DISK_SATA ? "SATA (AHCI)" :
+                     b->type == BDEV_DISK_NVME ? "NVMe" : "RAM",
                      b->sector_size, b->sector_count, sz, b->removable ? "yes" : "no", b->readonly ? "yes" : "no");
             add(s, 1, b->type == BDEV_DISK_USB ? ICON_USBDRIVE : ICON_HDD, CAT_DISKS, d, "%s (%s, %s)", b->model[0] ? b->model : b->name, b->name, sz);
         }

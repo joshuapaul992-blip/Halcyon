@@ -276,7 +276,11 @@ void rtc_read(struct rtc_time *t) {
 }
 
 /* ---------------- power ---------------- */
+/* disk drivers that want to hear about the power going away (weak: optional) */
+void nvme_shutdown(void) __attribute__((weak));
+
 void reboot(void) {
+    if (nvme_shutdown) nvme_shutdown();
     kprintf("Rebooting...\n");
     for (int i = 0; i < 100000 && (inb(0x64) & 2); i++) ;
     outb(0x64, 0xFE);                 /* 8042 pulse reset */
@@ -290,6 +294,7 @@ void reboot(void) {
 
 int acpi_poweroff(void) __attribute__((weak));
 void shutdown(void) {
+    if (nvme_shutdown) nvme_shutdown();
     kprintf("Shutting down...\n");
     if (acpi_poweroff) acpi_poweroff();
     outw(0x604, 0x2000);    /* QEMU q35/piix (newer) */

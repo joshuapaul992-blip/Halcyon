@@ -1,6 +1,6 @@
 /* Halcyon OS - block device layer
  *
- * Disk drivers (AHCI, USB mass storage, ...) fill in a blockdev_t and call
+ * Disk drivers (AHCI, NVMe, USB mass storage, ...) fill in a blockdev_t and call
  * blockdev_register(). The block layer then:
  *   - scans the partition table (MBR incl. extended partitions, or GPT);
  *     each partition becomes a child blockdev_t of type BDEV_PART
@@ -23,11 +23,11 @@
 #define BLOCK_H
 #include "core/types.h"
 
-enum { BDEV_DISK_USB = 1, BDEV_DISK_SATA, BDEV_DISK_RAM, BDEV_PART };
+enum { BDEV_DISK_USB = 1, BDEV_DISK_SATA, BDEV_DISK_RAM, BDEV_PART, BDEV_DISK_NVME };
 
 typedef struct blockdev blockdev_t;
 struct blockdev {
-    char name[16];          /* "usb0", "sata1", "usb0p1" (set by driver; partitions by block layer) */
+    char name[16];          /* "usb0", "sata1", "nvme0", "usb0p1" (set by driver; partitions by block layer) */
     char model[48];         /* human readable ("QEMU HARDDISK", "SanDisk Cruzer") */
     int  type;              /* BDEV_* */
     u32  sector_size;       /* bytes, normally 512 */

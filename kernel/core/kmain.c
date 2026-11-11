@@ -11,6 +11,7 @@
 void blockdev_init(void) WEAK;
 void vfs_init(void) WEAK;
 void ahci_init(void) WEAK;
+void nvme_init(void) WEAK;
 void usb_init(void) WEAK;
 void usb_poll(void) WEAK;
 void ps2_init(void) WEAK;
@@ -58,6 +59,9 @@ void kmain(struct bootinfo *bi) {
     PROGRESS(35, "Detecting SATA disks...");
     if (ahci_init && !(bf & BOOTF_NO_AHCI)) ahci_init();
     else kprintf("ahci: disabled by boot option\n");
+    PROGRESS(45, "Detecting NVMe disks...");
+    if (nvme_init && !(bf & BOOTF_NO_NVME)) nvme_init();
+    else kprintf("nvme: disabled by boot option\n");
     PROGRESS(55, "Starting USB controllers...");
     if (usb_init) usb_init();
     PROGRESS(100, "Starting the desktop...");
