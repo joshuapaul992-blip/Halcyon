@@ -1,6 +1,7 @@
 /* Halcyon OS - window manager: compositor, input routing, main loop */
 #include "wm.h"
 #include "core/irq.h"
+#include "fs/block.h"
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
@@ -869,10 +870,12 @@ static u64 last_tick;
  * that found anything to do, the CPU halts until the next interrupt or the
  * earliest deadline a device or window asked for. */
 void gui_step(void) {
+    int busy = 0;
     u32 gen = irq_generation();
     irq_service();
     input_poll_devices();
-    int busy = input_pending();
+    if (storage_service()) busy = 1;
+    busy |= input_pending();
     handle_input();
     u64 now = time_ms();
     int ticking = 0;

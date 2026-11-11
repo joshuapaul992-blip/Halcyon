@@ -3,6 +3,7 @@
 #include "core/lib.h"
 #include "core/unicode.h"
 #include "core/mm.h"
+#include "core/thread.h"
 #include "core/kernel.h"
 #include "fs/block.h"
 #include "fs/vfs.h"
@@ -55,7 +56,7 @@ static void volume_release(volume_t *v) {
     if (!v->alive && !v->open_files) kfree(v);
 }
 
-int vfs_try_mount(blockdev_t *bd) {
+static int vfs_try_mount_locked(blockdev_t *bd) {
     if (!bd || !bd->present) return E_NODEV;
     for (int i = 0; i < NLETTERS; i++)
         if (g_vol[i] && g_vol[i]->bd == bd) return E_EXIST;
@@ -106,7 +107,7 @@ static void unmount_slot(int i) {
     volume_release(v);
 }
 
-void vfs_unmount_blockdev(blockdev_t *bd) {
+static void vfs_unmount_blockdev_locked(blockdev_t *bd) {
     for (int i = 0; i < NLETTERS; i++)
         if (g_vol[i] && g_vol[i]->bd == bd) unmount_slot(i);
 }
@@ -129,7 +130,7 @@ volume_t *vfs_volume_by_letter(char letter) {
     return g_vol[c - 'A'];
 }
 
-int vfs_statfs(char letter, u64 *total, u64 *free_bytes) {
+static int vfs_statfs_locked(char letter, u64 *total, u64 *free_bytes) {
     volume_t *v = vfs_volume_by_letter(letter);
     if (!v) return E_NODEV;
     if (!v->ops->statfs) return E_NOTSUP;
@@ -218,7 +219,7 @@ static int resolve(const char *path, volume_t **vp, char *rel, size_t relsz) {
 
 /* ---- files ---- */
 
-int vfs_open(const char *path, int flags, vfs_file_t **out) {
+static int vfs_open_locked(const char *path, int flags, vfs_file_t **out) {
     char rel[VFS_MAX_PATH + 1];
     volume_t *v;
     if (!out) return E_INVAL;
@@ -244,7 +245,7 @@ static int file_ok(vfs_file_t *f) {
     return 0;
 }
 
-int vfs_read(vfs_file_t *f, void *buf, u32 len) {
+static int vfs_read_locked(vfs_file_t *f, void *buf, u32 len) {
     int r = file_ok(f);
     if (r) return r;
     if (!(f->flags & VFS_O_READ)) return E_INVAL;
@@ -254,7 +255,7 @@ int vfs_read(vfs_file_t *f, void *buf, u32 len) {
     return r;
 }
 
-int vfs_write(vfs_file_t *f, const void *buf, u32 len) {
+static int vfs_write_locked(vfs_file_t *f, const void *buf, u32 len) {
     int r = file_ok(f);
     if (r) return r;
     if (!(f->flags & VFS_O_WRITE)) return E_INVAL;
@@ -279,14 +280,14 @@ u64 vfs_size(vfs_file_t *f) {
     return f->v->ops->size(f->v, f->fh);
 }
 
-int vfs_truncate(vfs_file_t *f, u64 size) {
+static int vfs_truncate_locked(vfs_file_t *f, u64 size) {
     int r = file_ok(f);
     if (r) return r;
     if (!(f->flags & VFS_O_WRITE)) return E_INVAL;
     return f->v->ops->truncate(f->v, f->fh, size);
 }
 
-int vfs_close(vfs_file_t *f) {
+static int vfs_close_locked(vfs_file_t *f) {
     if (!f || !f->v) return E_INVAL;
     volume_t *v = f->v;
     int r = 0;
@@ -318,7 +319,7 @@ static int list_cb(void *vctx, const vfs_dirent_t *e) {
     return 0;
 }
 
-int vfs_list(const char *path, vfs_dirent_t **out) {
+static int vfs_list_locked(const char *path, vfs_dirent_t **out) {
     char rel[VFS_MAX_PATH + 1];
     volume_t *v;
     if (!out) return E_INVAL;
@@ -334,7 +335,7 @@ int vfs_list(const char *path, vfs_dirent_t **out) {
     return c.n;
 }
 
-int vfs_stat(const char *path, vfs_dirent_t *out) {
+static int vfs_stat_locked(const char *path, vfs_dirent_t *out) {
     char rel[VFS_MAX_PATH + 1];
     volume_t *v;
     int r = resolve(path, &v, rel, sizeof rel);
@@ -348,7 +349,7 @@ int vfs_stat(const char *path, vfs_dirent_t *out) {
     return r;
 }
 
-int vfs_mkdir(const char *path) {
+static int vfs_mkdir_locked(const char *path) {
     char rel[VFS_MAX_PATH + 1];
     volume_t *v;
     int r = resolve(path, &v, rel, sizeof rel);
@@ -357,7 +358,7 @@ int vfs_mkdir(const char *path) {
     return v->ops->mkdir(v, rel);
 }
 
-int vfs_unlink(const char *path) {
+static int vfs_unlink_locked(const char *path) {
     char rel[VFS_MAX_PATH + 1];
     volume_t *v;
     int r = resolve(path, &v, rel, sizeof rel);
@@ -366,7 +367,7 @@ int vfs_unlink(const char *path) {
     return v->ops->unlink(v, rel);
 }
 
-int vfs_rename(const char *from, const char *to) {
+static int vfs_rename_locked(const char *from, const char *to) {
     char rf[VFS_MAX_PATH + 1], rt[VFS_MAX_PATH + 1];
     volume_t *vf, *vt;
     int r = resolve(from, &vf, rf, sizeof rf);
@@ -379,7 +380,7 @@ int vfs_rename(const char *from, const char *to) {
     return vf->ops->rename(vf, rf, rt);
 }
 
-int vfs_copy(const char *from, const char *to) {
+static int vfs_copy_locked(const char *from, const char *to) {
     vfs_dirent_t *st = kmalloc(sizeof *st);
     if (!st) return E_NOMEM;
     int r = vfs_stat(from, st);
@@ -414,7 +415,7 @@ done:
     return r;
 }
 
-int vfs_sync_all(void) {
+static int vfs_sync_all_locked(void) {
     int err = 0;
     for (int i = 0; i < NLETTERS; i++) {
         volume_t *v = g_vol[i];
@@ -428,7 +429,7 @@ int vfs_sync_all(void) {
 
 /* ---- convenience ---- */
 
-int vfs_read_file(const char *path, char **data, u32 *size) {
+static int vfs_read_file_locked(const char *path, char **data, u32 *size) {
     vfs_file_t *f;
     if (!data) return E_INVAL;
     *data = NULL;
@@ -452,7 +453,7 @@ int vfs_read_file(const char *path, char **data, u32 *size) {
     return (int)got;
 }
 
-int vfs_write_file(const char *path, const void *data, u32 size) {
+static int vfs_write_file_locked(const char *path, const void *data, u32 size) {
     vfs_file_t *f;
     int r = vfs_open(path, VFS_O_WRITE | VFS_O_CREATE | VFS_O_TRUNC, &f);
     if (r) return r;
@@ -472,7 +473,7 @@ int vfs_write_file(const char *path, const void *data, u32 size) {
 
 int exfat_format(blockdev_t *bd, const char *label, u32 cluster_bytes) __attribute__((weak));
 
-int vfs_format(blockdev_t *bd, const char *fs, const char *label, u32 cluster_bytes) {
+static int vfs_format_locked(blockdev_t *bd, const char *fs, const char *label, u32 cluster_bytes) {
     if (!bd || !bd->present) return E_NODEV;
     if (bd->readonly) return E_ROFS;
     /* a disk with partitions: format one of its partitions instead */
@@ -505,4 +506,131 @@ int vfs_format(blockdev_t *bd, const char *fs, const char *label, u32 cluster_by
     int m = vfs_try_mount(bd);
     g_pref_letter = 0;
     return r ? r : m;
+}
+
+/* ---- public entry points: every VFS call holds storage_lock ---- */
+
+int vfs_try_mount(blockdev_t *bd) {
+    mutex_lock(&storage_lock);
+    int r = vfs_try_mount_locked(bd);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+void vfs_unmount_blockdev(blockdev_t *bd) {
+    mutex_lock(&storage_lock);
+    vfs_unmount_blockdev_locked(bd);
+    mutex_unlock(&storage_lock);
+}
+
+int vfs_statfs(char letter, u64 *total, u64 *free_bytes) {
+    mutex_lock(&storage_lock);
+    int r = vfs_statfs_locked(letter, total, free_bytes);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_open(const char *path, int flags, vfs_file_t **out) {
+    mutex_lock(&storage_lock);
+    int r = vfs_open_locked(path, flags, out);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_read(vfs_file_t *f, void *buf, u32 len) {
+    mutex_lock(&storage_lock);
+    int r = vfs_read_locked(f, buf, len);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_write(vfs_file_t *f, const void *buf, u32 len) {
+    mutex_lock(&storage_lock);
+    int r = vfs_write_locked(f, buf, len);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_truncate(vfs_file_t *f, u64 size) {
+    mutex_lock(&storage_lock);
+    int r = vfs_truncate_locked(f, size);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_close(vfs_file_t *f) {
+    mutex_lock(&storage_lock);
+    int r = vfs_close_locked(f);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_list(const char *path, vfs_dirent_t **out) {
+    mutex_lock(&storage_lock);
+    int r = vfs_list_locked(path, out);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_stat(const char *path, vfs_dirent_t *out) {
+    mutex_lock(&storage_lock);
+    int r = vfs_stat_locked(path, out);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_mkdir(const char *path) {
+    mutex_lock(&storage_lock);
+    int r = vfs_mkdir_locked(path);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_unlink(const char *path) {
+    mutex_lock(&storage_lock);
+    int r = vfs_unlink_locked(path);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_rename(const char *from, const char *to) {
+    mutex_lock(&storage_lock);
+    int r = vfs_rename_locked(from, to);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_copy(const char *from, const char *to) {
+    mutex_lock(&storage_lock);
+    int r = vfs_copy_locked(from, to);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_sync_all(void) {
+    mutex_lock(&storage_lock);
+    int r = vfs_sync_all_locked();
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_read_file(const char *path, char **data, u32 *size) {
+    mutex_lock(&storage_lock);
+    int r = vfs_read_file_locked(path, data, size);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_write_file(const char *path, const void *data, u32 size) {
+    mutex_lock(&storage_lock);
+    int r = vfs_write_file_locked(path, data, size);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+int vfs_format(blockdev_t *bd, const char *fs, const char *label, u32 cluster_bytes) {
+    mutex_lock(&storage_lock);
+    int r = vfs_format_locked(bd, fs, label, cluster_bytes);
+    mutex_unlock(&storage_lock);
+    return r;
 }

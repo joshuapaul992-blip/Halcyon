@@ -25,6 +25,7 @@
 #include "core/mm.h"
 #include "core/io.h"
 #include "core/irq.h"
+#include "core/thread.h"
 
 /* ---------------- HBA registers ---------------- */
 #define HBA_CAP     0x00
@@ -931,6 +932,9 @@ static void cd_init(ahci_port_t *p) {
 void ahci_poll(void) {
     static u8 active;
     if (!g_cd_count || active) return;
+    /* CD commands and disc registration need the storage lock; if a file
+     * operation holds it, try again on the next round */
+    if (!mutex_trylock(&storage_lock)) { idle_wake_at(time_ms() + 50); return; }
     active = 1;
     for (int i = 0; i < g_cd_count; i++) {
         ahci_port_t *p = g_cds[i];
@@ -938,9 +942,18 @@ void ahci_poll(void) {
         idle_wake_at(p->next_poll);
     }
     active = 0;
+    mutex_unlock(&storage_lock);
 }
 
+static int ahci_cd_eject_locked(blockdev_t *bd);
 int ahci_cd_eject(blockdev_t *bd) {
+    mutex_lock(&storage_lock);
+    int r = ahci_cd_eject_locked(bd);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+static int ahci_cd_eject_locked(blockdev_t *bd) {
     for (int i = 0; i < g_cd_count; i++) {
         ahci_port_t *p = g_cds[i];
         if (bd != &p->bd && !(bd && bd->parent == &p->bd)) continue;

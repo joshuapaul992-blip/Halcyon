@@ -256,6 +256,11 @@ struct usb_driver {
 };
 
 /* ---------- core API ---------- */
+/* usb_lock: held by everything that drives the USB stack (root hub service
+ * and class drivers in usb_poll(), enumeration at boot, each mass-storage
+ * command). Sleeping and recursive; taken after storage_lock. */
+struct mutex;
+extern struct mutex usb_lock;
 void usb_init(void);
 void usb_poll(void);
 

@@ -62,3 +62,10 @@ void rtc_read(struct rtc_time *t) {
     t->second = tm.tm_sec;
     t->weekday = tm.tm_wday;
 }
+
+/* threads: the host tests are single threaded */
+#include "core/thread.h"
+void mutex_lock(mutex_t *m) { (void)m; }
+int mutex_trylock(mutex_t *m) { (void)m; return 1; }
+void mutex_unlock(mutex_t *m) { (void)m; }
+int mutex_held(mutex_t *m) { (void)m; return 1; }

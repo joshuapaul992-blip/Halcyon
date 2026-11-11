@@ -59,6 +59,21 @@ struct blockdev {
 #define PTAB_MBR 1
 #define PTAB_GPT 2
 
+/* Every VFS call, file system and block-device registration runs with
+ * storage_lock held (a sleeping, recursive mutex: see core/thread.h). Lock
+ * order: storage_lock before usb_lock. */
+struct mutex;
+extern struct mutex storage_lock;
+
+/* Deferred registration ("storage jobs"), for drivers that discover disks
+ * while holding a lower lock (USB mass storage under usb_lock). The jobs run
+ * from storage_service(), called by the GUI loop. unregister_later() marks
+ * the disk gone at once and calls release(ctx) once nothing refers to it
+ * any more (immediately if it was never registered). */
+void blockdev_register_later(blockdev_t *bd);
+void blockdev_unregister_later(blockdev_t *bd, void (*release)(void *ctx), void *ctx);
+int  storage_service(void);                 /* number of jobs run */
+
 void blockdev_init(void);
 /* change the MBR type byte of a partition (after formatting it); 0 for GPT
  * and whole-disk volumes, where there is nothing to change */

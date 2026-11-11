@@ -1,5 +1,6 @@
 /* Halcyon OS - USB core: controller registry, enumeration, driver binding */
 #include "usb.h"
+#include "core/thread.h"
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
@@ -81,7 +82,16 @@ void ehci_init(void) WEAK;
 void ohci_init(void) WEAK;
 void uhci_init(void) WEAK;
 
+mutex_t usb_lock = MUTEX_INIT("usb");
+
+static void usb_init_locked(void);
 void usb_init(void) {
+    mutex_lock(&usb_lock);
+    usb_init_locked();
+    mutex_unlock(&usb_lock);
+}
+
+static void usb_init_locked(void) {
     /* Order matters: xHCI first (Intel port switching moves ports away from
      * EHCI), then EHCI before its UHCI/OHCI companions. */
     u32 bf = g_bootinfo.boot_flags;
@@ -104,7 +114,16 @@ void usb_init(void) {
 /* Root hub service. A HC whose interrupts work is serviced when it
  * interrupts (plus a slow safety scan); others every 100 ms (transfers in
  * progress on such a HC are polled faster, see usb_intr_poll). */
+/* from the GUI loop: skipped while another thread is in the USB stack (a
+ * mass-storage transfer); its next round comes soon after */
+static void usb_poll_locked(void);
 void usb_poll(void) {
+    if (!mutex_trylock(&usb_lock)) { idle_wake_at(time_ms() + 5); return; }
+    usb_poll_locked();
+    mutex_unlock(&usb_lock);
+}
+
+static void usb_poll_locked(void) {
     u64 now = time_ms();
     for (usb_hc_t *hc = hcs; hc; hc = hc->next) {
         u64 period = !irq_live(&hc->irq) ? 100 : hc->no_port_irq ? 250 : 1000;

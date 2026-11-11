@@ -1,5 +1,6 @@
 /* Halcyon OS - USB mass storage: Bulk-Only Transport + SCSI transparent */
 #include "usb.h"
+#include "core/thread.h"
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
@@ -34,6 +35,7 @@ struct msc {
     u32 tag;
     int nluns;
     int dead;
+    int refs;                   /* while disconnecting: LUNs not yet released */
     cbw_t *cbw;
     csw_t *csw;
     u8 *sense;
@@ -97,7 +99,17 @@ static int request_sense(msc_t *m, u8 lun, u8 *key, u8 *asc) {
     return 0;
 }
 
+static int rw_locked(blockdev_t *bd, u64 lba, u32 count, void *buf, int write);
+/* one block-layer request: holds usb_lock (the caller holds storage_lock) */
 static int rw(blockdev_t *bd, u64 lba, u32 count, void *buf, int write) {
+    msc_lun_t *l = bd->priv;
+    mutex_lock(&usb_lock);
+    int r = l->m->dead ? E_NODEV : rw_locked(bd, lba, count, buf, write);
+    mutex_unlock(&usb_lock);
+    return r;
+}
+
+static int rw_locked(blockdev_t *bd, u64 lba, u32 count, void *buf, int write) {
     msc_lun_t *l = bd->priv;
     msc_t *m = l->m;
     u32 ss = bd->sector_size;
@@ -238,7 +250,10 @@ static int lun_init(msc_t *m, int lun) {
     kprintf("usb-msc: %s: \"%s\" %lu x %u bytes (%lu MiB)%s\n", bd->name, bd->model, blocks, bsize,
             (blocks * bsize) >> 20, ro ? " write-protected" : "");
     kfree(buf);
-    if (blockdev_register(bd) == 0) l->registered = 1;
+    /* registration scans partitions and mounts volumes: that needs
+     * storage_lock, which must not be taken under usb_lock, so it runs later */
+    blockdev_register_later(bd);
+    l->registered = 1;
     return 0;
 }
 
@@ -268,15 +283,27 @@ static int msc_probe(usb_device_t *dev, const usb_interface_desc_t *intf, usb_bi
     return 0;
 }
 
+/* the msc_t lives until every registered LUN has been unregistered (the
+ * block layer may still hold its blockdev_t until its storage job runs) */
+static void msc_free(msc_t *m) {
+    dma_free(m->cbw); dma_free(m->csw); dma_free(m->sense);
+    kfree(m);
+}
+static void lun_released(void *ctx) {
+    msc_t *m = ctx;
+    if (--m->refs == 0) msc_free(m);
+}
+
 static void msc_disconnect(usb_device_t *dev, usb_binding_t *b) {
     msc_t *m = b->priv;
     if (!m) return;
     m->dead = 1;
-    for (int i = 0; i < m->nluns; i++)
-        if (m->luns[i].registered) blockdev_unregister(&m->luns[i].bd);
-    dma_free(m->cbw); dma_free(m->csw); dma_free(m->sense);
-    kfree(m);
+    m->dev = NULL;
     b->priv = NULL;
+    m->refs = 1;
+    for (int i = 0; i < m->nluns; i++)
+        if (m->luns[i].registered) { m->refs++; blockdev_unregister_later(&m->luns[i].bd, lun_released, m); }
+    lun_released(m);
 }
 
 const usb_driver_t usb_msc_driver = { "mass-storage", msc_probe, NULL, msc_disconnect };

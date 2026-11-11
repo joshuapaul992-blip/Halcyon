@@ -61,10 +61,12 @@ static const char *exc_names[] = {
 void panic_screen(const char *title, const char *detail);   /* gui/panic.c */
 
 void irq_dispatch(u64 vector);   /* core/irq.c */
+extern int g_panicking;          /* core/thread.c: locks and scheduling off */
 
 void isr_dispatch(struct regs *r) {
     if (r->vector >= 32) { irq_dispatch(r->vector); return; }
     __asm__ volatile("cli");
+    g_panicking = 1;
     u64 cr2;
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
     char buf[640];
@@ -91,8 +93,10 @@ void isr_dispatch(struct regs *r) {
     for (;;) __asm__ volatile("cli; hlt");
 }
 
+
 void panic(const char *fmt, ...) {
     __asm__ volatile("cli");
+    g_panicking = 1;
     char buf[512];
     va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);

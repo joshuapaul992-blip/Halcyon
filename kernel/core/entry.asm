@@ -102,6 +102,46 @@ isr_common:
     add rsp, 16
     iretq
 
+; ---- thread switch (core/thread.c) ----
+; void ctx_switch(u64 *save_rsp, u64 new_rsp)
+; Saves what a function call must preserve (callee-saved registers, RFLAGS,
+; MXCSR and the x87 control word) on the old stack, switches stacks, restores.
+global ctx_switch
+ctx_switch:
+    pushfq
+    push rbp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8
+    stmxcsr [rsp]
+    fnstcw [rsp + 4]
+    mov [rdi], rsp
+    mov rsp, rsi
+    ldmxcsr [rsp]
+    fldcw [rsp + 4]
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    popfq
+    ret
+
+; first instruction of a new thread (its initial frame returns here)
+extern thread_start
+global thread_entry
+thread_entry:
+    and rsp, -16
+    call thread_start
+.halt:
+    hlt
+    jmp .halt
+
 section .data
 global isr_table
 isr_table:

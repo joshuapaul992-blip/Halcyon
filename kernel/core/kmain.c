@@ -3,6 +3,8 @@
 #include "lib.h"
 #include "mm.h"
 #include "io.h"
+#include "thread.h"
+#include "fs/block.h"
 #include "drivers/pci.h"
 
 /* Subsystems are linked in as they are written; weak references let the
@@ -48,6 +50,7 @@ void kmain(struct bootinfo *bi) {
     if (acpi_init && !(bf & BOOTF_NO_ACPI)) acpi_init();
     time_init();
     if (irq_init) irq_init();
+    thread_init();
     if (hwreport_early) hwreport_early();
     if (splash_init) splash_init();
     PROGRESS(10, "Scanning PCI devices...");
@@ -64,6 +67,7 @@ void kmain(struct bootinfo *bi) {
     else kprintf("nvme: disabled by boot option\n");
     PROGRESS(55, "Starting USB controllers...");
     if (usb_init) usb_init();
+    storage_service();          /* register the USB disks found by usb_init */
     PROGRESS(100, "Starting the desktop...");
     if (hwreport_late) hwreport_late();
     if (bootlog_save) {

@@ -3,6 +3,7 @@
 #include "lib.h"
 #include "io.h"
 #include "irq.h"
+#include "thread.h"
 #include "drivers/acpi.h"
 #include "drivers/pci.h"
 
@@ -744,28 +745,35 @@ u64 idle_wakeups(void) { return wakeups; }
 void idle_wake_at(u64 ms) { if (ms < wake_deadline) wake_deadline = ms; }
 u64 idle_take_deadline(void) { u64 d = wake_deadline; wake_deadline = ~0ull; return d; }
 
-void idle_wait_tsc(u32 gen, u64 deadline) {
-    if (!idle_ok || !irq_enabled_now()) { cpu_relax(); return; }
-    irq_service();
-    __asm__ volatile("cli" ::: "memory");
-    if (dev_gen != gen || rdtsc() + tsc_khz() / 20 >= deadline) {   /* < 50 us left: not worth it */
-        __asm__ volatile("sti" ::: "memory");
+/* The scheduler found nothing to run: halt until an interrupt or the
+ * deadline. Called with interrupts disabled (after the scheduler checked every
+ * wait condition), returns with them disabled. Without a working timer
+ * interrupt it only pauses briefly, and the scheduler polls. */
+void cpu_idle_until(u64 deadline) {
+    if (!idle_ok || rdtsc() + tsc_khz() / 20 >= deadline) {   /* < 50 us left: not worth it */
+        __asm__ volatile("sti; pause; cli" ::: "memory");
         return;
     }
     timer_arm_tsc(deadline);
     u64 t0 = rdtsc();
-    __asm__ volatile("sti; hlt" ::: "memory");   /* sti takes effect after hlt: no lost wake-up */
-    __asm__ volatile("cli" ::: "memory");
+    __asm__ volatile("sti; hlt; cli" ::: "memory");   /* sti takes effect after hlt: no lost wake-up */
     idle_tsc += rdtsc() - t0;
     wakeups++;
     timer_disarm();
-    __asm__ volatile("sti" ::: "memory");
+}
+
+/* wait (letting other threads run) for a device interrupt after `gen` or the deadline */
+void idle_wait_tsc(u32 gen, u64 deadline) {
+    if (!irq_enabled_now()) { cpu_relax(); return; }    /* e.g. the crash screen: poll */
+    irq_service();
+    if (dev_gen != gen || rdtsc() >= deadline) return;
+    thread_wait_event(gen, deadline);
 }
 
 void idle_wait(u32 gen, u64 deadline_ms) { idle_wait_tsc(gen, time_ms_to_tsc(deadline_ms)); }
 
 void irq_wait(irq_handle_t *h, u32 gen, u64 deadline_ms) {
-    if (!irq_live(h)) { cpu_relax(); return; }
+    if (!irq_live(h)) { thread_yield(); return; }   /* polled: let other threads run */
     u64 cap = time_ms() + 10;                    /* bounded: a lost interrupt costs at most 10 ms */
     idle_wait(gen, deadline_ms < cap ? deadline_ms : cap);
 }

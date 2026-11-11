@@ -22,6 +22,7 @@
 #include "core/types.h"
 #include "core/lib.h"
 #include "core/mm.h"
+#include "core/thread.h"
 #include "fs/block.h"
 #include "fs/vfs.h"
 #include "fs/fat.h"
@@ -284,7 +285,17 @@ static void mount_children(blockdev_t *disk) {
         if (b->parent == disk) vfs_try_mount(b);
 }
 
+mutex_t storage_lock = MUTEX_INIT("storage");
+
+static int blockdev_register_locked(blockdev_t *bd);
 int blockdev_register(blockdev_t *bd) {
+    mutex_lock(&storage_lock);
+    int r = blockdev_register_locked(bd);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+static int blockdev_register_locked(blockdev_t *bd) {
     if (!bd || !bd->read || bd->sector_size < 512 || bd->sector_size > 65536 || !bd->sector_count)
         return E_INVAL;
     for (blockdev_t *b = g_devs; b; b = b->next) if (b == bd) return E_EXIST;
@@ -361,7 +372,14 @@ int blockdev_register(blockdev_t *bd) {
     return 0;
 }
 
+static void blockdev_unregister_locked(blockdev_t *bd);
 void blockdev_unregister(blockdev_t *bd) {
+    mutex_lock(&storage_lock);
+    blockdev_unregister_locked(bd);
+    mutex_unlock(&storage_lock);
+}
+
+static void blockdev_unregister_locked(blockdev_t *bd) {
     if (!bd) return;
     int found = 0;
     for (blockdev_t *b = g_devs; b; b = b->next) if (b == bd) found = 1;
@@ -403,4 +421,66 @@ int blockdev_set_mbr_type(blockdev_t *p, u8 type) {
     }
     kfree(buf);
     return r;
+}
+
+/* ---- storage jobs ---- */
+
+typedef struct sjob {
+    int unreg;
+    blockdev_t *bd;
+    void (*release)(void *ctx);
+    void *ctx;
+    struct sjob *next;
+} sjob_t;
+static sjob_t *jobs;
+
+static void job_add(sjob_t *j) {
+    sjob_t **pp = &jobs;
+    while (*pp) pp = &(*pp)->next;
+    j->next = NULL;
+    *pp = j;
+}
+
+void blockdev_register_later(blockdev_t *bd) {
+    sjob_t *j = kzalloc(sizeof *j);
+    if (!j) return;
+    j->bd = bd;
+    job_add(j);
+}
+
+void blockdev_unregister_later(blockdev_t *bd, void (*release)(void *), void *ctx) {
+    bd->present = 0;                      /* I/O fails from now on */
+    /* never registered: drop the pending registration, release now */
+    for (sjob_t **pp = &jobs; *pp; pp = &(*pp)->next) {
+        sjob_t *j = *pp;
+        if (!j->unreg && j->bd == bd) {
+            *pp = j->next;
+            kfree(j);
+            if (release) release(ctx);
+            return;
+        }
+    }
+    sjob_t *j = kzalloc(sizeof *j);
+    if (!j) return;                       /* out of memory: leak rather than free in use */
+    j->unreg = 1; j->bd = bd; j->release = release; j->ctx = ctx;
+    job_add(j);
+}
+
+int storage_service(void) {
+    if (!jobs || !mutex_trylock(&storage_lock)) return 0;
+    int n = 0;
+    while (jobs) {
+        sjob_t *j = jobs;
+        jobs = j->next;
+        if (j->unreg) {
+            blockdev_unregister_locked(j->bd);
+            if (j->release) j->release(j->ctx);
+        } else {
+            blockdev_register_locked(j->bd);
+        }
+        kfree(j);
+        n++;
+    }
+    mutex_unlock(&storage_lock);
+    return n;
 }
