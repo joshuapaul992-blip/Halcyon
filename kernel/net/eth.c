@@ -143,7 +143,6 @@ void iface_set_addr(iface_t *ifc, u32 addr, u32 mask, u32 gw, const char *how) {
     ifc->conflict = 0;
     if (!addr) ifc->ndns = 0;
     route_rebuild();
-    if (newaddr) arp_flush(ifc);
     if (addr && newaddr) arp_announce(ifc);
     if (!changed && addr) return;
     if (!addr) { kprintf("net: %s: no address%s%s\n", ifc->name, how ? " " : "", how ? how : ""); return; }
@@ -444,7 +443,9 @@ u64 arp_timer(u64 now) {
                 }
                 if (e->next_try < next) next = e->next_try;
             } else if (e->state == ARP_REACHABLE) {
-                if (now - e->used > ARP_UNUSED_MS && now - e->confirmed > ARP_REACHABLE_MS) ent_free(ifc, e, 0);
+                u64 gone = MAX(e->used + ARP_UNUSED_MS, e->confirmed + ARP_REACHABLE_MS) + 1;
+                if (now >= gone) { ent_free(ifc, e, 0); continue; }
+                if (gone < next) next = gone;
             }
         }
     }

@@ -23,6 +23,14 @@
 #   build/hosttest/fuzz_replay [-v] FILE|DIR...
 #                                replay single inputs (gcc + ASan/UBSan)
 #
+# Network stack (netsim.c, net_shim.c; see netsim.c): kernel/net/ built as a
+# shared object, one copy per simulated computer, on a simulated Ethernet:
+#   make -C tests/host net       the simulator's tests (NETARGS="-v tcp" ...)
+#   make -C tests/host fuzz-net-run FUZZ_TIME=600
+#                                libFuzzer on the receive path (fuzz_net.c);
+#                                seeds are frames the simulator sent
+#   make -C tests/host fuzz-net-regress
+#
 # Needs: gcc, mkfs.fat, fsck.fat, mtools, exfatprogs (mkfs.exfat, fsck.exfat),
 # sfdisk, truncate, dd, gzip, python3, xorriso;
 # clang with the libFuzzer runtime (libclang-rt-18-dev) for fuzz / fuzz-run.
@@ -46,7 +54,47 @@ SEEDS   := $(OUT)/fuzz_seeds
 
 KBD_SRCS := kbdtest.c $(ROOT)/kernel/drivers/keymap.c $(ROOT)/kernel/drivers/keylayouts.c $(ROOT)/kernel/core/unicode.c
 
-all: $(OUT)/fstest $(OUT)/fuzz_replay $(OUT)/kbdtest $(OUT)/hidtest $(OUT)/displaytest
+all: $(OUT)/fstest $(OUT)/fuzz_replay $(OUT)/kbdtest $(OUT)/hidtest $(OUT)/displaytest $(OUT)/netsim $(OUT)/netstack.so
+
+NETSRCS := $(addprefix $(ROOT)/kernel/net/,socket.c local.c inet.c eth.c ip.c udp.c tcp.c dhcp.c dns.c)
+NETHDRS := $(wildcard $(ROOT)/kernel/net/*.h) $(wildcard $(ROOT)/kernel/core/*.h) netsim.h
+
+$(OUT)/netstack.so: $(NETSRCS) net_shim.c $(NETHDRS) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) -fPIC -shared -fvisibility=hidden -Wl,-Bsymbolic $(NETSRCS) net_shim.c -o $@
+
+$(OUT)/netsim: netsim.c netsim.h $(ROOT)/kernel/net/sockabi.h Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) netsim.c -o $@ -ldl
+
+# (the cached socket buffers of every unloaded copy would count as leaks:
+# netsim checks each stack's memory itself)
+net: $(OUT)/netsim $(OUT)/netstack.so
+	ASAN_OPTIONS=detect_leaks=0 $(OUT)/netsim $(OUT)/netstack.so $(NETARGS)
+
+FUZZNET_SRCS := $(NETSRCS) net_shim.c fuzz_net.c
+$(OUT)/fuzz_net: $(FUZZNET_SRCS) $(NETHDRS) Makefile
+	@mkdir -p $(OUT)
+	clang $(FUZZ_CFLAGS) $(FUZZNET_SRCS) -o $@
+
+$(OUT)/fuzz_net_replay: $(FUZZNET_SRCS) $(NETHDRS) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) $(FUZZNET_SRCS) -o $@
+
+NETSEEDS := $(OUT)/fuzz_net_seeds
+$(NETSEEDS)/.stamp: $(OUT)/netsim $(OUT)/netstack.so
+	@rm -rf $(NETSEEDS)
+	ASAN_OPTIONS=detect_leaks=0 $(OUT)/netsim $(OUT)/netstack.so -seeds $(NETSEEDS) arp dhcp dns udp tcp rst >/dev/null
+	@touch $@
+
+fuzz-net-run: $(OUT)/fuzz_net $(NETSEEDS)/.stamp
+	@mkdir -p $(OUT)/fuzz_net_corpus $(OUT)/fuzz_net_crashes
+	cd $(OUT)/fuzz_net_crashes && $(abspath $(OUT))/fuzz_net $(abspath $(OUT))/fuzz_net_corpus $(abspath $(NETSEEDS)) \
+	    -max_len=20000 -timeout=20 -rss_limit_mb=2048 -max_total_time=$(FUZZ_TIME) -fork=$(FUZZ_JOBS) \
+	    -ignore_crashes=1 -ignore_timeouts=1 -ignore_ooms=1 -print_final_stats=1 $(FUZZ_ARGS)
+
+fuzz-net-regress: $(OUT)/fuzz_net_replay $(NETSEEDS)/.stamp
+	$(OUT)/fuzz_net_replay $(NETSEEDS) $(wildcard fuzz_net_regress)
 
 $(OUT)/kbdtest: $(KBD_SRCS) $(ROOT)/kernel/drivers/keymap.h $(ROOT)/kernel/drivers/input.h Makefile
 	@mkdir -p $(OUT)
@@ -111,4 +159,4 @@ fuzz-run: $(OUT)/fuzz_fs seeds
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all kbd hid test seeds fuzz fuzz-run fuzz-regress clean
+.PHONY: all kbd hid test seeds fuzz fuzz-run fuzz-regress net fuzz-net-run fuzz-net-regress clean

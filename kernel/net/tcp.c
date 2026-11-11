@@ -99,10 +99,10 @@ struct tcb {
     u8 nrexmt, dupacks, in_rec, persist_n, ack_now, delack_segs, chal_n, force;
     u32 recover, cwnd, ssthresh, cwnd_acc;
     u64 t_rexmt, t_persist, t_delack, t_keep, t_close;
-    u64 last_rx, last_tx, chal_t;
+    u64 last_rx, last_tx, chal_t, oow_t;
     int soft_err;                   /* last ICMP error (reported if the connection times out) */
     int err;                        /* why it ended (E_CONNRESET, E_TIMEOUT...) */
-    u8 err_rx_told, err_tx_told;
+    u8 err_told;                    /* err was reported (by recv or send): later calls give 0 / E_PIPE */
     /* listening */
     int backlog, synq_n, acq_n;
     tcb_t *synq, *acq, *acq_tail;
@@ -347,7 +347,9 @@ static void send_rst_for(const ip_meta_t *m, const u8 *th, u32 dlen) {
     ip_output(buf, HDRROOM, TCP_HDR, m->dst, m->src, 6, 0, 0, IPF_DF, NULL);
 }
 
-static void send_ack(tcb_t *t) { seg_send(t, t->snd_nxt, 0, TH_ACK); }
+/* a pure ACK (or RST) carries snd_max, not a snd_nxt that a timeout pulled
+ * back below what the peer has (it would find it out of the window) */
+static void send_ack(tcb_t *t) { seg_send(t, t->snd_max, 0, TH_ACK); }
 
 /* RFC 5961: at most a few challenge ACKs per second per connection */
 static void challenge_ack(tcb_t *t) {
@@ -407,6 +409,7 @@ static void tcp_output(tcb_t *t) {
         if (fin) flags |= TH_FIN;
         if (len && len == avail) flags |= TH_PSH;
         u32 seq = t->snd_nxt;
+        if (!len && !(flags & (TH_SYN | TH_FIN))) seq = t->snd_max;     /* (a pure ACK: see send_ack) */
         seg_send(t, seq, len, flags);
         u32 adv = len + !!(flags & TH_SYN) + !!(flags & TH_FIN);
         if (flags & TH_FIN) t->fin_sent = 1;
@@ -474,7 +477,7 @@ static int tcp_close_conn(tcb_t *t, int err) {
 
 static int tcp_reset(tcb_t *t, int err) {
     if (t->state != TCPS_SYN_SENT && t->state != TCPS_CLOSED && t->state != TCPS_LISTEN && t->state != TCPS_TIME_WAIT)
-        seg_send(t, t->snd_nxt, 0, TH_RST | TH_ACK);
+        seg_send(t, t->snd_max, 0, TH_RST | TH_ACK);
     return tcp_close_conn(t, err);
 }
 
@@ -790,7 +793,8 @@ void tcp_input(const ip_meta_t *m, const u8 *p, u32 len) {
     u32 rwnd = SEQ_GT(t->rcv_adv, t->rcv_nxt) ? t->rcv_adv - t->rcv_nxt : 0;
     u32 slen = dlen + !!(flags & TH_SYN) + !!(flags & TH_FIN);
     int ok;
-    if (!slen) ok = rwnd ? SEQ_GEQ(seq, t->rcv_nxt) && SEQ_LT(seq, t->rcv_nxt + rwnd) : seq == t->rcv_nxt;
+    /* (an empty segment may sit at the right edge, as BSD and Linux accept it) */
+    if (!slen) ok = SEQ_GEQ(seq, t->rcv_nxt) && SEQ_LEQ(seq, t->rcv_nxt + rwnd);
     else if (!rwnd) ok = 0;
     else ok = (SEQ_GEQ(seq, t->rcv_nxt) && SEQ_LT(seq, t->rcv_nxt + rwnd)) ||
               (SEQ_GEQ(seq + slen - 1, t->rcv_nxt) && SEQ_LT(seq + slen - 1, t->rcv_nxt + rwnd));
@@ -798,6 +802,8 @@ void tcp_input(const ip_meta_t *m, const u8 *p, u32 len) {
         if (flags & TH_RST) return;
         if (t->state == TCPS_TIME_WAIT && (flags & TH_FIN)) tset(&t->t_close, now + TCP_TIMEWAIT_MS);
         if (dlen) nstat.tcp_dupack++;
+        else if (now - t->oow_t < 200) return;     /* empty and outside the window: answer at most 5 a second */
+        if (!dlen) t->oow_t = now;
         send_ack(t);
         return;
     }
@@ -862,7 +868,7 @@ void tcp_input(const ip_meta_t *m, const u8 *p, u32 len) {
                 start_rexmt(t);
             }
         } else if (t->cwnd < t->ssthresh) {
-            t->cwnd += MIN(acked, (u32)t->mss);
+            t->cwnd += MIN(acked, 2u * t->mss);         /* RFC 3465, L = 2 (ACKs come every second segment) */
         } else {
             t->cwnd_acc += acked;
             if (t->cwnd_acc >= t->cwnd) { t->cwnd_acc -= t->cwnd; t->cwnd += t->mss; }
@@ -1095,7 +1101,7 @@ static void t_release(sock_t *s) {
     tcb_t *t = T(s);
     if (!t) return;
     if (t->state == TCPS_LISTEN) {
-        while (t->synq) { tcb_t *e = t->synq; seg_send(e, e->snd_nxt, 0, TH_RST | TH_ACK); tcp_close_conn(e, 0); }
+        while (t->synq) { tcb_t *e = t->synq; seg_send(e, e->snd_max, 0, TH_RST | TH_ACK); tcp_close_conn(e, 0); }
         while (t->acq) {                            /* never accepted: reset */
             tcb_t *e = t->acq;
             t->acq = e->qnext;
@@ -1122,14 +1128,14 @@ static void t_release(sock_t *s) {
     }
     int abort = t->rq.bytes || t->linger0 || t->unaccepted || norphan >= TCP_ORPHAN_MAX || t->inq == 2;
     if (abort) {
-        seg_send(t, t->snd_nxt, 0, TH_RST | TH_ACK);
+        seg_send(t, t->snd_max, 0, TH_RST | TH_ACK);
         t->s = NULL; s->priv = NULL;
         if (t->inq) { tcp_close_conn(t, 0); return; }   /* (frees it: no socket) */
         tcp_free(t);
         return;
     }
     if (detach(t)) {
-        seg_send(t, t->snd_nxt, 0, TH_RST | TH_ACK);
+        seg_send(t, t->snd_max, 0, TH_RST | TH_ACK);
         t->s = NULL; s->priv = NULL;
         tcp_free(t);
         return;
@@ -1218,7 +1224,7 @@ static int t_connect(sock_t *s, const struct sockaddr *a, u32 len) {
     t->laddr = laddr;
     t->raddr = addr;
     t->rport = port;
-    t->err = 0; t->err_rx_told = t->err_tx_told = 0; t->soft_err = 0;
+    t->err = 0; t->err_told = 0; t->soft_err = 0;
     t->fin_rcvd = t->fin_sent = t->rd_shut = t->wr_shut = 0;
     t->peer_ws = 0;
     t->adv_mss = mss_for(addr);
@@ -1244,7 +1250,7 @@ static int t_connect(sock_t *s, const struct sockaddr *a, u32 len) {
 static long t_send(sock_t *s, uio_t *u, int flags, const struct sockaddr *to, u32 tolen) {
     tcb_t *t = T(s);
     if (t->err) {
-        if (!t->err_tx_told) { t->err_tx_told = 1; return t->err == E_TIMEOUT ? E_TIMEOUT : E_CONNRESET; }
+        if (!t->err_told) { t->err_told = 1; return t->err; }
         return E_PIPE;
     }
     switch (t->state) {
@@ -1289,7 +1295,7 @@ static long t_recv(sock_t *s, uio_t *u, int flags, struct sockaddr *from, u32 *f
     }
     if (t->fin_rcvd || t->rd_shut) return 0;
     if (t->err) {
-        if (!t->err_rx_told) { t->err_rx_told = 1; return t->err; }
+        if (!t->err_told) { t->err_told = 1; return t->err; }
         return 0;
     }
     switch (t->state) {
