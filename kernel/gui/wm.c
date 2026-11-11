@@ -1,5 +1,6 @@
 /* Halcyon OS - window manager: compositor, input routing, main loop */
 #include "wm.h"
+#include "core/irq.h"
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
@@ -847,27 +848,37 @@ static void compose(rect_t r) {
     draw_cursor(&g);
 }
 
-static void render(void) {
+static int render(void) {
     /* repaint clients that asked for it even if outside dirty regions */
     for (window_t *w = windows; w; w = w->next)
         if (w->needs_paint && w->state != WS_MINIMIZED) wm_invalidate_rect(wm_client_rect(w));
-    if (!ndirty) return;
+    if (!ndirty) return 0;
     rect_t list[MAX_DIRTY];
     int n = ndirty;
     memcpy(list, dirty, sizeof(rect_t) * n);
     ndirty = 0;
     for (int i = 0; i < n; i++) compose(list[i]);
     for (int i = 0; i < n; i++) screen_present(list[i]);
+    return 1;
 }
 
 /* ---------------- main loop ---------------- */
 static u64 last_tick;
 
+/* One iteration: poll devices, handle input, run ticks, redraw. When none of
+ * that found anything to do, the CPU halts until the next interrupt or the
+ * earliest deadline a device or window asked for. */
 void gui_step(void) {
+    u32 gen = irq_generation();
+    irq_service();
     input_poll_devices();
+    int busy = input_pending();
     handle_input();
     u64 now = time_ms();
+    int ticking = 0;
+    for (window_t *w = windows; w; w = w->next) if (w->on_tick) { ticking = 1; break; }
     if (now - last_tick >= 100) {
+        busy = 1;
         last_tick = now;
         for (window_t *w = windows; w; w = w->next) {
             if (w->on_tick) {
@@ -878,7 +889,13 @@ void gui_step(void) {
         }
         shell_tick();
     }
-    render();
+    if (render()) busy = 1;
+    u64 deadline = idle_take_deadline();
+    if (busy) return;
+    /* windows with on_tick want ~10 Hz; the shell (clock, balloons) 1 Hz */
+    u64 tick = last_tick + (ticking ? 100 : 1000);
+    if (tick < deadline) deadline = tick;
+    idle_wait(gen, deadline);
 }
 
 void gui_run_until(volatile int *flag) {

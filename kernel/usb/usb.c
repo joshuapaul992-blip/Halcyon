@@ -52,6 +52,16 @@ const char *usb_class_name(u8 c) {
 }
 
 /* ---------- controllers ---------- */
+/* HC interrupt setup: MSI-X/MSI or INTx (ack is required for INTx). The HC
+ * driver then enables its interrupt sources. Returns the irq kind. */
+int usb_hc_irq(usb_hc_t *hc, int (*ack)(void *ctx), void *ctx) {
+    hc->irq.name = hc->desc;
+    hc->irq.pci = hc->pci;
+    hc->irq.ack = ack;
+    hc->irq.ctx = ctx;
+    return irq_attach(&hc->irq);
+}
+
 void usb_register_hc(usb_hc_t *hc) {
     hc->id = next_hc_id++;
     memset(hc->addr_used, 0, sizeof hc->addr_used);
@@ -89,12 +99,17 @@ void usb_init(void) {
     }
 }
 
-static u64 last_hc_poll;
+/* Root hub service. A HC whose interrupts work is serviced when it
+ * interrupts (plus a slow safety scan); others every 20 ms. */
 void usb_poll(void) {
     u64 now = time_ms();
-    if (now - last_hc_poll >= 20 || last_hc_poll == 0) {
-        last_hc_poll = now;
-        for (usb_hc_t *hc = hcs; hc; hc = hc->next) hc->ops->poll(hc);
+    for (usb_hc_t *hc = hcs; hc; hc = hc->next) {
+        u64 period = !irq_live(&hc->irq) ? 20 : hc->no_port_irq ? 250 : 1000;
+        if (irq_fired(&hc->irq) || now - hc->last_poll >= period || !hc->last_poll) {
+            hc->last_poll = now;
+            hc->ops->poll(hc);
+        }
+        idle_wake_at(hc->last_poll + period);
     }
     for (usb_device_t *d = devices; d; d = d->next) {
         if (!d->alive) continue;
@@ -137,10 +152,20 @@ int usb_clear_halt(usb_device_t *dev, usb_endpoint_t *ep) {
 }
 
 int usb_intr_start(usb_device_t *dev, usb_endpoint_t *ep, void *buf, int len) {
-    return dev->hc->ops->intr_start(dev->hc, dev, ep, buf, len);
+    int r = dev->hc->ops->intr_start(dev->hc, dev, ep, buf, len);
+    if (r >= 0 && !irq_live(&dev->hc->irq)) idle_wake_at(time_ms() + 8);
+    return r;
 }
 int usb_intr_poll(usb_device_t *dev, usb_endpoint_t *ep) {
-    return dev->hc->ops->intr_poll(dev->hc, dev, ep);
+    usb_hc_t *hc = dev->hc;
+    int r = hc->ops->intr_poll(hc, dev, ep);
+    if (r == E_AGAIN) {
+        /* without interrupts, come back for it soon (HID: ~125 Hz) */
+        if (!irq_live(&hc->irq)) idle_wake_at(time_ms() + 8);
+    } else {
+        irq_note_work(&hc->irq);
+    }
+    return r;
 }
 void usb_intr_cancel(usb_device_t *dev, usb_endpoint_t *ep) {
     if (dev->hc->ops->intr_cancel) dev->hc->ops->intr_cancel(dev->hc, dev, ep);

@@ -412,8 +412,17 @@ static void handle_event(xhci_t *x, const trb_t *ev) {
     }
 }
 
+#define IMAN_IP 1u
+#define IMAN_IE 2u
 static void process_events(xhci_t *x) {
     int n = 0;
+    /* interrupt pending flag: MSI clears it itself (cleared again here in
+     * case it did not, before draining so a later event interrupts again);
+     * for INTx the acknowledge in irq_service() does it */
+    if (x->hc.irq.kind == IRQ_MSI || x->hc.irq.kind == IRQ_MSIX) {
+        u32 im = ir_read(x, IR_IMAN);
+        if (im & IMAN_IP) ir_write(x, IR_IMAN, IMAN_IE | IMAN_IP);
+    }
     for (;;) {
         trb_t *ev = &x->evt[x->evt_deq];
         rmb();
@@ -473,6 +482,7 @@ static int command(xhci_t *x, u32 p0, u32 p1, u32 control, int timeout_ms, u8 *s
     doorbell(x, 0, 0);
     u64 deadline = time_ms() + (u64)timeout_ms, next_check = time_ms() + 10;
     while (!x->cmd_done) {
+        u32 gen = irq_generation();
         process_events(x);
         if (x->cmd_done) break;
         u64 now = time_ms();
@@ -486,7 +496,7 @@ static int command(xhci_t *x, u32 p0, u32 p1, u32 control, int timeout_ms, u8 *s
             x->cmd_ptr = 0;
             return cc == CC_SUCCESS ? CC_SUCCESS : CC_INVALID;
         }
-        cpu_relax();
+        irq_wait(&x->hc.irq, gen, deadline);
     }
     x->cmd_ptr = 0;
     if (slot_out) *slot_out = x->cmd_slot;
@@ -596,6 +606,7 @@ static int wait_td(xhci_t *x, xslot_t *s, xep_t *e, int timeout_ms) {
     u64 start = time_ms();
     u64 deadline = start + (u64)(timeout_ms > 0 ? timeout_ms : 1), next_check = start + 10;
     for (;;) {
+        u32 gen = irq_generation();
         process_events(x);
         if (e->done) return 0;
         u64 now = time_ms();
@@ -612,7 +623,7 @@ static int wait_td(xhci_t *x, xslot_t *s, xep_t *e, int timeout_ms) {
             process_events(x);
             return e->done ? 0 : E_TIMEOUT;
         }
-        cpu_relax();
+        irq_wait(&x->hc.irq, gen, deadline);
     }
 }
 
@@ -1192,6 +1203,18 @@ static void port_service(xhci_t *x, int p) {
     port_attach(x, p);
 }
 
+/* INTx acknowledge (main loop): event interrupt + interrupter pending */
+static int xhci_ack(void *ctx) {
+    xhci_t *x = ctx;
+    if (x->dead) return 0;
+    u32 sts = op_read(x, OP_USBSTS), im = ir_read(x, IR_IMAN);
+    if (sts == 0xFFFFFFFF) return 0;
+    int asserted = (sts & STS_EINT) || (im & IMAN_IP);
+    if (sts & STS_EINT) op_write(x, OP_USBSTS, STS_EINT);
+    if (im & IMAN_IP) ir_write(x, IR_IMAN, IMAN_IE | IMAN_IP);
+    return asserted;
+}
+
 static void xhci_poll(usb_hc_t *hc) {
     xhci_t *x = hc->priv;
     if (x->in_poll) return;
@@ -1424,6 +1447,18 @@ static void xhci_setup(pci_dev_t *pd) {
     x->hc.flags = USB_HC_ASSIGNS_ADDRESS;
     x->hc.nports = (u8)x->nports;
     pd->driver = "xhci";
+    /* interrupter 0: MSI-X / MSI, else INTx; ~40 us moderation like Linux */
+    if (usb_hc_irq(&x->hc, xhci_ack, x) != IRQ_NONE) {
+        ir_write(x, IR_IMOD, 160);
+        ir_write(x, IR_IMAN, IMAN_IE | IMAN_IP);
+        op_write(x, OP_USBSTS, STS_EINT);
+        op_write(x, OP_USBCMD, op_read(x, OP_USBCMD) | CMD_INTE);
+        /* a No-Op completion makes the first interrupt (and teaches INTx its route) */
+        command(x, 0, 0, TRB_TYPE(TT_NOOP_CMD), 100, NULL);
+        u64 end = time_ms() + 20;
+        while (!irq_live(&x->hc.irq) && time_ms() < end) irq_service();
+        if (!irq_live(&x->hc.irq)) kprintf("xhci: no interrupt from the controller yet, polling it\n");
+    }
     usb_register_hc(&x->hc);
 }
 

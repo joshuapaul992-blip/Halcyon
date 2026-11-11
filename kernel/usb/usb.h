@@ -19,6 +19,7 @@
 #ifndef USB_H
 #define USB_H
 #include "core/types.h"
+#include "core/irq.h"
 #include "drivers/pci.h"
 
 /* ---------- standard definitions ---------- */
@@ -237,6 +238,11 @@ struct usb_hc {
     u8 nports;                 /* root hub ports */
     u8 id;
     u8 addr_used[128];         /* address allocator (core) */
+    /* interrupts: the HC driver fills in irq.name/pci/ack and calls
+     * irq_attach(); until irq_live() the core polls the HC */
+    irq_handle_t irq;
+    u8 no_port_irq;            /* root port changes are not signalled (UHCI) */
+    u64 last_poll;             /* core */
     usb_hc_t *next;
 };
 
@@ -254,6 +260,7 @@ void usb_init(void);
 void usb_poll(void);
 
 void usb_register_hc(usb_hc_t *hc);
+int  usb_hc_irq(usb_hc_t *hc, int (*ack)(void *ctx), void *ctx);
 
 /* Called by HC drivers (root ports) and the hub driver after a port reset
  * completed with a device present. Enumerates and binds drivers.

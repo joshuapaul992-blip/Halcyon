@@ -37,7 +37,10 @@
 #define BOOTF_NO_AHCI   0x0010   /* don't start SATA controllers */
 #define BOOTF_SAFE_VIDEO 0x0020  /* loader picked a conservative 800x600 mode */
 #define BOOTF_NO_ACPI   0x0040   /* don't parse ACPI tables */
-#define BOOTF_SAFE_MODE (BOOTF_VERBOSE | BOOTF_NO_XHCI | BOOTF_NO_EHCI | BOOTF_NO_USB11 | BOOTF_NO_AHCI | BOOTF_NO_ACPI)
+#define BOOTF_NO_IRQ    0x0080   /* no interrupts: everything polled, no CPU idle */
+#define BOOTF_NO_MSI    0x0100   /* PCI devices use INTx (or polling), never MSI */
+#define BOOTF_NO_IOAPIC 0x0200   /* legacy 8259 PICs instead of the I/O APIC */
+#define BOOTF_SAFE_MODE (BOOTF_VERBOSE | BOOTF_NO_XHCI | BOOTF_NO_EHCI | BOOTF_NO_USB11 | BOOTF_NO_AHCI | BOOTF_NO_ACPI | BOOTF_NO_IRQ)
 
 struct kernel_header {
     uint32_t magic;       /* KERNEL_MAGIC */

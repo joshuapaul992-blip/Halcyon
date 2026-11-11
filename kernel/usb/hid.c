@@ -1,6 +1,7 @@
 /* Halcyon OS - USB HID: keyboards (boot protocol) and mice/tablets
  * (report descriptor parsing with boot-protocol fallback) */
 #include "usb.h"
+#include "core/irq.h"
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
@@ -235,6 +236,7 @@ static void hid_poll(usb_device_t *dev, usb_binding_t *b) {
             input_key(h->repeat_key, 1);
             h->repeat_at = time_ms() + 33;
         }
+        if (h->repeat_key) idle_wake_at(h->repeat_at);
     }
     if (!h->pending) {
         if (usb_intr_start(dev, h->ep, h->buf, MIN((int)h->ep->mps, 64)) >= 0) h->pending = 1;

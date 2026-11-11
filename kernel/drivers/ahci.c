@@ -14,6 +14,7 @@
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/io.h"
+#include "core/irq.h"
 
 /* ---------------- HBA registers ---------------- */
 #define HBA_CAP     0x00
@@ -121,11 +122,15 @@ typedef struct {
     ahci_prd_t prdt[AHCI_PRDT_ENTRIES];
 } PACKED ahci_cmd_tbl_t;
 
+struct ahci_port;
 typedef struct ahci_hba {
     pci_dev_t *pci;
     volatile u8 *abar;
     u32 cap, cap2, pi, vs;
     int nports;
+    struct ahci_port *ports[32];
+    irq_handle_t irq;
+    char irq_name[24];
 } ahci_hba_t;
 
 typedef struct ahci_port {
@@ -140,6 +145,7 @@ typedef struct ahci_port {
     u8 flush_cmd;               /* 0 = no flush needed/supported */
     u8 busy;
     u8 in_reset;                /* COMRESET issued during bring-up */
+    u32 is_acc;                 /* PxIS bits cleared by the INTx acknowledge */
     u32 sector_size;
     u64 sectors;
     blockdev_t bd;
@@ -340,13 +346,16 @@ static int port_exec(ahci_port_t *p, u8 cmd, u64 lba, u32 count, void *buf, u32 
     if (!(px_rd(p, PX_CMD) & CMD_ST)) port_start_cmd(p);
 
     px_wr(p, PX_IS, 0xFFFFFFFF);
+    hba_wr(p->hba, HBA_IS, 1u << p->index);
+    p->is_acc = 0;
     px_wr(p, PX_CI, 1);
 
     u64 deadline = time_ms() + timeout_ms, last = 0;
     u32 is = 0;
     int timed_out = 0;
     for (;;) {
-        is = px_rd(p, PX_IS);
+        u32 gen = irq_generation();
+        is = px_rd(p, PX_IS) | p->is_acc;
         if (is & IS_ERR_MASK) break;
         if (!(px_rd(p, PX_CI) & 1)) break;
         if (time_ms() > deadline) {
@@ -355,11 +364,14 @@ static int port_exec(ahci_port_t *p, u8 cmd, u64 lba, u32 count, void *buf, u32 
             break;
         }
         idle_poll(&last);
-        cpu_relax();
+        irq_wait(&p->hba->irq, gen, deadline);
     }
     rmb();
+    /* INTx: let irq_service() see (and learn) the interrupt before the
+     * status that drives it is cleared below */
+    if (p->hba->irq.kind == IRQ_INTX) irq_service();
     u32 tfd = px_rd(p, PX_TFD);
-    is = px_rd(p, PX_IS);
+    is = px_rd(p, PX_IS) | p->is_acc;
     if (timed_out || (is & IS_ERR_MASK) || (tfd & (TFD_ERR | TFD_BSY | TFD_DRQ))) {
         kprintf("ahci: %s: command %02x lba %lu count %u %s: IS %08x TFD %08x "
                 "(status %02x error %02x) SERR %08x CI %08x\n",
@@ -370,6 +382,8 @@ static int port_exec(ahci_port_t *p, u8 cmd, u64 lba, u32 count, void *buf, u32 
         return timed_out ? E_TIMEOUT : E_IO;
     }
     px_wr(p, PX_IS, is);
+    hba_wr(p->hba, HBA_IS, 1u << p->index);    /* re-arms MSI */
+    irq_note_work(&p->hba->irq);
     return 0;
 }
 
@@ -506,6 +520,7 @@ static int port_identify(ahci_port_t *p) {
 
 /* ---------------- port bring-up ---------------- */
 static void port_free(ahci_port_t *p) {
+    if (p->hba->ports[p->index] == p) p->hba->ports[p->index] = NULL;
     dma_free(p->clb); dma_free(p->fis); dma_free(p->tbl); dma_free(p->bounce);
     kfree(p);
 }
@@ -555,7 +570,7 @@ static ahci_port_t *port_prepare(ahci_hba_t *hba, int index) {
     px_wr(p, PX_FB, (u32)fb);
     px_wr(p, PX_FBU, (u32)(fb >> 32));
 
-    px_wr(p, PX_IE, 0);                         /* polled */
+    px_wr(p, PX_IE, 0);                         /* enabled once the HBA has its interrupt */
     port_clear_errors(p);
 
     /* power on / spin up (no-ops when CPD / SSS are not supported) */
@@ -671,6 +686,49 @@ static int hba_reset(ahci_hba_t *h) {
     return 0;
 }
 
+/* INTx acknowledge: clear PxIS of every interrupting port (remembering the
+ * bits for port_exec), then IS */
+#define AHCI_PORT_IE ((1u << 30) | (1u << 29) | (1u << 28) | (1u << 27) | (1u << 26) | (1u << 24) | \
+                      (1u << 5) | (1u << 3) | (1u << 2) | (1u << 1) | (1u << 0))
+static int ahci_ack(void *ctx) {
+    ahci_hba_t *h = ctx;
+    u32 is = hba_rd(h, HBA_IS);
+    if (!is || is == 0xFFFFFFFF) return 0;
+    for (int i = 0; i < 32; i++) {
+        if (!(is & (1u << i))) continue;
+        volatile u8 *regs = h->abar + PORT_BASE(i);
+        u32 pis = mmio_read32(regs + PX_IS);
+        if (h->ports[i]) h->ports[i]->is_acc |= pis;
+        mmio_write32(regs + PX_IS, pis);
+    }
+    hba_wr(h, HBA_IS, is);
+    return 1;
+}
+
+static void hba_irq_setup(ahci_hba_t *h) {
+    pci_dev_t *d = h->pci;
+    snprintf(h->irq_name, sizeof h->irq_name, "AHCI %02x:%02x.%x", d->bus, d->dev, d->func);
+    h->irq.name = h->irq_name;
+    h->irq.pci = d;
+    h->irq.ack = ahci_ack;
+    h->irq.ctx = h;
+    if (irq_attach(&h->irq) == IRQ_NONE) return;
+    for (int i = 0; i < 32; i++)
+        if (h->ports[i]) px_wr(h->ports[i], PX_IE, AHCI_PORT_IE);
+    hba_wr(h, HBA_IS, 0xFFFFFFFF);
+    hba_wr(h, HBA_GHC, hba_rd(h, HBA_GHC) | GHC_IE);
+    /* one harmless non-data command (CHECK POWER MODE) produces the first
+     * interrupt, which proves MSI or teaches the INTx route */
+    for (int i = 0; i < 32; i++) {
+        if (!h->ports[i]) continue;
+        port_exec(h->ports[i], 0xE5, 0, 0, NULL, 0, 0, 1000);
+        break;
+    }
+    u64 end = time_ms() + 20;
+    while (!irq_live(&h->irq) && time_ms() < end) irq_service();
+    if (!irq_live(&h->irq)) kprintf("ahci: %s: no interrupt seen yet, polling\n", h->irq_name);
+}
+
 static void hba_init(pci_dev_t *d) {
     pci_enable(d);
     volatile u8 *abar = pci_map_bar(d, 5);
@@ -754,8 +812,10 @@ static void hba_init(pci_dev_t *d) {
             udelay(100);
         }
     }
+    for (int i = 0; i < 32; i++) h->ports[i] = ports[i];
     for (int i = 0; i < 32; i++)
-        if (ports[i]) port_finish(ports[i]);
+        if (ports[i]) port_finish(ports[i]);       /* frees (and forgets) ports without a disk */
+    hba_irq_setup(h);
 }
 
 void ahci_init(void) {

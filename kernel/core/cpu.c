@@ -34,7 +34,7 @@ static void gdt_load(void) {
 /* ---------------- IDT ---------------- */
 struct PACKED idt_entry { u16 off_lo, sel; u8 ist, type; u16 off_mid; u32 off_hi, zero; };
 static struct idt_entry idt[256] ALIGNED(16);
-extern u64 isr_table[33];
+extern u64 isr_table[256];
 
 struct regs {
     u64 r15, r14, r13, r12, r11, r10, r9, r8, rbp, rdi, rsi, rdx, rcx, rbx, rax;
@@ -60,8 +60,11 @@ static const char *exc_names[] = {
 
 void panic_screen(const char *title, const char *detail);   /* gui/panic.c */
 
+void irq_dispatch(u64 vector);   /* core/irq.c */
+
 void isr_dispatch(struct regs *r) {
-    if (r->vector >= 32) return;    /* spurious */
+    if (r->vector >= 32) { irq_dispatch(r->vector); return; }
+    __asm__ volatile("cli");
     u64 cr2;
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
     char buf[640];
@@ -89,6 +92,7 @@ void isr_dispatch(struct regs *r) {
 }
 
 void panic(const char *fmt, ...) {
+    __asm__ volatile("cli");
     char buf[512];
     va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
@@ -104,11 +108,11 @@ const char *cpu_vendor(void) { return vendor; }
 
 void cpu_init(void) {
     gdt_load();
-    for (int i = 0; i < 256; i++) idt_set(i, isr_table[i < 32 ? i : 32]);
+    for (int i = 0; i < 256; i++) idt_set(i, isr_table[i]);
     struct dtr d = { sizeof(idt) - 1, (u64)(uptr)idt };
     __asm__ volatile("lidt %0" :: "m"(d));
 
-    /* mask the legacy PICs: Halcyon is fully polled */
+    /* mask the legacy PICs until irq_init() sets up interrupts */
     outb(0x21, 0xFF);
     outb(0xA1, 0xFF);
 
@@ -203,15 +207,51 @@ void time_init(void) {
             src, pit, pm, cid);
 }
 
+u64 time_ms_to_tsc(u64 ms) { return tsc_base + ms * tsc_per_ms; }
 u64 time_ms(void) { return (rdtsc() - tsc_base) / tsc_per_ms; }
 u64 time_us(void) { return (rdtsc() - tsc_base) * 1000 / tsc_per_ms; }
 void udelay(u64 us) {
     u64 end = rdtsc() + us * tsc_per_ms / 1000;
     while (rdtsc() < end) cpu_relax();
 }
+void idle_wait_tsc(u32 gen, u64 deadline_tsc);   /* core/irq.c */
+u32  irq_generation(void);
+/* longer delays halt the CPU (when the idle timer works) instead of spinning */
 void mdelay(u64 ms) {
     u64 end = rdtsc() + ms * tsc_per_ms;
-    while (rdtsc() < end) cpu_relax();
+    while (rdtsc() < end) {
+        if (ms >= 2) idle_wait_tsc(irq_generation(), end);
+        else cpu_relax();
+    }
+}
+
+/* ---------------- QEMU test hook ---------------- */
+/* Under a hypervisor, QEMU's fw_cfg file "opt/halcyon/bootflags" (a number)
+ * adds BOOTF_* flags, so automated tests can reach the fallback paths that
+ * otherwise need the F8 menu. Never probed on real hardware. */
+static u32 be32(const u8 *p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
+u32 qemu_boot_flags(void) {
+    u32 a, b, c, d;
+    cpuid(1, 0, &a, &b, &c, &d);
+    if (!(c & (1u << 31))) return 0;
+    u8 sig[4];
+    outw(0x510, 0x0000);
+    for (int i = 0; i < 4; i++) sig[i] = inb(0x511);
+    if (memcmp(sig, "QEMU", 4)) return 0;
+    u8 hdr[64];
+    outw(0x510, 0x0019);                          /* file directory */
+    for (int i = 0; i < 4; i++) hdr[i] = inb(0x511);
+    u32 n = be32(hdr);
+    for (u32 f = 0; f < n && f < 256; f++) {
+        for (int i = 0; i < 64; i++) hdr[i] = inb(0x511);
+        if (strcmp((char *)hdr + 8, "opt/halcyon/bootflags")) continue;
+        u32 size = be32(hdr);
+        char buf[24] = { 0 };
+        outw(0x510, (u16)(hdr[4] << 8 | hdr[5]));
+        for (u32 i = 0; i < size && i < sizeof buf - 1; i++) buf[i] = (char)inb(0x511);
+        return (u32)strtol(buf, NULL, 0);
+    }
+    return 0;
 }
 
 /* ---------------- RTC ---------------- */

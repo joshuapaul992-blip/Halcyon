@@ -39,6 +39,12 @@ void pci_enable(pci_dev_t *d);
 /* map a memory BAR (handles 64-bit BARs above 4 GiB); returns virtual address */
 void *pci_map_bar(pci_dev_t *d, int bar);
 
+/* capabilities and message-signalled interrupts (core/irq.c uses these) */
+int  pci_find_cap(pci_dev_t *d, u8 id);
+int  pci_enable_msi(pci_dev_t *d, u64 addr, u32 data);
+int  pci_enable_msix(pci_dev_t *d, u64 addr, u32 data);
+void pci_disable_msi(pci_dev_t *d);
+
 const char *pci_class_name(u8 cls, u8 sub, u8 progif);
 const char *pci_vendor_name(u16 vendor);
 

@@ -2,11 +2,17 @@
 """Boot Halcyon in QEMU for a matrix of USB controllers / firmware and check
 the kernel serial log.
 
-usage: tools/boottest.py [CONFIG ...]     CONFIG = hc:fw, e.g. xhci:uefi
+usage: tools/boottest.py [CONFIG ...]     CONFIG = hc:fw[:variant], e.g. xhci:uefi
        (default: the full matrix)
 
 Each boot must reach "gui: desktop ready", mount the boot stick as C:, mount
 the SATA test disk, write \\HALCYON\\BOOT.LOG, and log no exception/panic.
+With interrupts on, the idle desktop must also leave QEMU mostly idle (the
+guest halts the CPU), and the USB controller must get a working interrupt.
+Variants add boot flags through QEMU fw_cfg (see qemu_boot_flags()):
+  pic    legacy 8259 PICs instead of the I/O APIC
+  nomsi  no MSI: xHCI / AHCI fall back to (learned) INTx
+  noirq  no interrupts at all: the old fully polled mode
 Exit status is the number of failed configurations.
 """
 import os
@@ -16,7 +22,10 @@ import time
 
 BUILD = os.environ.get("BUILD", "build")
 MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
-          "uhci:uefi", "ehci:uefi", "ich9:uefi", "xhci:uefi"]
+          "uhci:uefi", "ehci:uefi", "ich9:uefi", "xhci:uefi",
+          "xhci:bios:nomsi", "uhci:bios:pic", "xhci:uefi:pic", "ehci:bios:noirq"]
+VARIANTS = {"": 0, "pic": 0x200, "nomsi": 0x100, "noirq": 0x80}
+IDLE_MAX_CPU = 40      # % of one host CPU used by QEMU at the idle desktop
 TIMEOUT = {"uhci": 90, "ohci": 60}
 CHECKS = [
     ("desktop", "gui: desktop ready"),
@@ -27,16 +36,29 @@ CHECKS = [
 BAD = ["CPU EXCEPTION", "KERNEL PANIC", "nested fault"]
 
 
+def cpu_seconds(pid):
+    try:
+        f = open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()
+        return (int(f[11]) + int(f[12])) / os.sysconf("SC_CLK_TCK")
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def run(cfg):
-    hc, fw = cfg.split(":")
+    parts = cfg.split(":")
+    hc, fw = parts[0], parts[1]
+    variant = parts[2] if len(parts) > 2 else ""
+    flags = VARIANTS[variant]
     log = os.path.join(BUILD, "serial.log")
     if os.path.exists(log):
         os.remove(log)
     sata = os.path.join(BUILD, "ci_sata.img")
     subprocess.run(["cp", os.path.join(BUILD, "fat32gpt.img"), sata], check=True)
-    env = dict(os.environ, HEADLESS="1", BUILD=BUILD,
-               EXTRA="-device usb-tablet,bus=usb.0 -drive if=none,id=d0,format=raw,file=%s "
-                     "-device ide-hd,drive=d0,bus=ide.0" % sata)
+    extra = ("-device usb-tablet,bus=usb.0 -drive if=none,id=d0,format=raw,file=%s "
+             "-device ide-hd,drive=d0,bus=ide.0" % sata)
+    if flags:
+        extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
+    env = dict(os.environ, HEADLESS="1", BUILD=BUILD, EXTRA=extra)
     # boot from a scratch copy so tests never modify the release image
     img = os.path.join(BUILD, "ci_boot.img")
     subprocess.run(["cp", os.path.join(BUILD, "halcyon.img"), img], check=True)
@@ -59,6 +81,15 @@ def run(cfg):
         if p.poll() is not None:
             break
     elapsed = time.time() - t0
+    idle = None
+    if p.poll() is None and "gui: desktop ready" in text:
+        time.sleep(2)
+        c0 = cpu_seconds(p.pid)
+        time.sleep(4)
+        c1 = cpu_seconds(p.pid)
+        if c0 is not None and c1 is not None:
+            idle = (c1 - c0) * 100 / 4
+        text = open(log, errors="replace").read()
     p.terminate()
     try:
         p.wait(5)
@@ -66,8 +97,21 @@ def run(cfg):
         p.kill()
     failures = [name for name, pat in CHECKS if pat not in text]
     failures += ["log contains '%s'" % b for b in BAD if b in text]
+    want_mode = {"": "irq: mode I/O APIC", "pic": "irq: mode 8259 PIC", "nomsi": "irq: mode I/O APIC",
+                 "noirq": "interrupts disabled by boot option"}[variant]
+    if want_mode not in text:
+        failures.append("interrupt mode ('%s' missing)" % want_mode)
+    if variant != "noirq":
+        if "CPU idle off" in text:
+            failures.append("no idle timer")
+        usb = {"uhci": "UHCI", "ohci": "OHCI", "ehci": "EHCI", "ich9": "EHCI", "xhci": "xHCI"}[hc]
+        if not any(usb in l and ("INTx on" in l or "MSI" in l) for l in text.splitlines() if l.startswith("irq: ")):
+            failures.append("no %s interrupt" % usb)
+        if idle is not None and idle > IDLE_MAX_CPU:
+            failures.append("idle desktop uses %.0f%% CPU" % idle)
     status = "PASS" if not failures else "FAIL (%s)" % ", ".join(failures)
-    print("%-11s %5.1fs  %s" % (cfg, elapsed, status), flush=True)
+    cpu = "" if idle is None else "  idle CPU %3.0f%%" % idle
+    print("%-16s %5.1fs%s  %s" % (cfg, elapsed, cpu, status), flush=True)
     if failures:
         print("    --- last lines of the serial log ---")
         for line in text.strip().splitlines()[-15:]:

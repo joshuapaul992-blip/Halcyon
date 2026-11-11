@@ -3,12 +3,16 @@
 #include "core/io.h"
 #include "core/lib.h"
 #include "core/kernel.h"
+#include "core/irq.h"
 
 #define DATA 0x60
 #define STAT 0x64
 #define CMD  0x64
 
 static int have_ctrl, have_kbd, have_mouse, mouse_wheel;
+/* IRQ 1 / 12 only wake the main loop: ps2_poll() reads the bytes. The 8042
+ * raises its (edge) IRQ again for the next byte once one has been read. */
+static irq_handle_t kbd_irq = { .name = "PS/2 keyboard" }, aux_irq = { .name = "PS/2 mouse" };
 static u8 mbuf[4];
 static int mlen;
 static int ext, pause_skip;
@@ -41,6 +45,31 @@ static int dev_cmd(int aux, u8 c) {
     return -1;
 }
 
+/* Route IRQ 1 / 12 and check that they arrive: the controller's "write
+ * output buffer" commands (D2 keyboard, D3 aux) raise them with a harmless
+ * 00 byte. If a test fails the port stays polled until a real IRQ shows up. */
+static void ps2_irqs(int cfg) {
+    if (!have_kbd && !have_mouse) return;
+    int k = have_kbd && irq_attach_isa(&kbd_irq, 1) != IRQ_NONE;
+    int a = have_mouse && irq_attach_isa(&aux_irq, 12) != IRQ_NONE;
+    if (!k && !a) return;
+    cfg = (cfg & ~0x03) | (k ? 0x01 : 0) | (a ? 0x02 : 0);
+    cmd(0x60); data((u8)cfg);
+    for (int port = 0; port < 2; port++) {
+        irq_handle_t *h = port ? &aux_irq : &kbd_irq;
+        if (port ? !a : !k) continue;
+        u32 before = h->events;
+        u64 f = irq_save();                     /* keep the test byte away from ps2_poll */
+        cmd(port ? 0xD3 : 0xD2); data(0x00);
+        irq_restore(f);
+        u64 end = time_ms() + 20;
+        while (time_ms() < end && h->events == before) cpu_relax();
+        flush();
+    }
+    kprintf("ps2: IRQ 1 %s, IRQ 12 %s\n", !k ? "unused" : kbd_irq.events ? "works" : "silent (polled)",
+            !a ? "unused" : aux_irq.events ? "works" : "silent (polled)");
+}
+
 void ps2_init(void) {
     u8 st = inb(STAT);
     if (st == 0xFF) { kprintf("ps2: no controller\n"); return; }
@@ -51,7 +80,7 @@ void ps2_init(void) {
     int cfg = read_data(20);
     if (cfg < 0) { kprintf("ps2: controller not responding\n"); return; }
     have_ctrl = 1;
-    cfg &= ~0x03;          /* no IRQs: polled */
+    cfg &= ~0x03;          /* no IRQs while initialising (replies are read by polling) */
     cfg |= 0x40;           /* scancode translation -> set 1 */
     cfg &= ~0x30;          /* clocks enabled */
     cmd(0x60); data((u8)cfg);
@@ -76,6 +105,7 @@ void ps2_init(void) {
         if (dev_cmd(1, 0xF4) == 0) have_mouse = 1;
     }
     flush();
+    ps2_irqs(cfg);
     kprintf("ps2: keyboard %s, mouse %s%s\n", have_kbd ? "yes" : "no", have_mouse ? "yes" : "no",
             mouse_wheel ? " (wheel)" : "");
 }
@@ -151,6 +181,7 @@ static void mouse_byte(u8 b) {
 
 void ps2_poll(void) {
     if (!have_ctrl) return;
+    if ((have_kbd && !irq_live(&kbd_irq)) || (have_mouse && !irq_live(&aux_irq))) idle_wake_at(time_ms() + 10);
     for (int i = 0; i < 64; i++) {
         u8 st = inb(STAT);
         if (!(st & 1)) break;

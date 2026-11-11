@@ -357,6 +357,7 @@ static int queue_run(ehci_t *e, usb_device_t *dev, ehci_queue_t *qu, int n, int 
     int bytes = 0, result = E_TIMEOUT, i = 0;
     u64 last_chk = time_ms();
     for (;;) {
+        u32 gen = irq_generation();
         ehci_qtd_t *t = qslot(qu, i);
         u32 tok = t->token;
         if (tok & QTD_ACTIVE) {
@@ -373,7 +374,7 @@ static int queue_run(ehci_t *e, usb_device_t *dev, ehci_queue_t *qu, int n, int 
                 }
                 if (dev_gone(e, dev)) { result = E_NODEV; break; }   /* surprise removal */
             }
-            cpu_relax();
+            irq_wait(&e->hc.irq, gen, deadline);
             continue;
         }
         if (tok & QTD_HALTED) { result = qtd_error(tok); break; }
@@ -857,6 +858,16 @@ static const usb_hc_ops_t ehci_ops = {
 };
 
 /* ---------- controller setup ---------- */
+/* INTx acknowledge: the enabled status bits are write-1-to-clear */
+static int ehci_ack(void *ctx) {
+    ehci_t *e = ctx;
+    u32 st = op_rd(e, USBSTS);
+    if (st == 0xFFFFFFFF) return 0;
+    st &= STS_USBINT | STS_ERRINT | STS_PCD;
+    if (st) op_wr(e, USBSTS, st);
+    return st != 0;
+}
+
 static void bios_handoff(pci_dev_t *pd, u32 hcc) {
     u32 off = HCC_EECP(hcc);
     for (int guard = 0; off >= 0x40 && guard < 32; guard++) {
@@ -978,6 +989,12 @@ static void ehci_setup(pci_dev_t *pd) {
     pd->driver = "ehci";
     kprintf("ehci: %s: %d ports, %d companion controller(s)%s%s\n", e->hc.desc, e->nports, e->ncc,
             HCC_64BIT(hcc) ? ", 64-bit" : "", HCS_PPC(hcs) ? ", port power control" : "");
+    /* transfer completion (IOC / short packet), errors and port changes.
+     * Async-advance stays polled (iaa_wait reads STS_IAA itself). */
+    if (usb_hc_irq(&e->hc, ehci_ack, e) != IRQ_NONE) {
+        op_wr(e, USBSTS, STS_USBINT | STS_ERRINT | STS_PCD);
+        op_wr(e, USBINTR, STS_USBINT | STS_ERRINT | STS_PCD);
+    }
     usb_register_hc(&e->hc);
 }
 

@@ -5,12 +5,15 @@
  * after a crash. The previous boot's log is kept as BOOTPREV.LOG. */
 #include "kernel.h"
 #include "lib.h"
+#include "irq.h"
 #include "mm.h"
 #include "io.h"
 #include "fs/vfs.h"
 #include "fs/block.h"
 #include "usb/usb.h"
 #include "drivers/pci.h"
+
+static void irq_report(void);
 
 static int rotated;
 static int saving;
@@ -64,12 +67,29 @@ void hwreport_late(void) {
         volume_t *v = vfs_volume(i);
         kprintf("hw: volume %c: %s '%s' on %s%s\n", v->letter, v->fs_name, v->label, v->bd ? v->bd->name : "?", v->is_boot ? " (boot)" : "");
     }
+    irq_report();
     for (int i = 0; i < pci_count(); i++) {
         pci_dev_t *p = pci_get(i);
         if (!p->driver && (p->class_code == 0x0C || p->class_code == 0x01))
             kprintf("hw: no driver for %02x:%02x.%x %04x:%04x %s\n", p->bus, p->dev, p->func, p->vendor, p->device,
                     pci_class_name(p->class_code, p->subclass, p->prog_if));
     }
+}
+
+/* interrupt table into the log, one "hw: irq:" line each */
+static void irq_report(void) {
+    char *buf = kmalloc(4096);
+    if (!buf) return;
+    irq_list(buf, 4096);
+    char *s = buf;
+    while (*s) {
+        char *e = strchr(s, '\n');
+        if (e) *e = 0;
+        kprintf("hw: irq: %s\n", s);
+        if (!e) break;
+        s = e + 1;
+    }
+    kfree(buf);
 }
 
 /* Write the kernel log to C:\HALCYON\BOOT.LOG. Returns 0 on success. */
@@ -89,6 +109,7 @@ int bootlog_save(const char *reason) {
         vfs_rename(path, prev);
         rotated = 1;
     }
+    if (strcmp(reason, "desktop starting")) irq_report();
     kprintf("bootlog: saving (%s)\n", reason);
     size_t n = klog_size();
     char *buf = kmalloc(n + 1);

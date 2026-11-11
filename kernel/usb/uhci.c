@@ -94,6 +94,7 @@ static int td_err(u32 st) {
  * for bulk it is -1. Returns data bytes or error. last_done receives the
  * index of the last completed TD. */
 static int run_tds(uhci_t *u, uhci_td_t *tds, int n, int status_idx, int timeout_ms, int *last_done) {
+    tds[n - 1].status |= TD_IOC;     /* interrupt when the chain is done */
     for (int i = 0; i < n; i++) tds[i].link = (i + 1 < n) ? (phys(&tds[i + 1]) | LINK_VF) : LINK_T;
     mb();
     u->async_qh->element = phys(&tds[0]);
@@ -102,11 +103,12 @@ static int run_tds(uhci_t *u, uhci_td_t *tds, int n, int status_idx, int timeout
     int bytes = 0, result = E_TIMEOUT, i = 0;
     *last_done = -1;
     while (time_ms() < deadline) {
+        u32 gen = irq_generation();
         rmb();
         u32 st = tds[i].status;
         if (st & TD_ACTIVE) {
             if (inw(u->io + USBSTS) & 0x18) { result = E_IO; break; }   /* HSE / HCPE */
-            cpu_relax();
+            irq_wait(&u->hc.irq, gen, deadline);
             continue;
         }
         if (st & TD_ERRMASK) { result = td_err(st); *last_done = i - 1; break; }
@@ -206,7 +208,7 @@ static int uhci_intr_start(usb_hc_t *hc, usb_device_t *dev, usb_endpoint_t *ep, 
     x->len = MIN(len, (int)ep->mps);
     int in = usb_ep_is_in(ep);
     x->td->link = LINK_T;
-    x->td->status = TD_ACTIVE | TD_CERR3 | (dev->speed == USB_SPEED_LOW ? TD_LS : 0) | (in ? TD_SPD : 0);
+    x->td->status = TD_ACTIVE | TD_CERR3 | (dev->speed == USB_SPEED_LOW ? TD_LS : 0) | (in ? TD_SPD : 0) | TD_IOC;
     x->td->token = td_token(in ? PID_IN : PID_OUT, dev, usb_ep_num(ep), ep->toggle, x->len);
     x->td->buffer = phys(buf);
     x->qh->element = phys(x->td);
@@ -334,6 +336,14 @@ static const usb_hc_ops_t uhci_ops = {
     .poll = uhci_poll,
 };
 
+/* INTx acknowledge: USBINT, USBERRINT and resume detect are write-1-to-clear */
+static int uhci_ack(void *ctx) {
+    uhci_t *u = ctx;
+    u16 st = inw(u->io + USBSTS) & 0x07;
+    if (st) outw(u->io + USBSTS, st);
+    return st != 0;
+}
+
 static void uhci_setup(pci_dev_t *pd) {
     int bar = 4;
     if (!pd->bar[bar].is_io || !pd->bar[bar].addr) {
@@ -341,7 +351,7 @@ static void uhci_setup(pci_dev_t *pd) {
         if (bar == 6) { kprintf("uhci: no I/O BAR\n"); return; }
     }
     pci_enable(pd);
-    pci_write16(pd, 0xC0, 0x8F00);   /* LEGSUP: disable legacy emulation & SMIs */
+    pci_write16(pd, 0xC0, 0x8F00);   /* LEGSUP: disable legacy emulation & SMIs, clear status */
 
     uhci_t *u = kzalloc(sizeof *u);
     u->io = (u16)pd->bar[bar].addr;
@@ -388,6 +398,12 @@ static void uhci_setup(pci_dev_t *pd) {
     u->hc.pci = pd;
     u->hc.nports = (u8)n;
     pd->driver = "uhci";
+    u->hc.no_port_irq = 1;           /* UHCI has no port change interrupt */
+    if (usb_hc_irq(&u->hc, uhci_ack, u) == IRQ_INTX) {
+        pci_write16(pd, 0xC0, 0x2000);   /* LEGSUP: USBPIRQDEN, interrupts to the PCI INTx pin */
+        outw(u->io + USBSTS, 0x07);
+        outw(u->io + USBINTR, 0x0D);     /* timeout/CRC, IOC, short packet */
+    }
     usb_register_hc(&u->hc);
 }
 

@@ -18,6 +18,7 @@ void gui_main(void) WEAK;
 void kernel_selftest(void) WEAK;   /* optional test hook (debug builds) */
 void splash_init(void) WEAK;
 void acpi_init(void) WEAK;
+void irq_init(void) WEAK;
 void splash_progress(int pct, const char *msg) WEAK;
 void splash_finish(void) WEAK;
 void hwreport_early(void) WEAK;
@@ -36,10 +37,16 @@ void kmain(struct bootinfo *bi) {
     cpu_init();
     kprintf("cpu: %s (%s)\n", cpu_brand(), cpu_vendor());
     mm_init();
+    u32 qf = qemu_boot_flags();
+    if (qf) {
+        g_bootinfo.boot_flags |= qf;
+        kprintf("boot flags %#x added by the QEMU test hook\n", qf);
+    }
     u32 bf = g_bootinfo.boot_flags;
     /* ACPI first: its PM timer is a fallback clock for TSC calibration */
     if (acpi_init && !(bf & BOOTF_NO_ACPI)) acpi_init();
     time_init();
+    if (irq_init) irq_init();
     if (hwreport_early) hwreport_early();
     if (splash_init) splash_init();
     PROGRESS(10, "Scanning PCI devices...");

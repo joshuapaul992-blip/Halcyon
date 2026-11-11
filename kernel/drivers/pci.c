@@ -123,8 +123,69 @@ pci_dev_t *pci_find_class(int cls, int sub, int progif, int index) {
 void pci_enable(pci_dev_t *d) {
     u16 cmd = pci_read16(d, 4);
     cmd |= 0x0007;          /* I/O, memory, bus master */
-    cmd |= 0x0400;          /* interrupt disable: we poll */
+    cmd |= 0x0400;          /* INTx off until irq_attach() wants it */
     pci_write16(d, 4, cmd);
+}
+
+/* capability list walk: offset of capability `id`, 0 if absent */
+int pci_find_cap(pci_dev_t *d, u8 id) {
+    if (!(pci_read16(d, 0x06) & (1u << 4))) return 0;
+    u8 off = pci_read8(d, 0x34) & 0xFC;
+    for (int n = 0; off >= 0x40 && n < 48; n++) {
+        if (pci_read8(d, off) == id) return off;
+        off = pci_read8(d, off + 1) & 0xFC;
+    }
+    return 0;
+}
+
+/* MSI with a single message (multiple-message enable = 0) */
+int pci_enable_msi(pci_dev_t *d, u64 addr, u32 data) {
+    int c = pci_find_cap(d, 0x05);
+    if (!c) return -1;
+    u16 ctl = pci_read16(d, (u8)(c + 2));
+    int is64 = (ctl >> 7) & 1, pvm = (ctl >> 8) & 1;
+    pci_write16(d, (u8)(c + 2), ctl & ~0x0071);         /* disabled, MME = 0 */
+    pci_write32(d, (u8)(c + 4), (u32)addr);
+    if (is64) {
+        pci_write32(d, (u8)(c + 8), (u32)(addr >> 32));
+        pci_write16(d, (u8)(c + 12), (u16)data);
+        if (pvm) pci_write32(d, (u8)(c + 16), 0);       /* unmask vector 0 */
+    } else {
+        pci_write16(d, (u8)(c + 8), (u16)data);
+        if (pvm) pci_write32(d, (u8)(c + 12), 0);
+    }
+    pci_write16(d, 4, pci_read16(d, 4) | 0x0400);       /* INTx off */
+    pci_write16(d, (u8)(c + 2), (ctl & ~0x0070) | 1);
+    return 0;
+}
+
+/* MSI-X: table entry 0 only, every other entry masked */
+int pci_enable_msix(pci_dev_t *d, u64 addr, u32 data) {
+    int c = pci_find_cap(d, 0x11);
+    if (!c) return -1;
+    u16 ctl = pci_read16(d, (u8)(c + 2));
+    u32 tbl = pci_read32(d, (u8)(c + 4));
+    int bir = tbl & 7, n = (ctl & 0x7FF) + 1;
+    if (bir > 5 || d->bar[bir].is_io || !d->bar[bir].addr) return -1;
+    volatile u32 *t = (volatile u32 *)((u8 *)pci_map_bar(d, bir) + (tbl & ~7u));
+    if (!pci_map_bar(d, bir)) return -1;
+    /* enable with the function masked while the table is written */
+    pci_write16(d, (u8)(c + 2), ctl | 0xC000);
+    for (int i = 0; i < n && i < 2048; i++) t[i * 4 + 3] |= 1;
+    t[0] = (u32)addr;
+    t[1] = (u32)(addr >> 32);
+    t[2] = data;
+    t[3] &= ~1u;
+    pci_write16(d, 4, pci_read16(d, 4) | 0x0400);
+    pci_write16(d, (u8)(c + 2), (ctl | 0x8000) & ~0x4000);
+    return 0;
+}
+
+void pci_disable_msi(pci_dev_t *d) {
+    int c = pci_find_cap(d, 0x11);
+    if (c) pci_write16(d, (u8)(c + 2), pci_read16(d, (u8)(c + 2)) & ~0x8000);
+    c = pci_find_cap(d, 0x05);
+    if (c) pci_write16(d, (u8)(c + 2), pci_read16(d, (u8)(c + 2)) & ~1);
 }
 
 void *pci_map_bar(pci_dev_t *d, int bar) {

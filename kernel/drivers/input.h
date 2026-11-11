@@ -54,6 +54,7 @@ void input_mouse_abs(int x, int y, int dz, u8 buttons);   /* x, y in 0..32767 */
 
 /* consumers */
 void input_poll_devices(void);          /* service PS/2 + USB */
+int  input_pending(void);
 int  input_get(input_event_t *ev);      /* 1 if an event was dequeued */
 u8   input_mods(void);
 u8   input_leds(void);                  /* LED_* lock state */

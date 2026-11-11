@@ -21,6 +21,8 @@ static void push(const input_event_t *e) {
     qhead = n;
 }
 
+int input_pending(void) { return qtail != qhead; }
+
 int input_get(input_event_t *ev) {
     if (qtail == qhead) return 0;
     *ev = queue[qtail];

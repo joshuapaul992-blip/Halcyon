@@ -109,6 +109,7 @@
 #define TD_DP_OUT     1u
 #define TD_DP_IN      2u
 #define TD_DI_NONE    (7u << 21)
+#define TD_DI_NOW     (0u << 21)     /* WritebackDoneHead interrupt when retired */
 #define TD_T_EXPLICIT (2u << 24)
 #define TD_CC_NA      (15u << 28)
 
@@ -320,7 +321,7 @@ static void xfer_add(ohci_t *o, xfer_t *x, u32 dp, int tog, int rounding, u32 bu
     ohci_td_t *nt = td_alloc(o);
     if (!nt) { x->nomem = 1; return; }
     ohci_td_t *td = x->cur;
-    td->info = TD_CC_NA | TD_T_EXPLICIT | ((u32)(tog & 1) << 24) | TD_DI_NONE | (dp << 19) | (rounding ? TD_R : 0);
+    td->info = TD_CC_NA | TD_T_EXPLICIT | ((u32)(tog & 1) << 24) | TD_DI_NOW | (dp << 19) | (rounding ? TD_R : 0);
     td->cbp = len ? buf : 0;
     td->be = len ? buf + (u32)len - 1 : 0;
     td->next = phys(nt);
@@ -429,6 +430,7 @@ static int xfer_wait(ohci_t *o, xfer_t *x, usb_device_t *dev, int timeout_ms) {
     u32 tail = phys(x->cur);
     u64 now = time_ms(), deadline = now + (u64)(timeout_ms > 0 ? timeout_ms : 1), next_check = now + 2;
     for (;;) {
+        u32 gen = irq_generation();
         rmb();
         u32 h = x->ed->headp;
         if (h & ED_H) return 1;
@@ -440,7 +442,7 @@ static int xfer_wait(ohci_t *o, xfer_t *x, usb_device_t *dev, int timeout_ms) {
             if (root_port_gone(o, dev)) return E_NODEV;
         }
         if (now >= deadline) return E_TIMEOUT;
-        cpu_relax();
+        irq_wait(&o->hc.irq, gen, deadline);
     }
 }
 
@@ -838,6 +840,19 @@ static int alloc_schedule(ohci_t *o) {
     return 0;
 }
 
+#define INT_RHSC 0x00000040
+#define INT_MIE  0x80000000u
+/* INTx acknowledge: WritebackDoneHead and RootHubStatusChange (UE stays
+ * set for the driver to see; it is not an enabled source) */
+static int ohci_ack(void *ctx) {
+    ohci_t *o = ctx;
+    u32 st = rd(o, HC_INTSTATUS);
+    if (st == 0xFFFFFFFF) return 0;
+    st &= INT_WDH | INT_RHSC;
+    if (st) wr(o, HC_INTSTATUS, st);
+    return st != 0;
+}
+
 static void ohci_setup(pci_dev_t *pd) {
     if (pd->bar[0].is_io || !pd->bar[0].addr) { kprintf("ohci: %02x:%02x.%x has no MMIO BAR0\n", pd->bus, pd->dev, pd->func); return; }
     pci_enable(pd);
@@ -930,6 +945,10 @@ static void ohci_setup(pci_dev_t *pd) {
     pd->driver = "ohci";
     kprintf("ohci: rev %x.%x, %d ports, FI %u, %s power switching\n", rev >> 4, rev & 0xF, ndp, fi,
             (rha & RHA_NPS) ? "no" : ((rha & RHA_PSM) ? "per-port" : "global"));
+    if (usb_hc_irq(&o->hc, ohci_ack, o) != IRQ_NONE) {
+        wr(o, HC_INTSTATUS, INT_WDH | INT_RHSC);
+        wr(o, HC_INTENABLE, INT_WDH | INT_RHSC | INT_MIE);
+    }
     usb_register_hc(&o->hc);
 }
 

@@ -3,6 +3,7 @@
 #include "core/lib.h"
 #include "core/io.h"
 #include "core/mm.h"
+#include "acpi.h"
 
 struct PACKED sdt { char sig[4]; u32 len; u8 rev, csum; char oem[6], oemtab[8]; u32 oemrev, creator, crev; };
 struct PACKED rsdp { char sig[8]; u8 csum; char oem[6]; u8 rev; u32 rsdt; u32 len; u64 xsdt; u8 xcsum; u8 res[3]; };
@@ -20,6 +21,9 @@ int acpi_pm_timer(u16 *port, int *bits32) {
     *port = pm_tmr_port; *bits32 = pm_tmr_32;
     return 1;
 }
+
+static acpi_madt_t madt;
+const acpi_madt_t *acpi_madt(void) { return madt.present ? &madt : NULL; }
 
 static int checksum(const void *p, u32 n) {
     u8 s = 0;
@@ -58,6 +62,62 @@ static void parse_s5(struct sdt *dsdt) {
     }
 }
 
+static void parse_madt(struct sdt *t) {
+    u8 *p = (u8 *)t + sizeof *t;
+    if (t->len < sizeof *t + 8) return;
+    madt.lapic_addr = *(u32 *)p;
+    madt.flags = *(u32 *)(p + 4);
+    madt.nmi_lint = -1;
+    u8 *q = p + 8, *end = (u8 *)t + t->len;
+    while (q + 2 <= end && q[1] >= 2 && q + q[1] <= end) {
+        u8 type = q[0], len = q[1];
+        switch (type) {
+        case 0:   /* processor local APIC */
+            if (len >= 8 && (*(u32 *)(q + 4) & 1)) madt.ncpus++;
+            break;
+        case 1:   /* I/O APIC */
+            if (len >= 12 && madt.nioapic < MADT_MAX_IOAPIC) {
+                madt_ioapic_t *io = &madt.ioapic[madt.nioapic++];
+                io->id = q[2];
+                io->addr = *(u32 *)(q + 4);
+                io->gsi_base = *(u32 *)(q + 8);
+            }
+            break;
+        case 2:   /* interrupt source override */
+            if (len >= 10 && madt.niso < MADT_MAX_ISO) {
+                madt_iso_t *o = &madt.iso[madt.niso++];
+                o->bus = q[2]; o->irq = q[3];
+                o->gsi = *(u32 *)(q + 4);
+                o->flags = *(u16 *)(q + 8);
+            }
+            break;
+        case 4:   /* local APIC NMI: processor 0xFF = all */
+            if (len >= 6 && (q[2] == 0xFF || q[2] == 0 || madt.nmi_lint < 0)) {
+                madt.nmi_flags = *(u16 *)(q + 3);
+                madt.nmi_lint = q[5] & 1;
+            }
+            break;
+        case 5:   /* 64-bit local APIC address override */
+            if (len >= 12) {
+                u64 a = *(u64 *)(q + 4);
+                if (a && a < 0x100000000ull) madt.lapic_addr = (u32)a;
+            }
+            break;
+        case 9:   /* processor local x2APIC */
+            if (len >= 16 && (*(u32 *)(q + 8) & 1)) madt.ncpus++;
+            break;
+        }
+        q += len;
+    }
+    madt.present = 1;
+    kprintf("acpi: MADT: LAPIC %#x, %d CPU(s), %d I/O APIC(s), %d override(s)%s\n", madt.lapic_addr, madt.ncpus,
+            madt.nioapic, madt.niso, (madt.flags & 1) ? ", 8259 PICs present" : "");
+    for (int i = 0; i < madt.nioapic; i++)
+        kprintf("acpi:   I/O APIC id %u at %#x, GSI base %u\n", madt.ioapic[i].id, madt.ioapic[i].addr, madt.ioapic[i].gsi_base);
+    for (int i = 0; i < madt.niso; i++)
+        kprintf("acpi:   ISA IRQ %u -> GSI %u (flags %#x)\n", madt.iso[i].irq, madt.iso[i].gsi, madt.iso[i].flags);
+}
+
 void acpi_init(void) {
     struct rsdp *r = (struct rsdp *)(uptr)g_bootinfo.rsdp;
     if (!r || memcmp(r->sig, "RSD PTR ", 8)) { kprintf("acpi: no RSDP\n"); return; }
@@ -70,6 +130,7 @@ void acpi_init(void) {
     for (int i = 0; i < n; i++) {
         u64 a = wide ? *(u64 *)(ents + i * 8) : *(u32 *)(ents + i * 4);
         struct sdt *t = table(a);
+        if (t && !memcmp(t->sig, "APIC", 4) && !madt.present) { parse_madt(t); continue; }
         if (!t || memcmp(t->sig, "FACP", 4)) continue;
         u8 *f = (u8 *)t;
         smi_cmd = *(u32 *)(f + 48);

@@ -38,55 +38,28 @@ _start:
     hlt
     jmp .hang
 
-; ---- exception / interrupt stubs ----
-%macro ISR_NOERR 1
+; ---- exception / interrupt stubs (all 256 vectors) ----
+; Exceptions that push an error code: 8, 10-14, 17, 21, 29, 30.
+%macro ISR 1
 global isr%1
 isr%1:
+%if %1 = 8 || (%1 >= 10 && %1 <= 14) || %1 = 17 || %1 = 21 || %1 = 29 || %1 = 30
+%else
     push 0
-    push %1
-    jmp isr_common
-%endmacro
-%macro ISR_ERR 1
-global isr%1
-isr%1:
+%endif
     push %1
     jmp isr_common
 %endmacro
 
-ISR_NOERR 0
-ISR_NOERR 1
-ISR_NOERR 2
-ISR_NOERR 3
-ISR_NOERR 4
-ISR_NOERR 5
-ISR_NOERR 6
-ISR_NOERR 7
-ISR_ERR   8
-ISR_NOERR 9
-ISR_ERR   10
-ISR_ERR   11
-ISR_ERR   12
-ISR_ERR   13
-ISR_ERR   14
-ISR_NOERR 15
-ISR_NOERR 16
-ISR_ERR   17
-ISR_NOERR 18
-ISR_NOERR 19
-ISR_NOERR 20
-ISR_ERR   21
-ISR_NOERR 22
-ISR_NOERR 23
-ISR_NOERR 24
-ISR_NOERR 25
-ISR_NOERR 26
-ISR_NOERR 27
-ISR_NOERR 28
-ISR_ERR   29
-ISR_ERR   30
-ISR_NOERR 31
-ISR_NOERR 32   ; spurious / generic
+%assign i 0
+%rep 256
+ISR i
+%assign i i+1
+%endrep
 
+; Interrupt gates run with IF=0, so handlers never nest. The C handler may use
+; SSE registers (the kernel is built with SSE), so the full FPU/SSE state is
+; saved around it.
 isr_common:
     push rax
     push rbx
@@ -103,10 +76,13 @@ isr_common:
     push r13
     push r14
     push r15
-    mov rdi, rsp
     mov rbx, rsp
     and rsp, -16
+    sub rsp, 512
+    fxsave [rsp]
+    mov rdi, rbx
     call isr_dispatch
+    fxrstor [rsp]
     mov rsp, rbx
     pop r15
     pop r14
@@ -130,7 +106,7 @@ section .data
 global isr_table
 isr_table:
 %assign i 0
-%rep 33
+%rep 256
     dq isr %+ i
 %assign i i+1
 %endrep

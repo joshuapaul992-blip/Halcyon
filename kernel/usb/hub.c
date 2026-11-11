@@ -3,6 +3,7 @@
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
+#include "core/irq.h"
 
 #define HUB_REQ_GET_STATUS    0
 #define HUB_REQ_CLEAR_FEATURE 1
@@ -197,6 +198,7 @@ static void hub_poll(usb_device_t *dev, usb_binding_t *b) {
         }
     }
     /* periodic full scan (also covers hubs without a usable status endpoint) */
+    idle_wake_at(h->next_scan);
     if (time_ms() >= h->next_scan) {
         h->next_scan = time_ms() + (h->ep ? 2000 : 250);
         for (int p = 1; p <= h->nports && dev->alive; p++) {
