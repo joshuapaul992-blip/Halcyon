@@ -235,6 +235,9 @@ void keyboard_menu(int x, int y);      /* the taskbar layout indicator's menu */
 void shutdown_dialog(void);
 /* open a file with the right application, by extension */
 void shell_open(const char *path);
+void shell_notepad(const char *path);     /* NOTEPAD.EXE, or the built-in Notepad */
+void shell_paint(const char *path);
+void shell_explorer(const char *path);
 int  format_dialog(window_t *owner, char letter);   /* apps/format.c; 1 if formatted */
 struct proc;
 int  gui_ask_permission(struct proc *asker, const char *title, const char *text);   /* permit.c */

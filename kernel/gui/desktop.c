@@ -176,14 +176,27 @@ int desktop_screen_changed(void) {
     return 0;
 }
 
+/* ---------------- the standard programs ---------------- */
+/* Notepad, Paint and Explorer are user programs (C:\PROGRAMS); the built-in
+ * versions remain for when a program cannot run (no C:\PROGRAMS, or no timer
+ * interrupt in the fully polled mode). */
+static int run_prog(const char *exe, const char *path) {
+    char args[VFS_MAX_PATH + 4] = "";
+    if (path && *path) snprintf(args, sizeof args, "\"%s\"", path);
+    return proc_spawn(exe, args, NULL, NULL) > 0;
+}
+void shell_notepad(const char *path) { if (!run_prog("C:/PROGRAMS/NOTEPAD.EXE", path)) app_notepad(path); }
+void shell_paint(const char *path) { if (!run_prog("C:/PROGRAMS/PAINT.EXE", path)) app_paint(path); }
+void shell_explorer(const char *path) { if (!run_prog("C:/PROGRAMS/EXPLORER.EXE", path)) app_explorer(path ? path : ""); }
+
 /* ---------------- desktop icons ---------------- */
 typedef struct dicon { const char *label; int icon; void (*launch)(void); } dicon_t;
 
-static void l_computer(void) { app_explorer(""); }
-static void l_docs(void) { app_explorer("C:/Documents"); }
+static void l_computer(void) { shell_explorer(""); }
+static void l_docs(void) { shell_explorer("C:/Documents"); }
 static void l_term(void) { app_terminal(); }
-static void l_notepad(void) { app_notepad(NULL); }
-static void l_paint(void) { app_paint(NULL); }
+static void l_notepad(void) { shell_notepad(NULL); }
+static void l_paint(void) { shell_paint(NULL); }
 static void l_sysinfo(void) { app_sysinfo(); }
 /* Calculator and Sonar are user programs now; the built-in versions remain
  * for when the program cannot run (no C:\PROGRAMS, or no timer interrupt
@@ -457,7 +470,7 @@ int taskbar_event(gui_event_t *e) {
 
 /* ---------------- start menu ---------------- */
 typedef struct sitem { const char *label; const char *sub; int icon; void (*launch)(void); } sitem_t;
-static void l_docs2(void) { app_explorer("C:/Documents"); }
+static void l_docs2(void) { shell_explorer("C:/Documents"); }
 static const sitem_t left_items[] = {
     { "My Computer", "Browse drives and files", ICON_COMPUTER, l_computer },
     { "Command Prompt", "Halcyon command shell", ICON_TERMINAL, l_term },
@@ -753,17 +766,17 @@ int shell_run(const char *path, const char *args) {
 
 void shell_open(const char *path) {
     vfs_dirent_t st;
-    if (vfs_stat(path, &st) == 0 && st.is_dir) { app_explorer(path); return; }
+    if (vfs_stat(path, &st) == 0 && st.is_dir) { shell_explorer(path); return; }
     const char *dot = strrchr(vfs_basename(path), '.');
     const char *ext = dot ? dot + 1 : "";
     if (!strcasecmp(ext, "exe")) { shell_run(path, NULL); return; }
     static const char *text_ext[] = { "txt", "log", "ini", "cfg", "c", "h", "md", "bat", "asm", "s", "py", "csv",
                                       "json", "xml", "htm", "html", "inf", "conf", "sh", "nfo", "diz", "me", "1st", "rtf" };
-    for (size_t i = 0; i < ARRAY_SIZE(text_ext); i++) if (!strcasecmp(ext, text_ext[i])) { app_notepad(path); return; }
-    if (!strcasecmp(ext, "bmp")) { app_paint(path); return; }
+    for (size_t i = 0; i < ARRAY_SIZE(text_ext); i++) if (!strcasecmp(ext, text_ext[i])) { shell_notepad(path); return; }
+    if (!strcasecmp(ext, "bmp")) { shell_paint(path); return; }
     char msg[VFS_MAX_PATH + 96];
     snprintf(msg, sizeof msg, "There is no program associated with \"%s\".\n\nOpen it with Notepad?", vfs_basename(path));
-    if (msgbox(NULL, "Open With", msg, ICON_QUESTION, MB_YESNO) == ID_YES) app_notepad(path);
+    if (msgbox(NULL, "Open With", msg, ICON_QUESTION, MB_YESNO) == ID_YES) shell_notepad(path);
 }
 
 void desktop_init(void) {

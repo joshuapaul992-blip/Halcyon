@@ -705,17 +705,17 @@ static void execute(term_t *t, int argc, char **argv, const char *rest) {
     else if (!strcasecmp(c, "sync")) { vfs_sync_all(); tputs(t, "All volumes flushed.\n"); }
     else if (!strcasecmp(c, "notepad") || !strcasecmp(c, "edit")) {
         char p[VFS_MAX_PATH];
-        if (argc > 1 && resolve(t, argv[1], p, sizeof p) == 0) app_notepad(p); else app_notepad(NULL);
+        if (argc > 1 && resolve(t, argv[1], p, sizeof p) == 0) shell_notepad(p); else shell_notepad(NULL);
     }
     else if (!strcasecmp(c, "explorer")) {
         char p[VFS_MAX_PATH];
-        if (resolve(t, argc > 1 ? argv[1] : ".", p, sizeof p) == 0) app_explorer(p); else app_explorer("");
+        if (resolve(t, argc > 1 ? argv[1] : ".", p, sizeof p) == 0) shell_explorer(p); else shell_explorer("");
     }
     else if (!strcasecmp(c, "start")) {
         char p[VFS_MAX_PATH];
         if (argc > 1 && resolve(t, argv[1], p, sizeof p) == 0) shell_open(p); else tputs(t, "usage: start file\n");
     }
-    else if (!strcasecmp(c, "paint")) app_paint(NULL);
+    else if (!strcasecmp(c, "paint")) shell_paint(NULL);
     else if (!strcasecmp(c, "calc") && !calc_program()) app_calc();
     else if (!strcasecmp(c, "keyboard")) cmd_keyboard(t, argc, argv);     /* else CALC.EXE below */
     else if (!strcasecmp(c, "sysinfo") || !strcasecmp(c, "msinfo")) app_sysinfo();
