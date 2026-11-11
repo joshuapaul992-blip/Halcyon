@@ -102,4 +102,68 @@ resolution picker, write-combining) that M10 plugs into. Otherwise independent
 of M6-M9; it can move earlier if test cards are at hand, since real-hardware
 testing sets its pace.
 
-**Recommended order:** 5 → 9 → 6 → 7 → 8 → 10.
+### M11: Software 3D
+
+- A 3D library for programs: a subset of OpenGL 1.3, the fixed-function
+  pipeline of early-2000s games (transforms and lighting, textures with
+  mipmaps and bilinear filtering, depth buffer, blending, fog).
+- A software renderer behind it, written for speed: perspective-correct
+  triangle setup, SSE2 inner loops, tiles. Target: textured scenes at 640x480
+  at interactive frame rates on one core.
+- The API is the contract for M12: the same programs later run on the GPU, and
+  the software renderer stays as the fallback for any GPU without a 3D driver.
+- Frames reach the window through M9's shared memory (no copy per frame).
+- Demos: a 3D screensaver (ties in with M8) and a small 3D game or viewer.
+- Fully testable without hardware: the renderer also builds on the host and
+  the CI compares rendered scenes with reference images.
+- Depends on M9 (threads, shared memory).
+
+### M12: Hardware 3D (NVIDIA, Pascal first)
+
+- The M11 API on the GPU, first on the GTX 1070. Second-generation Maxwell
+  (900 series) shares Pascal's instruction set and firmware model, so it
+  comes almost for free; Tesla to Kepler would each need their own shader
+  back end and come later, if at all.
+- Kernel side: GPU memory management (VRAM and per-process GPU page tables, so
+  programs stay isolated on the GPU too), command channels, fences, and
+  recovery from GPU faults (end the program, reset the engine).
+- The graphics engine needs NVIDIA's signed GP104 firmware (from
+  linux-firmware); for 3D it is mandatory, not optional.
+- Shaders: the fixed-function pipeline is turned into GPU machine code by a
+  small generator for the Maxwell/Pascal instruction set, not a full shader
+  compiler. Programmable shaders (and with them a compiler) are a later step.
+  The alternative, porting Mesa's nouveau driver, needs a far larger C/C++
+  runtime and kernel interface than Halcyon has; not recommended at first.
+- The card stays at its boot clocks (no power-management firmware for Pascal),
+  so it is much slower than under NVIDIA's own driver, but still far faster than
+  software.
+- Tested on the GTX 1070 only (VFIO passthrough or bare metal); none of it can
+  run in the CI.
+- Depends on M10 (10a, 10b) and M11.
+
+### M13: Intel and AMD graphics
+
+Display (modesetting) and the M10 features (native modes, resolution switching
+without reboot, several monitors, hardware cursor, page flips), like M10 for
+NVIDIA. Proposed range, matching M10's Pascal (2016):
+
+- **Intel:** Gen4 (GMA X3100/X4500, 2006) up to Gen9.5 (Skylake to Comet Lake).
+  Intel publishes full programmer's reference manuals for all of these, so it
+  is the best-documented GPU family. This is the GPU in most laptops, including
+  those whose NVIDIA GPU has no outputs (see M10), so it reaches the most
+  machines. Laptop panels (eDP) need DisplayPort link training and panel power
+  sequencing. Gen11/Gen12 (Ice Lake and later) come later.
+- **AMD:** Radeon HD 2000 (R600) up to Polaris (RX 400/500), the DCE display
+  engines, programmed largely through AtomBIOS command tables in the video BIOS:
+  this needs an AtomBIOS interpreter (the Linux radeon/amdgpu version is
+  MIT-licensed). Vega and RDNA are deferred: their security processor must load
+  signed firmware first, and their display code (DCN) is very large.
+- Hardware 3D on Intel or AMD is not part of M13: each needs its own shader back
+  end and command submission, a separate milestone after M12 if wanted. Until
+  then they use M11's software renderer.
+- Testing: QEMU emulates neither. AMD cards can be tested through VFIO
+  passthrough; Intel integrated GPUs mostly on bare metal.
+- Depends on M5. Independent of M10 to M12, so it can move earlier if running
+  well on laptops matters more than the NVIDIA card.
+
+**Recommended order:** 5 → 9 → 6 → 7 → 8 → 10 → 11 → 12 → 13.
