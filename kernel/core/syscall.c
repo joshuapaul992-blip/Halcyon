@@ -267,14 +267,18 @@ void syscall_dispatch(struct sysframe *f) {
 
     case SYS_OPEN: r = sys_open(p, a1, (int)a2); break;
     case SYS_CLOSE: {
+        if (handle_get(p, (int)a1, H_SOCKET)) { r = socket_handle_close ? socket_handle_close(p, (int)a1) : E_INVAL; break; }
         vfs_file_t *fl = handle_get(p, (int)a1, H_FILE);
         if (!fl) { r = E_INVAL; break; }
         handle_free(p, (int)a1);
         r = vfs_close(fl);
         break;
     }
-    case SYS_READ: r = file_io(p, (int)a1, a2, a3, 0); break;
-    case SYS_WRITE: r = file_io(p, (int)a1, a2, a3, 1); break;
+    case SYS_READ:
+    case SYS_WRITE:
+        if (handle_get(p, (int)a1, H_SOCKET) && socket_handle_io) r = socket_handle_io(p, (int)a1, a2, a3, nr == SYS_WRITE);
+        else r = file_io(p, (int)a1, a2, a3, nr == SYS_WRITE);
+        break;
     case SYS_SEEK: {
         vfs_file_t *fl = handle_get(p, (int)a1, H_FILE);
         if (!fl) { r = E_INVAL; break; }

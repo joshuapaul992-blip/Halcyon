@@ -444,6 +444,7 @@ void proc_detach_console(void *ctx) {
 /* the last thread of p is ending: give back everything it owned */
 static void proc_finish(proc_t *p) {
     if (proc_release_hook) proc_release_hook(p);
+    if (socket_release_all) socket_release_all(p);
     for (int i = 0; i < PROC_HANDLES; i++) {
         if (p->handles[i].type == H_FILE) vfs_close(p->handles[i].obj);
         else if (p->handles[i].type == H_DIR) kfree(p->handles[i].obj);

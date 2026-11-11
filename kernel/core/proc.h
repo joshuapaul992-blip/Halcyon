@@ -15,7 +15,7 @@ struct regs;
 #define PROC_HANDLES    64
 #define MAX_PROCS       64                      /* running programs */
 
-enum { H_NONE = 0, H_FILE, H_WINDOW, H_DIR };
+enum { H_NONE = 0, H_FILE, H_WINDOW, H_DIR, H_SOCKET, H_SHM };
 
 typedef struct handle { int type; void *obj; } handle_t;
 
@@ -86,6 +86,12 @@ void handle_free(proc_t *p, int h);
 /* hooks for other subsystems */
 extern void (*proc_release_hook)(proc_t *p);       /* windows etc. of an ending process */
 extern void (*proc_crash_hook)(proc_t *p);         /* show "has encountered a problem" */
+
+/* sockets (net/, weak): close / read / write of an H_SOCKET handle, and the
+ * sockets of an ending process */
+int  socket_handle_close(proc_t *p, int h) __attribute__((weak));
+long socket_handle_io(proc_t *p, int h, u64 buf, u64 len, int write) __attribute__((weak));
+void socket_release_all(proc_t *p) __attribute__((weak));
 
 /* called from isr_dispatch for exceptions and interrupts taken in user mode */
 void proc_user_fault(struct regs *r);
