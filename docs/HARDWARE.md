@@ -50,6 +50,10 @@ offers:
 | Use the legacy PIC | Interrupts misbehave with the I/O APIC. Uses the firmware's PCI interrupt lines. |
 | Safe video mode | Black or garbled screen: forces 800×600. |
 
+Programs (the `.EXE` files in `C:\PROGRAMS`) run in user mode: if one crashes, only
+that program is ended. Press Ctrl+Alt+Del for Task Manager to end one that hangs.
+`CRASHME` in the Command Prompt opens a Crash Test window to try it.
+
 If Halcyon crashes, the crash screen tries to save `BOOT.LOG` to the stick before it
 stops. In the Command Prompt, `BOOTLOG` saves the log at any time, and
 `CRASHTEST` deliberately crashes the system so you can check that crash logging
