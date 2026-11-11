@@ -418,6 +418,20 @@ void syscall_dispatch(struct sysframe *f) {
     }
     case SYS_VOLUME_INFO: r = sys_volume_info(a1, a2); break;
     case SYS_VFS_GENERATION: r = vfs_generation(); break;
+    case SYS_GETRANDOM: {
+        u8 tmp[256];
+        u64 n = MIN(a2, 65536ull), done = 0;
+        if (!user_writable(a1, n)) { r = E_INVAL; break; }
+        while (done < n) {
+            u64 c = MIN(n - done, (u64)sizeof tmp);
+            random_bytes(tmp, c);
+            if (copyout(a1 + done, tmp, c)) break;
+            done += c;
+        }
+        memset(tmp, 0, sizeof tmp);
+        r = (long)done;
+        break;
+    }
     case SYS_SHELL_APP: r = sys_shell_app(p, a1, a2); break;
     case SYS_STAT_EX: r = sys_stat_ex(p, a1, a2); break;
     case SYS_PROCLIST: r = sys_proclist(a1, (int)MIN(a2, 256)); break;

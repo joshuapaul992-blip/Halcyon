@@ -102,6 +102,9 @@ static inline int shm_open(const char *name, size_t size, int flags) { return (i
 void *shm_map(int h, size_t *size);                  /* NULL on error; close() the handle when done */
 static inline int shm_unmap(void *p) { return (int)SC1(SYS_SHM_UNMAP, p); }
 
+/* ---- random bytes (ChaCha20 seeded from the CPU's generator; for keys) ---- */
+static inline long getrandom(void *buf, size_t len) { return SC2(SYS_GETRANDOM, buf, len); }   /* bytes (<= 65536) */
+
 /* ---- clock and volumes ---- */
 static inline int datetime(hal_datetime_t *d) { return (int)SC1(SYS_DATETIME, d); }
 static inline int volume_info(char drive, hal_volinfo_t *vi) { return (int)SC2(SYS_VOLUME_INFO, drive, vi); }

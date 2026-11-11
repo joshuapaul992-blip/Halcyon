@@ -8,6 +8,7 @@
 #include "fs/block.h"
 #include "drivers/pci.h"
 #include "drivers/display.h"
+#include "net/netdev.h"
 
 /* Subsystems are linked in as they are written; weak references let the
  * kernel build while a subsystem is missing. */
@@ -54,6 +55,7 @@ void kmain(struct bootinfo *bi) {
     if (acpi_init && !(bf & BOOTF_NO_ACPI)) acpi_init();
     time_init();
     if (irq_init) irq_init();
+    random_init();
     thread_init();
     proc_init();
     if (hwreport_early) hwreport_early();
@@ -73,6 +75,7 @@ void kmain(struct bootinfo *bi) {
     else kprintf("nvme: disabled by boot option\n");
     PROGRESS(55, "Starting USB controllers...");
     if (usb_init) usb_init();
+    if (!(bf & BOOTF_NO_NET)) net_init();
     storage_service();          /* register the USB disks found by usb_init */
     PROGRESS(100, "Starting the desktop...");
     if (hwreport_late) hwreport_late();

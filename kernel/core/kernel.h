@@ -26,6 +26,11 @@ void udelay(u64 us);
 void mdelay(u64 ms);
 u64  tsc_khz(void);              /* TSC ticks per ms */
 u64  time_ms_to_tsc(u64 ms);    /* absolute time_ms() -> TSC value */
+/* random.c: a ChaCha20 generator seeded from RDSEED/RDRAND and TSC jitter */
+void random_init(void);
+void random_add(u64 v);         /* entropy (interrupt-safe) */
+void random_bytes(void *buf, size_t n);
+u32  random_u32(void);
 
 struct rtc_time { int year, month, day, hour, minute, second, weekday; };
 void rtc_read(struct rtc_time *t);

@@ -42,11 +42,14 @@ enum {
      *   50-59, 70-79, 87-89, 94-99, 140-159   more window / drawing / control /
      *           menu calls (gui/usergui.c; 48 and 49 are SYS_WIN_RESIZE and
      *           SYS_WIN_SET_ICON)
-     *   100-139 sockets and poll (net/)
+     *   100-139 sockets and poll (net/): 100-115 sockets, 116-127 the
+     *           internet stack (interfaces, configuration, name lookup),
+     *           128 SYS_GETRANDOM, 129-139 free
      *   160     SYS_WIN_CANVAS: the window's pixels mapped into the program
      *   168-169 Explorer: built-in shell tools, file details (core/syscall.c) */
     SYS_WIN_CANVAS = 160,
     SYS_DATETIME = 161, SYS_VOLUME_INFO, SYS_VFS_GENERATION,
+    SYS_GETRANDOM = 128,        /* (buf, len <= 65536): cryptographically strong bytes */
     SYS_SHELL_APP = 168, SYS_STAT_EX,
     SYS_COUNT = 170
 };

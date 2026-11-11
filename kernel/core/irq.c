@@ -464,6 +464,7 @@ void irq_dispatch(u64 vector) {
             return;
         }
         v->count++;
+        random_add(rdtsc() ^ vector);
         if (v->kind == V_LINE) { line_t *l = v->ptr; pic_set(irq, 1); l->pending = 1; l->fires++; dev_gen++; }
         else if (v->kind == V_HANDLE) { ((irq_handle_t *)v->ptr)->events++; dev_gen++; }
         else if (v->kind == V_TIMER) { timer_fires++; if (thread_current() && thread_current()->proc) g_need_resched = 1; }
@@ -471,6 +472,7 @@ void irq_dispatch(u64 vector) {
         return;
     }
     v->count++;
+    if (v->kind != V_TIMER) random_add(rdtsc() ^ vector);
     switch (v->kind) {
     case V_HANDLE: ((irq_handle_t *)v->ptr)->events++; dev_gen++; break;
     case V_LINE: {
