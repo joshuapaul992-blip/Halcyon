@@ -407,6 +407,25 @@ static u32 async_ep_char(usb_device_t *dev, int epnum, int mps, int control) {
     return c;
 }
 
+/* An async (control/bulk) split transfer that ended with an error other than
+ * STALL, or that we abandoned, can leave the TT's buffer for that endpoint
+ * busy; the hub must then be sent CLEAR_TT_BUFFER (USB 2.0 11.17.5,
+ * 11.24.2.3), or later splits to the endpoint keep failing. Like Linux, not
+ * after a STALL (cannot leave the buffer busy) and not for interrupt
+ * endpoints. Called with e->busy clear (it issues a control transfer to the
+ * high-speed hub, which never recurses here). */
+static void clear_tt_buffer(usb_device_t *dev, int epnum, int type, int in) {
+    usb_device_t *hub = dev->tt_hub;
+    if (dev->speed == USB_SPEED_HIGH || !hub || !hub->alive) return;
+    u16 tt = hub->hub_multi_tt ? dev->tt_port : 1;
+    /* wValue: endpoint 3..0, device address 10..4, type 12..11, IN = bit 15 */
+    u16 v = (u16)((epnum & 0xF) | ((dev->address & 0x7F) << 4) | ((type & 3) << 11));
+    u8 rt = USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_OTHER;
+    if (type == USB_EP_CONTROL)   /* control: clear both directions */
+        usb_control_timeout(hub, rt, 8 /* CLEAR_TT_BUFFER */, (u16)(v | (in ? 0 : 0x8000)), tt, NULL, 0, 1000);
+    usb_control_timeout(hub, rt, 8 /* CLEAR_TT_BUFFER */, (u16)(v | (in ? 0x8000 : 0)), tt, NULL, 0, 1000);
+}
+
 static int ehci_control(usb_hc_t *hc, usb_device_t *dev, const usb_setup_t *s, void *data, int timeout_ms) {
     ehci_t *e = hc->priv;
     if (e->dead) return E_IO;
@@ -453,6 +472,7 @@ static int ehci_control(usb_hc_t *hc, usb_device_t *dev, const usb_setup_t *s, v
 
     int r = queue_run(e, dev, qu, n, status_idx, time_ms() + (u64)timeout_ms);
     e->busy = 0;
+    if (r == E_IO || r == E_TIMEOUT) clear_tt_buffer(dev, 0, USB_EP_CONTROL, in);
     return r;
 }
 
@@ -502,6 +522,7 @@ static int ehci_bulk(usb_hc_t *hc, usb_device_t *dev, usb_endpoint_t *ep, void *
     } while (total < len);
     ep->toggle = (qu->qh->token & QTD_DT) ? 1 : 0;   /* informational only */
     e->busy = 0;
+    if (r == E_IO || r == E_TIMEOUT) clear_tt_buffer(dev, usb_ep_num(ep), USB_EP_BULK, in);
     return r < 0 ? r : total;
 }
 
@@ -722,6 +743,16 @@ static void port_clear_changes(ehci_t *e, int p) {
 }
 
 static void port_release(ehci_t *e, int p, const char *why) {
+    if (e->ncc == 0) {
+        /* HCSPARAMS N_CC = 0: "port-ownership hand-off is not supported, only
+         * high-speed devices are supported on the root ports" (EHCI 2.2.3).
+         * Do not set PORT_OWNER: on controllers that implement it anyway it
+         * would route the port to nothing. (Intel 5/6-series root ports carry
+         * an integrated rate-matching hub, which is high-speed.) */
+        kprintf("ehci: port %d: %s device, but no companion controller (n_cc 0)\n", p + 1, why);
+        e->port_failed[p] = 1;
+        return;
+    }
     u32 v = port_rd(e, p);
     port_wr(e, p, (v & ~PORT_W1C) | PORT_OWNER);
     mdelay(2);

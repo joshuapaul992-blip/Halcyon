@@ -730,18 +730,23 @@ static int ohci_reset_ep(usb_hc_t *hc, usb_device_t *dev, usb_endpoint_t *ep) {
 
 /* ---------- root hub ---------- */
 static int port_reset(ohci_t *o, int p) {
-    port_write(o, p, PS_PRSC);
-    port_write(o, p, PS_PRS);         /* SetPortReset */
+    /* The root hub drives SetPortReset for only 10 ms, but resets from a
+     * root port must total >= 50 ms with gaps < 3 ms (USB 2.0 7.1.7.5,
+     * TDRSTR): issue five back-to-back pulses, as Linux does. */
     u32 v = 0;
-    int ok = 0;
-    for (int i = 0; i < 100; i++) {
-        mdelay(1);
-        v = port_read(o, p);
-        if (!(v & PS_CCS)) return -1;
-        if ((v & PS_PRSC) && !(v & PS_PRS)) { ok = 1; break; }
+    for (int pulse = 0; pulse < 5; pulse++) {
+        port_write(o, p, PS_PRSC);
+        port_write(o, p, PS_PRS);         /* SetPortReset */
+        int ok = 0;
+        for (int i = 0; i < 100; i++) {
+            mdelay(1);
+            v = port_read(o, p);
+            if (!(v & PS_CCS)) return -1;
+            if ((v & PS_PRSC) && !(v & PS_PRS)) { ok = 1; break; }
+        }
+        port_write(o, p, PS_PRSC);
+        if (!ok) return -1;
     }
-    port_write(o, p, PS_PRSC);
-    if (!ok) return -1;
     if (!(v & PS_PES)) {
         port_write(o, p, PS_PES);     /* SetPortEnable */
         mdelay(2);

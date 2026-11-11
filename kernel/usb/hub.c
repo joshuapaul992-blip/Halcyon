@@ -13,6 +13,9 @@
 #define PORT_ENABLE       1
 #define PORT_RESET        4
 #define PORT_POWER        8
+#define C_HUB_LOCAL_POWER 0
+#define C_HUB_OVER_CURRENT 1
+#define BH_PORT_RESET     28
 #define C_PORT_CONNECTION 16
 #define C_PORT_ENABLE     17
 #define C_PORT_SUSPEND    18
@@ -59,13 +62,20 @@ static void port_connected(usb_device_t *dev, hub_t *h, int port) {
     mdelay(100);   /* debounce */
     u16 st, ch;
     if (port_status(dev, port, &st, &ch) < 0 || !(st & PS_CONNECTION)) return;
-    port_feature(dev, port, 1, PORT_RESET);
+    /* SuperSpeed hub port whose link sits in SS.Inactive or Compliance Mode
+     * (wPortStatus bits 8..5): only a warm (BH) reset recovers it, a hot
+     * PORT_RESET is not honoured there (USB 3.2 ch. 7.5, 10.16.2.6).
+     * Completion is then reported through C_BH_PORT_RESET (wPortChange
+     * bit 5). */
+    int pls = (st >> 5) & 0xF;
+    int warm = h->ss && (pls == 6 || pls == 10);
+    port_feature(dev, port, 1, warm ? BH_PORT_RESET : PORT_RESET);
     int ok = 0;
     for (int i = 0; i < 50; i++) {
         mdelay(10);
         if (port_status(dev, port, &st, &ch) < 0) return;
-        if (!(st & PS_RESET) && (ch & (1 << 4))) { ok = 1; break; }
-        if (!(st & PS_CONNECTION)) return;
+        if (!(st & PS_RESET) && (ch & ((1 << 4) | (warm ? 1 << 5 : 0)))) { ok = 1; break; }
+        if (!(st & PS_CONNECTION) && !(warm && (st & PS_RESET))) return;   /* link retrains during a warm reset */
     }
     port_feature(dev, port, 0, C_PORT_RESET);
     if (h->ss) port_feature(dev, port, 0, C_BH_PORT_RESET);
@@ -105,8 +115,23 @@ static void service_port(usb_device_t *dev, hub_t *h, int port) {
         usb_port_disconnected(dev->hc, dev, port);
         child = NULL;
     }
-    if (!connected) h->failed[port] = 0;
+    /* a new connection (unplug + replug between two polls shows up as a
+     * connect change with the port still connected) gets a fresh attempt */
+    if (!connected || (ch & 1)) h->failed[port] = 0;
     if (connected && !child && !h->failed[port]) port_connected(dev, h, port);
+}
+
+/* hub-level change (wHubChange: local power, over-current): reported as
+ * bit 0 of the status change bitmap until acknowledged (USB 2.0 11.24.2.6) */
+static void hub_status_change(usb_device_t *dev) {
+    u8 st[4] = { 0 };
+    if (usb_control(dev, USB_DIR_IN | RT_HUB, HUB_REQ_GET_STATUS, 0, 0, st, 4) < 4) return;
+    u16 ch = st[2] | (st[3] << 8);
+    if (ch & 1) usb_control(dev, USB_DIR_OUT | RT_HUB, HUB_REQ_CLEAR_FEATURE, C_HUB_LOCAL_POWER, 0, NULL, 0);
+    if (ch & 2) {
+        kprintf("usb-hub: hub over-current change (status %04x)\n", st[0] | (st[1] << 8));
+        usb_control(dev, USB_DIR_OUT | RT_HUB, HUB_REQ_CLEAR_FEATURE, C_HUB_OVER_CURRENT, 0, NULL, 0);
+    }
 }
 
 static int hub_probe(usb_device_t *dev, const usb_interface_desc_t *intf, usb_binding_t *b) {
@@ -162,6 +187,7 @@ static void hub_poll(usb_device_t *dev, usb_binding_t *b) {
             } else {
                 h->pending = 0;
                 if (r > 0) {
+                    if (h->buf[0] & 1) hub_status_change(dev);
                     for (int p = 1; p <= h->nports && dev->alive; p++)
                         if (h->buf[p / 8] & (1 << (p % 8))) service_port(dev, h, p);
                 } else if (r == E_STALL) {

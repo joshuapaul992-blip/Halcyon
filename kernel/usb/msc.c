@@ -162,9 +162,10 @@ static int lun_init(msc_t *m, int lun) {
         for (int i = 7; i >= 0 && vendor[i] == ' '; i--) vendor[i] = 0;
         for (int i = 15; i >= 0 && product[i] == ' '; i--) product[i] = 0;
     }
-    /* wait for the unit to become ready (up to ~6 s) */
-    int ready = 0;
-    for (int i = 0; i < 30; i++) {
+    /* wait for the unit to become ready (up to ~6 s, ~30 s while it
+     * reports "becoming ready", e.g. a disk spinning up) */
+    int ready = 0, started = 0;
+    for (int i = 0; i < 150; i++) {
         u8 tur[6] = { 0 };
         r = scsi_cmd(m, lun, tur, 6, NULL, 0, 0, 2000);
         if (r == 0) { ready = 1; break; }
@@ -172,6 +173,15 @@ static int lun_init(msc_t *m, int lun) {
         u8 key = 0, asc = 0;
         request_sense(m, lun, &key, &asc);
         if (key == 0x02 && asc == 0x3A) break;   /* medium not present */
+        if (key == 0x05) break;                  /* ILLEGAL REQUEST: no such LUN */
+        if (key == 0x02 && asc == 0x04 && m->sense[13] == 0x02 && !started) {
+            /* "initializing command required": START STOP UNIT, START=1 */
+            u8 ssu[6] = { 0x1B, 0, 0, 0, 0x01, 0 };
+            scsi_cmd(m, lun, ssu, 6, NULL, 0, 0, 20000);
+            started = 1;
+        }
+        /* past ~6 s only keep waiting for 04/01 "becoming ready" (and 04/02 after START) */
+        if (i >= 30 && !(key == 0x02 && asc == 0x04 && (m->sense[13] == 0x01 || m->sense[13] == 0x02))) break;
         mdelay(200);
     }
     if (!ready) { kprintf("usb-msc: LUN %d not ready (no medium?)\n", lun); kfree(buf); return -1; }
@@ -250,6 +260,7 @@ static int msc_probe(usb_device_t *dev, const usb_interface_desc_t *intf, usb_bi
     u8 maxlun = 0;
     if (usb_control(dev, USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE, BOT_MAX_LUN, 0, m->intf, &maxlun, 1) < 1)
         maxlun = 0;
+    if (maxlun > 15) maxlun = 0;   /* BOT 3.2: 0..15; like Linux, treat garbage as one LUN */
     m->nluns = MIN(maxlun + 1, MAX_LUNS);
     snprintf(dev->description, sizeof dev->description, "USB mass storage device");
     kprintf("usb-msc: %s, %d LUN(s)\n", dev->product, m->nluns);

@@ -1316,8 +1316,17 @@ static void xhci_setup(pci_dev_t *pd) {
     /* BIOS handoff + protocol capabilities */
     parse_xcaps(x);
 
-    /* Intel PCH: route the shared ports to xHCI */
-    if (pd->vendor == 0x8086) {
+    /* Intel PCH: route the shared ports to xHCI. Only on chipsets where they
+     * are shared with an Intel EHCI (7/8/9-series): like Linux
+     * (usb_enable_intel_xhci_ports), skip it when no Intel EHCI exists, since
+     * later PCHs do not define XUSB2PR/USB3_PSSEN at these offsets. */
+    int intel_ehci = 0;
+    for (int i = 0; pd->vendor == 0x8086; i++) {
+        pci_dev_t *e = pci_find_class(0x0C, 0x03, 0x20, i);
+        if (!e) break;
+        if (e->vendor == 0x8086) { intel_ehci = 1; break; }
+    }
+    if (pd->vendor == 0x8086 && intel_ehci) {
         u32 ss = pci_read32(pd, 0xDC), hs = pci_read32(pd, 0xD4);
         pci_write32(pd, 0xD8, ss);
         pci_write32(pd, 0xD0, hs);
