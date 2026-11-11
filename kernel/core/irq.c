@@ -688,6 +688,9 @@ static void timer_arm_tsc(u64 deadline) {
 void irq_timeslice(u64 ms) {
     if (timer_kind != TMR_NONE && idle_ok) timer_arm_tsc(rdtsc() + ms * tsc_khz());
 }
+void irq_timeslice_tsc(u64 ticks) {
+    if (timer_kind != TMR_NONE && idle_ok) timer_arm_tsc(rdtsc() + ticks);
+}
 
 static void timer_disarm(void) {
     if (timer_kind == TMR_LAPIC) lapic_wr(LAPIC_TIMER_INIT, 0);

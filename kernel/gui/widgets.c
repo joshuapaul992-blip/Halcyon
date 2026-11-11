@@ -148,7 +148,7 @@ static void textbox_paint(window_t *w, gc_t *g, widget_t *wd) {
     gfx_sunken_field(g, wd->r, dis || (wd->style & WS_READONLY) ? HEX(0xF4F3EE) : HEX(0xFFFFFF));
     rect_t in = rect_inset(wd->r, 3);
     gc_t sub = gc_sub(g, in);
-    char shown[256];
+    char shown[sizeof wd->text];
     int n = (int)strlen(wd->text);
     for (int i = 0; i < n; i++) shown[i] = (wd->style & WS_PASSWORD) ? '*' : wd->text[i];
     shown[n] = 0;

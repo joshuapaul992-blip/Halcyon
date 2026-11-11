@@ -6,11 +6,14 @@
 struct regs;
 
 #define USER_BASE       0x0000200000000000ull   /* PML4 entry 64: programs load here */
-#define USER_END        0x0000800000000000ull   /* end of the canonical lower half */
+/* end of user memory: one page short of the canonical lower half, so the
+ * address after a SYSCALL instruction (SYSRET's RCX) is always canonical */
+#define USER_END        0x00007FFFFFFFF000ull
 #define USER_STACK_TOP  0x00007FFF00000000ull
 #define USER_STACK_SIZE (1024 * 1024)
 #define USER_MAX_PAGES  (256 * 1024)            /* 1 GiB per process */
 #define PROC_HANDLES    64
+#define MAX_PROCS       64                      /* running programs */
 
 enum { H_NONE = 0, H_FILE, H_WINDOW, H_DIR };
 
@@ -19,7 +22,8 @@ typedef struct handle { int type; void *obj; } handle_t;
 typedef struct console_ops {
     void (*write)(void *ctx, const char *s, int n);
     int  (*read)(void *ctx, char *buf, int n);     /* blocks for a line; < 0 = end of input */
-    void (*exited)(void *ctx, int code);           /* the program ended */
+    void (*attach)(void *ctx, u32 pid);            /* another program uses this console */
+    void (*exited)(void *ctx, u32 pid, int code);  /* a program using it ended */
 } console_ops_t;
 
 enum { P_RUNNING = 1, P_ZOMBIE };
@@ -39,7 +43,8 @@ typedef struct proc {
     u64 brk_start, brk;
     u64 image_base, entry;
     int nthreads;
-    thread_t *main;
+    thread_t *main;                 /* NULL once it has ended */
+    u64 cpu_tsc;                    /* CPU time of threads that have ended */
     handle_t handles[PROC_HANDLES];
     void *gui;                      /* window system state (gui/usergui.c) */
     const console_ops_t *con;       /* stdout / stdin (Command Prompt) or NULL */
@@ -85,6 +90,11 @@ extern void (*proc_crash_hook)(proc_t *p);         /* show "has encountered a pr
 /* called from isr_dispatch for exceptions and interrupts taken in user mode */
 void proc_user_fault(struct regs *r);
 void proc_user_return(struct regs *r);              /* before iretq to user mode */
+/* the current user thread's time slice: yield if it is used up, else make
+ * sure the timer will interrupt it when it is (called before returning to
+ * user mode, interrupts disabled) */
+void proc_slice_check(void);
+u64  proc_cpu_ms(proc_t *p);
 extern volatile int g_need_resched;
 
 #endif

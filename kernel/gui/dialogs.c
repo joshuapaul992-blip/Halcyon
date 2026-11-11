@@ -33,7 +33,9 @@ static int run_modal(window_t *owner, window_t *dw, dlg_t *d) {
     return d->result;
 }
 
-int msgbox(window_t *owner, const char *title, const char *text, int icon, int buttons) {
+/* the message box window; buttons call on_click (id = ID_*) */
+window_t *msgbox_window(const char *title, const char *text, int icon, int buttons,
+                        void (*on_click)(window_t *w, widget_t *wd)) {
     int tw = gfx_text_width(&font_ui, text);
     int textw = CLAMP(tw + 10, 200, 420);
     int texth = gfx_text_wrap_height(&font_ui, textw, text);
@@ -41,6 +43,7 @@ int msgbox(window_t *owner, const char *title, const char *text, int icon, int b
     int cw = MAX(textw + 76, nb * 82 + 30);
     int ch = MAX(texth, 36) + 72;
     window_t *w = wm_create(title, -1, 0, 0, cw, ch, WF_DIALOG | WF_CENTER);
+    if (!w) return NULL;
     widget_t *ic = widget_add(w, W_ICON, mkrect(16, 16, 32, 32), "", 0);
     ic->value = icon >= 0 ? icon : ICON_INFO;
     widget_t *lb = widget_add(w, W_LABEL, mkrect(62, 16 + (texth < 32 ? (32 - texth) / 2 : 0), textw, texth + 4), text, 0);
@@ -55,10 +58,16 @@ int msgbox(window_t *owner, const char *title, const char *text, int icon, int b
     int bx = (cw - (n * 82 - 7)) / 2;
     for (int i = 0; i < n; i++) {
         widget_t *b = widget_add(w, W_BUTTON, mkrect(bx + i * 82, ch - 36, 75, 23), lbl[i], ids[i]);
-        b->on_click = dlg_button;
+        b->on_click = on_click;
         if (i == 0) { b->style |= WS_DEFAULT; w->focus = b; }
         if (ids[i] == ID_CANCEL || (n == 1)) b->style |= WS_CANCEL;
     }
+    return w;
+}
+
+int msgbox(window_t *owner, const char *title, const char *text, int icon, int buttons) {
+    window_t *w = msgbox_window(title, text, icon, buttons, dlg_button);
+    if (!w) return ID_CANCEL;
     dlg_t d = { 0 };
     return run_modal(owner, w, &d);
 }

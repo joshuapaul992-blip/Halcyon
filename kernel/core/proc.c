@@ -11,13 +11,19 @@
 #define PTE_P   0x001ull
 #define PTE_RW  0x002ull
 #define PTE_US  0x004ull
+#define PTE_NX  (1ull << 63)
 #define PTE_ADDR 0x000FFFFFFFFFF000ull
+#define VM_W 1
+#define VM_X 2
+static u64 nx_bit;               /* PTE_NX when the CPU supports it (EFER.NXE set) */
+static u64 slice_end;            /* TSC when the current user thread's slice ends */
 #define PML4_USER_FIRST 64
 #define PML4_USER_LAST  255
 #define KERNEL_RESERVE  (32ull << 20)       /* heap kept free for the kernel */
 
 u64 *mm_kernel_pml4(void);                         /* mm.c */
 void irq_timeslice(u64 ms);                        /* irq.c */
+void irq_timeslice_tsc(u64 ticks);
 extern void user_enter(u64 rip, u64 rsp, u64 arg); /* entry.asm */
 extern void (*thread_switch_hook)(thread_t *next); /* thread.c */
 
@@ -35,6 +41,11 @@ proc_t *proc_by_pid(u32 pid) {
 }
 int proc_alive(u32 pid) { proc_t *p = proc_by_pid(pid); return p && p->state == P_RUNNING; }
 int proc_exit_code(u32 pid) { proc_t *p = proc_by_pid(pid); return p ? p->exit_code : E_NOENT; }
+u64 proc_cpu_ms(proc_t *p) {
+    u64 t = p->cpu_tsc;
+    if (p->main) t += p->main->cpu_tsc + (p->main == thread_current() ? rdtsc() - p->main->run_start : 0);
+    return t / tsc_khz();
+}
 
 /* ---------------- page pool ---------------- */
 /* User pages and page tables come from 1 MiB chunks of the kernel heap
@@ -125,23 +136,29 @@ static u64 *walk(proc_t *p, u64 va, int create) {
     return &t[(va >> 12) & 511];
 }
 
-/* map zeroed pages over [va, va+len) (already mapped pages are kept) */
-static int vm_alloc(proc_t *p, u64 va, u64 len) {
+/* map zeroed pages over [va, va+len); pages already mapped get the union of
+ * the permissions (two segments can share a page) */
+static int vm_alloc(proc_t *p, u64 va, u64 len, int prot) {
     if (!user_range(va, len)) return E_INVAL;
+    u64 flags = PTE_P | PTE_US | ((prot & VM_W) ? PTE_RW : 0) | ((prot & VM_X) ? 0 : nx_bit);
     for (u64 a = va & ~0xFFFull; a < va + len; a += 4096) {
         u64 *pte = walk(p, a, 1);
         if (!pte) return E_NOMEM;
-        if (*pte & PTE_P) continue;
+        if (*pte & PTE_P) {
+            if (prot & VM_W) *pte |= PTE_RW;
+            if (prot & VM_X) *pte &= ~PTE_NX;
+            continue;
+        }
         if (p->pages >= USER_MAX_PAGES) return E_NOMEM;
         void *frame = page_alloc();          /* keeps the kernel's reserve */
         if (!frame) return E_NOMEM;
-        *pte = (u64)(uptr)frame | PTE_P | PTE_RW | PTE_US;
+        *pte = (u64)(uptr)frame | flags;
         p->pages++;
     }
     return 0;
 }
 
-int vm_grow(proc_t *p, u64 va, u64 len) { return vm_alloc(p, va, len); }
+int vm_grow(proc_t *p, u64 va, u64 len) { return vm_alloc(p, va, len, VM_W); }
 
 static void vm_destroy(proc_t *p) {
     if (!p->pml4) return;
@@ -178,6 +195,7 @@ static void switch_hook(thread_t *n) {
         u64 *k = mm_kernel_pml4();
         for (int i = 0; i < 512; i++) if (i < PML4_USER_FIRST || i > PML4_USER_LAST) p->pml4[i] = k[i];
         cr3_load(p->pml4);
+        slice_end = rdtsc() + 10 * tsc_khz();
         irq_timeslice(10);
     } else {
         cr3_load(mm_kernel_pml4());
@@ -295,7 +313,7 @@ static int elf_load(proc_t *p, const u8 *f, u32 size, char *why, int whysz) {
             FAIL("bad segment %d", i);
         u64 va = base + s->vaddr;
         if (!user_range(va, s->memsz)) FAIL("segment %d outside user memory", i);
-        if (vm_alloc(p, va, s->memsz)) FAIL("out of memory");
+        if (vm_alloc(p, va, s->memsz, ((s->flags & 2) ? VM_W : 0) | ((s->flags & 1) ? VM_X : 0))) FAIL("out of memory");
         if (load_copy(p, va, f + s->offset, s->filesz)) FAIL("cannot load segment %d", i);
         if (va < lo) lo = va;
         if (va + s->memsz > hi) hi = va + s->memsz;
@@ -313,6 +331,7 @@ static int elf_load(proc_t *p, const u8 *f, u32 size, char *why, int whysz) {
             else if (d.tag == 9) relaent = d.val;
         }
         if (relaent != sizeof(elf_rela_t)) FAIL("bad relocation entries");
+        if (relasz > hi - lo || relasz > (16u << 20)) FAIL("relocation table too large");
         for (u64 off = 0; off < relasz; off += sizeof(elf_rela_t)) {
             elf_rela_t r;
             if (load_read(p, base + rela + off, &r, sizeof r)) FAIL("bad relocation table");
@@ -345,8 +364,7 @@ static void proc_reap(void) {
     proc_t **pp = &procs;
     while (*pp) {
         proc_t *p = *pp;
-        if (p->state == P_ZOMBIE && !p->nthreads && (!p->main || !thread_alive(p->main->id)) &&
-            (!p->parent || !proc_alive(p->parent))) {
+        if (p->state == P_ZOMBIE && !p->nthreads && !p->main && (!p->parent || !proc_alive(p->parent))) {
             *pp = p->next;
             kfree(p);
             continue;
@@ -357,6 +375,15 @@ static void proc_reap(void) {
 
 int proc_spawn(const char *path, const char *args, const console_ops_t *con, void *con_ctx) {
     proc_reap();
+    /* without a timer interrupt programs could not be preempted: one that
+     * loops would hang the desktop */
+    if (!idle_enabled()) {
+        kprintf("proc: %s not started: programs need a working timer interrupt\n", path);
+        return E_NOTSUP;
+    }
+    int running = 0;
+    for (proc_t *q = procs; q; q = q->next) if (q->state == P_RUNNING) running++;
+    if (running >= MAX_PROCS) return E_BUSY;
     char *data = NULL;
     u32 size = 0;
     int r = vfs_read_file(path, &data, &size);
@@ -379,7 +406,7 @@ int proc_spawn(const char *path, const char *args, const console_ops_t *con, voi
     kfree(data);
     /* stack, with the argument string at its top */
     u64 argp = 0, sp = USER_STACK_TOP;
-    if (!r) r = vm_alloc(p, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_SIZE);
+    if (!r) r = vm_alloc(p, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_SIZE, VM_W);
     if (!r) {
         char a[512];
         snprintf(a, sizeof a, "%s%s%s", p->name, args && *args ? " " : "", args ? args : "");
@@ -402,6 +429,7 @@ int proc_spawn(const char *path, const char *args, const console_ops_t *con, voi
     t->proc = p;
     p->main = t;
     p->nthreads = 1;
+    if (con && con->attach) con->attach(con_ctx, p->pid);
     p->state = P_RUNNING;
     p->next = procs;
     procs = p;
@@ -427,9 +455,10 @@ static void proc_finish(proc_t *p) {
     p->state = P_ZOMBIE;
     kprintf("proc: %u %s ended (code %d, %lu KiB freed)%s%s\n", p->pid, p->name, p->exit_code, pages * 4,
             p->fault[0] ? ": " : "", p->fault);
-    if (p->con && p->con->exited) p->con->exited(p->con_ctx, p->exit_code);
+    if (p->con && p->con->exited) p->con->exited(p->con_ctx, p->pid, p->exit_code);
     p->con = NULL;
     if (p->crashed && proc_crash_hook) proc_crash_hook(p);
+    proc_reap();
 }
 
 NORETURN void proc_exit(int code) {
@@ -437,8 +466,11 @@ NORETURN void proc_exit(int code) {
     if (!p) panic("proc_exit outside a process");
     if (!p->killed) p->exit_code = code;
     p->killed = 1;
+    thread_t *t = thread_current();
+    p->cpu_tsc += t->cpu_tsc + (rdtsc() - t->run_start);
+    if (p->main == t) p->main = NULL;   /* the thread is freed after it ends */
     if (--p->nthreads == 0) proc_finish(p);
-    thread_current()->proc = NULL;      /* this thread now only finishes in the kernel */
+    t->proc = NULL;                     /* this thread now only finishes in the kernel */
     thread_exit();
 }
 
@@ -478,16 +510,22 @@ void proc_user_fault(struct regs *r) {
     proc_exit(p->exit_code);
 }
 
-void proc_user_return(struct regs *r) {
+void proc_slice_check(void) {
     proc_t *p = proc_current();
     if (!p) return;
-    if (p->killed) proc_exit(p->exit_code);
-    if (g_need_resched) {
-        g_need_resched = 0;
-        thread_yield();
+    for (;;) {
         if (p->killed) proc_exit(p->exit_code);
+        if (!g_need_resched && rdtsc() < slice_end) break;
+        g_need_resched = 0;
+        thread_yield();                /* a new slice when it runs again */
     }
+    /* the one-shot timer may have fired (and been used up) while this thread
+     * was in the kernel: arm it again for the rest of the slice */
+    u64 left = slice_end - rdtsc();
+    irq_timeslice_tsc(left);
 }
+
+void proc_user_return(struct regs *r) { (void)r; proc_slice_check(); }
 
 /* ---------------- handles ---------------- */
 int handle_alloc(proc_t *p, int type, void *obj) {
@@ -505,4 +543,10 @@ void handle_free(proc_t *p, int h) {
 
 void proc_init(void) {
     thread_switch_hook = switch_hook;
+    u32 a, b, c, d;
+    cpuid(0x80000000, 0, &a, &b, &c, &d);
+    if (a >= 0x80000001) {
+        cpuid(0x80000001, 0, &a, &b, &c, &d);
+        if (d & (1u << 20)) { wrmsr(0xC0000080, rdmsr(0xC0000080) | (1u << 11)); nx_bit = PTE_NX; }   /* EFER.NXE */
+    }
 }

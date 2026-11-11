@@ -61,7 +61,7 @@ struct widget {
     rect_t r;                 /* client coordinates */
     u32 style;
     int id;
-    char text[256];
+    char text[1024];          /* labels can hold a message box's text */
     int value;                /* checkbox state, listbox selection, progress 0..1000, icon index */
     /* textbox */
     int cursor, sel_anchor, scroll;
@@ -188,6 +188,9 @@ int  menubar_event(window_t *w, gui_event_t *e);
 enum { MB_OK = 1, MB_OKCANCEL, MB_YESNO, MB_YESNOCANCEL };
 enum { ID_OK = 1, ID_CANCEL = 2, ID_YES = 6, ID_NO = 7 };
 int  msgbox(window_t *owner, const char *title, const char *text, int icon, int buttons);
+/* a message box that does not wait: buttons call on_click; the caller destroys it */
+window_t *msgbox_window(const char *title, const char *text, int icon, int buttons,
+                        void (*on_click)(window_t *w, widget_t *wd));
 /* text input; returns 1 and fills buf if OK */
 int  inputbox(window_t *owner, const char *title, const char *prompt, char *buf, int bufsz);
 /* file dialogs: dir is the starting folder; result path in out */

@@ -24,8 +24,16 @@ thread_t *thread_current(void) { return cur; }
 thread_t *thread_first(void) { return threads; }
 int thread_count(void) { return nthreads; }
 
+extern u8 boot_stack[], boot_stack_top[];       /* entry.asm */
+
 void thread_init(void) {
     thread_t *t = &boot_thread;
+    /* the boot stack gets the same overflow canary as the others; the
+     * canary sits at its lowest address (the stack has room to spare below
+     * what is in use by now) */
+    t->stack = boot_stack;
+    t->stack_top = (u64)(uptr)boot_stack_top;
+    *(u64 *)boot_stack = STACK_CANARY;
     t->id = next_id++;
     strlcpy(t->name, "main", sizeof t->name);
     t->state = T_RUNNING;

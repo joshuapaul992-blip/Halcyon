@@ -56,7 +56,7 @@ static void syscall_init(void) {
     wrmsr(0xC0000080, rdmsr(0xC0000080) | 1);                 /* EFER.SCE */
     wrmsr(0xC0000081, (0x10ull << 48) | (0x08ull << 32));      /* STAR */
     wrmsr(0xC0000082, (u64)(uptr)syscall_entry);               /* LSTAR */
-    wrmsr(0xC0000084, 0x200 | 0x400 | 0x100 | 0x40000);        /* FMASK: IF, DF, TF, AC */
+    wrmsr(0xC0000084, 0x200 | 0x400 | 0x100 | 0x40000 | 0x4000);   /* FMASK: IF, DF, TF, AC, NT */
 }
 
 static void gdt_load(void) {
@@ -108,6 +108,8 @@ void isr_dispatch(struct regs *r) {
         if (r->cs & 3) proc_user_return(r);     /* preemption, kill requests */
         return;
     }
+    /* an NMI is not the program's doing */
+    if ((r->cs & 3) && r->vector == 2) { kprintf("cpu: NMI while a program was running (ignored)\n"); proc_user_return(r); return; }
     /* an exception in a user program ends that program, not the system */
     if ((r->cs & 3) && r->vector != 8 && r->vector != 18) { proc_user_fault(r); return; }
     __asm__ volatile("cli");
@@ -163,6 +165,24 @@ void cpu_init(void) {
     idt[18].ist = 2;                   /* machine check */
     tss_init();
     syscall_init();
+    /* protection the kernel can use: CR0.WP; SMEP (no running user pages in
+     * ring 0), SMAP (no touching them: the kernel reaches user memory only
+     * through the identity map), UMIP (no SGDT/SIDT/SLDT/SMSW/STR in user mode) */
+    u64 cr0, cr4;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %0, %%cr0" :: "r"(cr0 | (1ull << 16)));
+    u32 ma, mb, mc, md;
+    cpuid(0, 0, &ma, &mb, &mc, &md);
+    if (ma >= 7) {
+        cpuid(7, 0, &ma, &mb, &mc, &md);
+        __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+        if (mb & (1u << 7)) cr4 |= 1ull << 20;
+        if (mb & (1u << 20)) cr4 |= 1ull << 21;
+        if (mc & (1u << 2)) cr4 |= 1ull << 11;
+        __asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
+        kprintf("cpu: SMEP %s, SMAP %s, UMIP %s\n", (mb & (1u << 7)) ? "on" : "n/a", (mb & (1u << 20)) ? "on" : "n/a",
+                (mc & (1u << 2)) ? "on" : "n/a");
+    }
     struct dtr d = { sizeof(idt) - 1, (u64)(uptr)idt };
     __asm__ volatile("lidt %0" :: "m"(d));
 

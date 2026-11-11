@@ -99,8 +99,32 @@ int main(int argc, char **argv) {
         CHECK(win_get_event(&ev, 50) == 0, "timeout with no events");
         win_set_timer(w, 30);
         CHECK(win_get_event(&ev, 1000) == 1 && ev.type == EVT_TIMER, "timer event");
+        /* drawing with absurd coordinates costs bounded time */
+        uint64_t g0 = time_ms();
+        gfx_line(w, -2000000000, -2000000000, 2000000000, 2000000000, RGB(255, 0, 0));
+        gfx_circle(w, 100, 50, 2000000000, RGB(0, 0, 255), 1);
+        gfx_circle(w, 100, 50, 2000000000, RGB(0, 0, 255), 0);
+        CHECK(time_ms() - g0 < 2000, "huge shapes took %llu ms", (unsigned long long)(time_ms() - g0));
         win_destroy(w);
         CHECK(win_get_event(&ev, 0) == 0, "no events after destroy");
+
+        /* canvas memory is limited per program: big windows run out with an error */
+        int big[16], nbig = 0, last = 0;
+        for (int i = 0; i < 16; i++) {
+            last = win_create("Big", 2048, 1536, 0);
+            if (last < 0) break;
+            big[nbig++] = last;
+        }
+        CHECK(nbig >= 1 && nbig < 16 && last == E_NOMEM, "canvas quota: %d windows, then %d", nbig, last);
+        for (int i = 0; i < nbig; i++) win_destroy(big[i]);
+        CHECK((w = win_create("Again", 640, 480, 0)) >= 0, "window after quota released");
+        if (w >= 0) win_destroy(w);
+
+        /* a program waiting in a message box can be ended */
+        int mb = spawn("C:/PROGRAMS/CRASHME.EXE", "msgbox");
+        sleep_ms(300);
+        uint64_t k0 = time_ms();
+        CHECK(mb > 0 && kill(mb) == 0 && wait(mb) == -1 && time_ms() - k0 < 1000, "end a program in a message box");
     } else {
         printf("selftest: no desktop, window checks skipped\n");
     }

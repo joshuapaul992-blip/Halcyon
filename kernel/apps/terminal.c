@@ -43,7 +43,8 @@ typedef struct term {
  * the program has ended, even if the window closes first (t = NULL then). */
 typedef struct tcon {
     term_t *t;
-    u32 pid;
+    u32 pid;                     /* the program started from the prompt */
+    int refs;                    /* programs using this console (it and its children) */
     char in[LINE_MAX + 2];
     int in_len, in_ready;
 } tcon_t;
@@ -116,19 +117,24 @@ static int con_read(void *ctx, char *buf, int n) {
     c->in_ready = 0;
     return len;
 }
-static void con_exited(void *ctx, int code) {
+static void con_attach(void *ctx, u32 pid) { ((tcon_t *)ctx)->refs++; (void)pid; }
+static void con_exited(void *ctx, u32 pid, int code) {
     tcon_t *c = ctx;
-    if (c->t) {
+    if (pid == c->pid && c->t) {
+        /* the program started from the prompt ended: the prompt is back, and
+         * the window no longer belongs to this console (later output of
+         * programs it started is dropped) */
         term_t *t = c->t;
-        t->con = NULL;
+        if (t->con == c) t->con = NULL;
         t->errorlevel = code;
         if (t->curlen) tputc(t, '\n');
         tputc(t, '\n');
         wm_invalidate(t->win);
+        c->t = NULL;
     }
-    kfree(c);
+    if (--c->refs <= 0) kfree(c);
 }
-static const console_ops_t term_con_ops = { con_write, con_read, con_exited };
+static const console_ops_t term_con_ops = { con_write, con_read, con_attach, con_exited };
 
 static void prompt_str(term_t *t, char *out, int n) {
     if (t->con) { if (n) out[0] = 0; return; }      /* a program is running: no prompt */
@@ -634,7 +640,7 @@ static void execute(term_t *t, int argc, char **argv, const char *rest) {
         tprintf(t, "%-16s  %5d  %6s  %7d  %6lu KB  (kernel)\n", "System", 0, "-", thread_count(), (u64)0);
         for (proc_t *pr = proc_first(); pr; pr = pr->next) {
             if (pr->state != P_RUNNING) continue;
-            u64 cpu = pr->main ? pr->main->cpu_tsc / tsc_khz() : 0;
+            u64 cpu = proc_cpu_ms(pr);
             tprintf(t, "%-16s  %5u  %6u  %7d  %6lu KB  %lu.%03lu s\n", pr->name, pr->pid, pr->parent, pr->nthreads,
                     pr->pages * 4, cpu / 1000, cpu % 1000);
         }

@@ -22,6 +22,11 @@ static void fail(const char *how) {
     else if (!strcmp(how, "opcode")) __asm__ volatile("ud2");
     else if (!strcmp(how, "privileged")) __asm__ volatile("cli; hlt");
     else if (!strcmp(how, "stack")) sink = recurse(0);
+    else if (!strcmp(how, "msgbox")) {
+        /* waits in a message box nobody answers (the self test ends it) */
+        msgbox(-1, "CRASHME", "Waiting for an answer that never comes.", MBX_ICON_INFO, MBX_OK);
+        sink = 1;
+    }
     else if (!strcmp(how, "loop")) { printf("Spinning forever: the desktop keeps working; Ctrl+C ends me.\n"); for (;;) sink++; }
     else if (!strcmp(how, "memory")) {
         long total = 0;

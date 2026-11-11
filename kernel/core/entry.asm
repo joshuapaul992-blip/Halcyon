@@ -76,10 +76,13 @@ isr_common:
     push r13
     push r14
     push r15
+    cld                             ; interrupt gates keep the interrupted DF (user mode can set it)
     mov rbx, rsp
     and rsp, -16
     sub rsp, 512
     fxsave [rsp]
+    ldmxcsr [rel kernel_mxcsr]      ; the kernel's own SSE / x87 control state,
+    fldcw [rel kernel_fcw]          ; not the interrupted program's
     mov rdi, rbx
     call isr_dispatch
     fxrstor [rsp]
@@ -148,6 +151,7 @@ thread_entry:
 ; in a global while switching stacks (one CPU, interrupts still off).
 extern g_kstack_top
 extern syscall_dispatch
+extern proc_slice_check
 global syscall_entry
 syscall_entry:
     mov [rel user_rsp_tmp], rsp
@@ -171,9 +175,12 @@ syscall_entry:
     mov rdi, rsp
     sub rsp, 512                    ; the user's FPU / SSE state
     fxsave [rsp]
+    ldmxcsr [rel kernel_mxcsr]
+    fldcw [rel kernel_fcw]
     sti
     call syscall_dispatch           ; may block, switch threads, or never return (exit)
     cli
+    call proc_slice_check           ; ended? slice used up? timer armed? (interrupts off)
     fxrstor [rsp]
     add rsp, 512
     pop r15
@@ -218,13 +225,19 @@ user_enter:
     xor r13d, r13d
     xor r14d, r14d
     xor r15d, r15d
-    fninit
-    push 0x1F80
-    ldmxcsr [rsp]
-    add rsp, 8
+    fxrstor [rel fx_clean]          ; clean x87 / SSE state: no registers from earlier threads
     iretq
 
 section .data
+kernel_mxcsr: dd 0x1F80
+kernel_fcw:   dw 0x037F
+align 16
+fx_clean:                           ; FXSAVE image: FCW 0x37F, MXCSR 0x1F80, all registers zero
+    dw 0x037F
+    times 22 db 0
+    dd 0x1F80
+    dd 0x0000FFFF                   ; MXCSR_MASK
+    times 512 - 32 db 0
 global isr_table
 isr_table:
 %assign i 0
@@ -236,6 +249,7 @@ isr_table:
 section .bss
 alignb 16
 user_rsp_tmp: resq 2
+global boot_stack, boot_stack_top
 boot_stack:
     resb 65536
 boot_stack_top:

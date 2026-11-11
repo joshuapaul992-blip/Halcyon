@@ -47,6 +47,12 @@ u64 *mm_kernel_pml4(void) { return pml4; }
 
 void *mm_map_mmio(u64 phys, u64 size) {
     if (phys + size <= 0x100000000ull) return (void *)(uptr)phys;
+    /* identity mappings must stay below the user half (PML4 entries 64..255
+     * belong to programs and are replaced on every address-space switch) */
+    if (phys + size < phys || phys + size > 0x0000200000000000ull) {
+        kprintf("mm: device memory at %llx is outside the mappable range\n", (unsigned long long)phys);
+        return NULL;
+    }
     u64 start = phys & ~0x1FFFFFull, end = (phys + size + 0x1FFFFF) & ~0x1FFFFFull;
     for (u64 a = start; a < end; a += 0x200000) {
         u64 i4 = (a >> 39) & 511, i3 = (a >> 30) & 511, i2 = (a >> 21) & 511;

@@ -86,7 +86,7 @@ static long sys_proclist(u64 ubuf, int max) {
         pi.pid = p->pid; pi.parent = p->parent;
         strlcpy(pi.name, p->name, sizeof pi.name);
         pi.mem_kib = p->pages * 4;
-        pi.cpu_ms = p->main ? p->main->cpu_tsc / tsc_khz() : 0;
+        pi.cpu_ms = proc_cpu_ms(p);
         pi.run_ms = time_ms() - p->start_ms;
         pi.threads = p->nthreads;
         pi.state = p->state;
@@ -116,6 +116,7 @@ static long sys_sysinfo(u64 ubuf) {
 
 static long con_write(proc_t *p, u64 ubuf, u64 len) {
     char buf[256];
+    if (len > 64 * 1024) len = 64 * 1024;     /* bounded work per call (programs loop) */
     u64 done = 0;
     while (done < len) {
         u64 n = MIN(len - done, sizeof buf);
@@ -210,7 +211,7 @@ static long sys_volumes(u64 ubuf, int max) {
     for (int i = 0; i < vfs_volume_count(); i++) {
         volume_t *v = vfs_volume(i);
         o += snprintf(buf + o, sizeof buf - o, "%c:%s:%s\n", v->letter, v->fs_name, v->label);
-        if (o >= (int)sizeof buf - 1) break;
+        if (o >= (int)sizeof buf - 1) { o = (int)sizeof buf - 1; break; }
     }
     if (max <= 0) return o + 1;
     int n = MIN(o + 1, max);
@@ -277,6 +278,9 @@ void syscall_dispatch(struct sysframe *f) {
         vfs_file_t *fl = handle_get(p, (int)a1, H_FILE);
         if (!fl) { r = E_INVAL; break; }
         u64 pos = a3 == 1 ? vfs_tell(fl) + a2 : a3 == 2 ? vfs_size(fl) + a2 : a2;
+        /* a write far past the end zero-fills the gap under the storage
+         * lock: keep that bounded */
+        if (pos > vfs_size(fl) + (64ull << 20)) { r = E_INVAL; break; }
         r = vfs_seek(fl, pos);
         if (!r) r = (long)vfs_tell(fl);
         break;
@@ -288,7 +292,7 @@ void syscall_dispatch(struct sysframe *f) {
     }
     case SYS_TRUNCATE: {
         vfs_file_t *fl = handle_get(p, (int)a1, H_FILE);
-        r = fl ? vfs_truncate(fl, a2) : E_INVAL;
+        r = !fl ? E_INVAL : a2 > vfs_size(fl) + (64ull << 20) ? E_INVAL : vfs_truncate(fl, a2);
         break;
     }
     case SYS_STAT: {
@@ -314,7 +318,8 @@ void syscall_dispatch(struct sysframe *f) {
         break;
     }
     f->rax = (u64)r;
-    /* back to user mode: ended meanwhile? time slice used up? */
-    if (p->killed) proc_exit(p->exit_code);
-    if (g_need_resched) { g_need_resched = 0; thread_yield(); if (p->killed) proc_exit(p->exit_code); }
+    /* SYSRET needs a canonical return address (USER_END keeps it so) */
+    if (f->rip >= USER_END) proc_exit(-1);
+    /* the time slice and kill checks follow in syscall_entry, with
+     * interrupts disabled (proc_slice_check) */
 }
