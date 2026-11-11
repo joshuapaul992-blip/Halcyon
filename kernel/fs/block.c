@@ -141,7 +141,8 @@ static void scan_ebr_chain(blockdev_t *disk, u64 ext_start, u8 *buf, int *count)
         u8 nxt_type = e1[4];
         u32 nxt = rd32(e1 + 8);
         if (e0[4] && !is_extended(e0[4]) && lstart && lsize) {
-            if (add_part(disk, cur + lstart, lsize, index, e0[4])) (*count)++;
+            blockdev_t *p = add_part(disk, cur + lstart, lsize, index, e0[4]);
+            if (p) { (*count)++; p->ptab_kind = PTAB_MBR; p->ptab_lba = cur; p->ptab_slot = 0; }
             index++;
         }
         if (!is_extended(nxt_type) || !nxt) break;
@@ -162,7 +163,10 @@ static int scan_mbr(blockdev_t *disk, const u8 *mbr, u8 *buf) {
         u32 start = rd32(e + 8), size = rd32(e + 12);
         if (!type || type == 0xEE || !start || !size) continue;
         if (is_extended(type)) scan_ebr_chain(disk, start, buf, &count);
-        else if (add_part(disk, start, size, i + 1, type)) count++;
+        else {
+            blockdev_t *p = add_part(disk, start, size, i + 1, type);
+            if (p) { count++; p->ptab_kind = PTAB_MBR; p->ptab_lba = 0; p->ptab_slot = (u8)i; }
+        }
     }
     return count;
 }
@@ -227,7 +231,8 @@ static int scan_gpt(blockdev_t *disk, u8 *buf) {
             kprintf("block: %s: GPT entry %u out of range, ignored\n", disk->name, i + 1);
             continue;
         }
-        if (add_part(disk, s, l - s + 1, (int)i + 1, 0)) count++;
+        blockdev_t *p = add_part(disk, s, l - s + 1, (int)i + 1, 0);
+        if (p) { count++; p->ptab_kind = PTAB_GPT; }
     }
     kfree(ents);
     return count;
@@ -325,4 +330,27 @@ void blockdev_unregister(blockdev_t *bd) {
     vfs_unmount_blockdev(bd);
     list_remove(bd);
     bd->present = 0;
+}
+
+/* ---- partition type ---- */
+
+int blockdev_set_mbr_type(blockdev_t *p, u8 type) {
+    if (p->type != BDEV_PART || p->ptab_kind != PTAB_MBR || !p->parent) return 0;
+    blockdev_t *disk = p->parent;
+    u8 *buf = kmalloc(disk->sector_size);
+    if (!buf) return E_NOMEM;
+    int r = blk_read(disk, p->ptab_lba, 1, buf);
+    u8 *e = buf + 446 + 16 * p->ptab_slot;
+    /* make sure the entry still describes this partition */
+    if (!r && (buf[510] != 0x55 || buf[511] != 0xAA || p->ptab_lba + rd32(e + 8) != p->part_start)) r = E_IO;
+    if (!r && e[4] != type) {
+        e[4] = type;
+        r = blk_write(disk, p->ptab_lba, 1, buf);
+        if (!r) {
+            kprintf("block: %s: partition type set to %02x\n", p->name, type);
+            p->part_type = type;
+        }
+    }
+    kfree(buf);
+    return r;
 }

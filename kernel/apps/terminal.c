@@ -365,6 +365,7 @@ static void cmd_help(term_t *t) {
         "  SYNC                  flush disks             REBOOT / SHUTDOWN / EXIT\n"
         "  BOOTLOG               save \\HALCYON\\BOOT.LOG   CRASHTEST   test the crash screen\n"
         "  IRQ                   interrupts, timer and CPU usage\n"
+        "  FORMAT [x: | device]  format a disk (FAT, FAT32, exFAT)\n"
         "\nAny command's output can be redirected with > file or >> file.\n");
 }
 
@@ -387,6 +388,95 @@ static int parse_args(char *line, char **argv, int max) {
 }
 
 static void run_command(term_t *t, char *line);
+
+/* FORMAT target [/FS:FAT|FAT12|FAT16|FAT32|EXFAT] [/V:label] [/A:size] [/Q] [/Y]
+ * target: a drive letter, or a device name from the list FORMAT prints */
+static int has_children(blockdev_t *bd) {
+    for (blockdev_t *b = blockdev_first(); b; b = b->next) if (b->parent == bd) return 1;
+    return 0;
+}
+static volume_t *volume_of(blockdev_t *bd) {
+    for (int i = 0; i < vfs_volume_count(); i++) if (vfs_volume(i)->bd == bd) return vfs_volume(i);
+    return NULL;
+}
+static void cmd_format(term_t *t, int argc, char **argv) {
+    if (argc < 2) {
+        tputs(t, "Formats a disk for use with Halcyon (quick format).\n\n"
+                 "FORMAT target [/FS:file-system] [/V:label] [/A:size] [/Y]\n\n"
+                 "  target   a drive letter (E:) or a device name below\n"
+                 "  /FS:     FAT32, FAT (FAT12/FAT16 chosen by size), FAT12, FAT16 or EXFAT\n"
+                 "  /V:      volume label\n"
+                 "  /A:      cluster size, e.g. 4096, 32K\n"
+                 "  /Y       do not ask for confirmation\n\nDevices that can be formatted:\n");
+        for (blockdev_t *b = blockdev_first(); b; b = b->next) {
+            if (has_children(b) || !b->present) continue;
+            char sz[32]; format_size(b->sector_count * b->sector_size, sz, sizeof sz);
+            volume_t *v = volume_of(b);
+            char what[48];
+            if (v) snprintf(what, sizeof what, "%c: %s%s", v->letter, v->fs_name, v->is_boot ? " (system)" : "");
+            else snprintf(what, sizeof what, "no file system Halcyon knows");
+            tprintf(t, "  %-10s %9s  %-26.26s %s%s\n", b->name, sz, b->model, what, b->readonly ? ", read-only" : "");
+        }
+        return;
+    }
+    const char *target = argv[1], *fs = NULL, *label = NULL;
+    u32 cluster = 0;
+    int yes = 0;
+    for (int i = 2; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strncasecmp(a, "/FS:", 4)) fs = a + 4;
+        else if (!strncasecmp(a, "/V:", 3)) label = a + 3;
+        else if (!strncasecmp(a, "/A:", 3)) {
+            char *end;
+            cluster = (u32)strtol(a + 3, &end, 10);
+            if (*end == 'K' || *end == 'k') cluster *= 1024;
+        } else if (!strcasecmp(a, "/Y")) yes = 1;
+        else if (!strcasecmp(a, "/Q")) ;
+        else { tprintf(t, "Invalid parameter - %s\n", a); return; }
+    }
+    blockdev_t *bd = NULL;
+    volume_t *v = NULL;
+    if (strlen(target) == 2 && target[1] == ':') {
+        v = vfs_volume_by_letter(target[0]);
+        if (!v) { tputs(t, "The system cannot find the drive specified.\n"); return; }
+        bd = v->bd;
+    } else {
+        for (blockdev_t *b = blockdev_first(); b; b = b->next) if (!strcasecmp(b->name, target)) bd = b;
+        if (!bd) { tprintf(t, "There is no drive or device called %s. Type FORMAT for a list.\n", target); return; }
+        v = volume_of(bd);
+    }
+    if (v && v->is_boot) { tputs(t, "Halcyon cannot format the drive it was started from.\n"); return; }
+    if (has_children(bd)) { tprintf(t, "%s has partitions: format one of them (type FORMAT for a list).\n", bd->name); return; }
+    if (!fs) {
+        u64 bytes = bd->sector_count * bd->sector_size;
+        fs = v ? (!strcmp(v->fs_name, "exFAT") ? "exFAT" : v->fs_name) : bytes > (32ull << 30) ? "exFAT" : "FAT";
+        if (!strcmp(fs, "FAT12") || !strcmp(fs, "FAT16")) fs = "FAT";
+    }
+    char tgt[40];
+    if (v) snprintf(tgt, sizeof tgt, "drive %c:", v->letter); else snprintf(tgt, sizeof tgt, "%s", bd->name);
+    if (!yes) {
+        char msg[160];
+        snprintf(msg, sizeof msg, "WARNING, ALL DATA ON %s WILL BE LOST!\nProceed with Format?", tgt);
+        if (msgbox(t->win, "Format", msg, ICON_WARNING, MB_YESNO) != ID_YES) { tputs(t, "Format cancelled.\n"); return; }
+    }
+    tprintf(t, "Formatting %s as %s...\n", tgt, fs);
+    int r = vfs_format(bd, fs, label ? label : (v ? v->label : ""), cluster);
+    if (r) {
+        tprintf(t, "Format failed: %s\n", r == E_INVAL ? "the size does not suit this file system (or bad parameters)" :
+                                             r == E_BUSY ? "the drive is in use (open files)" :
+                                             r == E_NOTSUP ? "this file system is not available" : strerror(r));
+        return;
+    }
+    v = volume_of(bd);
+    tputs(t, "Format complete.\n");
+    if (v) {
+        u64 total = 0, freeb = 0;
+        vfs_statfs(v->letter, &total, &freeb);
+        char a[32], b2[32];
+        format_size(total, a, sizeof a); format_size(freeb, b2, sizeof b2);
+        tprintf(t, "Drive %c: %s, %s total, %s available.\n", v->letter, v->fs_name, a, b2);
+    }
+}
 
 static void execute(term_t *t, int argc, char **argv, const char *rest) {
     const char *c = argv[0];
@@ -491,6 +581,7 @@ static void execute(term_t *t, int argc, char **argv, const char *rest) {
         int r = bootlog_save("user request");
         tprintf(t, r == 0 ? "Kernel log saved to \\HALCYON\\BOOT.LOG on the boot drive.\n" : "Could not save the log: %s\n", strerror(r));
     }
+    else if (!strcasecmp(c, "format")) cmd_format(t, argc, argv);
     else if (!strcasecmp(c, "irq")) {
         char *buf = kmalloc(4096);
         if (buf) {

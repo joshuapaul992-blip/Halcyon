@@ -11,4 +11,9 @@ int fat_probe(blockdev_t *bd, volume_t *v);
  * Used by the block layer to tell an MBR from a superfloppy boot sector. */
 int fat_bpb_sane(const u8 *sec0, u32 dev_sector_size);
 
+/* Write a new, empty FAT file system on bd (a partition or a whole disk
+ * without a partition table). type 12/16/32 or 0 for automatic; cluster_bytes
+ * 0 for the Windows default. The chosen type is returned in *type_out. */
+int fat_format(blockdev_t *bd, int type, const char *label, u32 cluster_bytes, int *type_out);
+
 #endif

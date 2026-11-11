@@ -50,7 +50,7 @@ static int clip_cut;
 
 enum { CMD_NEWFOLDER = 1, CMD_NEWTEXT, CMD_RENAME, CMD_DELETE, CMD_COPY, CMD_CUT, CMD_PASTE, CMD_PROPS, CMD_CLOSE,
        CMD_OPEN, CMD_VIEW_ICONS, CMD_VIEW_DETAILS, CMD_REFRESH, CMD_BACK, CMD_UP, CMD_MYCOMP, CMD_MYDOCS,
-       CMD_TERMINAL, CMD_SYSINFO, CMD_CONTROL, CMD_OPEN_NOTEPAD, CMD_ABOUT };
+       CMD_TERMINAL, CMD_SYSINFO, CMD_CONTROL, CMD_OPEN_NOTEPAD, CMD_ABOUT, CMD_FORMAT };
 
 static menu_item_t file_items[] = {
     { "Open", "Enter", CMD_OPEN, MI_BOLD, 0 },
@@ -121,6 +121,9 @@ static menu_item_t ctx_bg_items[] = {
 static menu_t ctx_bg = { "", ctx_bg_items, ARRAY_SIZE(ctx_bg_items) };
 static menu_item_t ctx_drive_items[] = {
     { "Open", NULL, CMD_OPEN, MI_BOLD, 0 },
+    { "", NULL, 0, MI_SEPARATOR, 0 },
+    { "Format...", NULL, CMD_FORMAT, 0, 0 },
+    { "", NULL, 0, MI_SEPARATOR, 0 },
     { "Properties", NULL, CMD_PROPS, 0, 0 },
 };
 static menu_t ctx_drive = { "", ctx_drive_items, ARRAY_SIZE(ctx_drive_items) };
@@ -394,6 +397,13 @@ static void ex_menu(window_t *w, int id) {
     case CMD_CUT: cmd_copy(x, 1); break;
     case CMD_PASTE: cmd_paste(x); break;
     case CMD_PROPS: cmd_props(x); break;
+    case CMD_FORMAT:
+        if (!x->path[0] && x->sel >= 0 && x->sel < x->n) {
+            int format_dialog(window_t *owner, char letter);
+            format_dialog(w, x->items[x->sel].letter);
+            load(x);
+        }
+        break;
     case CMD_CLOSE: wm_close(w); break;
     case CMD_VIEW_ICONS: x->view = 0; x->scroll = 0; wm_invalidate(w); break;
     case CMD_VIEW_DETAILS: x->view = 1; x->scroll = 0; wm_invalidate(w); break;

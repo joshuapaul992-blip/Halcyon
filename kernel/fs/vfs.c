@@ -25,6 +25,7 @@ static const fs_probe_fn g_probes[] = {
 
 static volume_t *g_vol[NLETTERS];   /* indexed by letter - 'A' */
 static u32 g_gen;
+static char g_pref_letter;          /* vfs_format: give the volume its letter back */
 
 void vfs_init(void) {
     memset(g_vol, 0, sizeof g_vol);
@@ -70,6 +71,8 @@ int vfs_try_mount(blockdev_t *bd) {
     if (!g_vol['C' - 'A'] && is_boot_volume(v)) {
         slot = 'C' - 'A';
         v->is_boot = 1;
+    } else if (g_pref_letter && !g_vol[g_pref_letter - 'A']) {
+        slot = g_pref_letter - 'A';
     } else {
         for (int i = 'D' - 'A'; i < NLETTERS; i++) if (!g_vol[i]) { slot = i; break; }
     }
@@ -459,4 +462,43 @@ int vfs_write_file(const char *path, const void *data, u32 size) {
     int rc = vfs_close(f);
     if (!r) r = rc;
     return r ? r : (int)done;
+}
+
+/* ---- formatting ---- */
+
+int exfat_format(blockdev_t *bd, const char *label, u32 cluster_bytes) __attribute__((weak));
+
+int vfs_format(blockdev_t *bd, const char *fs, const char *label, u32 cluster_bytes) {
+    if (!bd || !bd->present) return E_NODEV;
+    if (bd->readonly) return E_ROFS;
+    /* a disk with partitions: format one of its partitions instead */
+    for (blockdev_t *b = blockdev_first(); b; b = b->next)
+        if (b->parent == bd) return E_BUSY;
+    char letter = 0;
+    for (int i = 0; i < NLETTERS; i++) {
+        volume_t *v = g_vol[i];
+        if (!v || v->bd != bd) continue;
+        if (v->is_boot) return E_BUSY;           /* the system volume */
+        if (v->open_files) return E_BUSY;
+        if (v->ops->sync) v->ops->sync(v);
+        letter = v->letter;
+        unmount_slot(i);
+    }
+    int r, ftype = 0;
+    u8 ptype;
+    if (!strcasecmp(fs, "exFAT")) {
+        r = exfat_format ? exfat_format(bd, label, cluster_bytes) : E_NOTSUP;
+        ptype = 0x07;
+    } else {
+        int t = !strcasecmp(fs, "FAT12") ? 12 : !strcasecmp(fs, "FAT16") ? 16 : !strcasecmp(fs, "FAT32") ? 32 : 0;
+        if (!t && strcasecmp(fs, "FAT")) return E_INVAL;
+        r = fat_format(bd, t, label, cluster_bytes, &ftype);
+        ptype = ftype == 12 ? 0x01 : ftype == 16 ? 0x0E : 0x0C;
+    }
+    kprintf("vfs: format %s as %s: %s\n", bd->name, fs, r ? strerror(r) : "done");
+    if (!r) blockdev_set_mbr_type(bd, ptype);
+    g_pref_letter = letter;
+    int m = vfs_try_mount(bd);
+    g_pref_letter = 0;
+    return r ? r : m;
 }

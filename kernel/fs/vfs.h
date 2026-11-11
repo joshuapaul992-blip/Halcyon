@@ -126,6 +126,12 @@ int  vfs_rename(const char *from, const char *to);   /* same volume only (E_NOTS
 int  vfs_copy(const char *from, const char *to);     /* file copy, any volumes */
 int  vfs_sync_all(void);
 
+/* Quick-format bd (a partition, or a disk without a partition table) with
+ * fs = "FAT" (automatic), "FAT12", "FAT16", "FAT32" or "exFAT", and mount it
+ * again (with its old drive letter). Refuses the boot volume, volumes with
+ * open files and partitioned disks (E_BUSY). cluster_bytes 0 = default. */
+int  vfs_format(blockdev_t *bd, const char *fs, const char *label, u32 cluster_bytes);
+
 /* convenience: read a whole file into a NUL-terminated heap buffer */
 int  vfs_read_file(const char *path, char **data, u32 *size);
 int  vfs_write_file(const char *path, const void *data, u32 size);

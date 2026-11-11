@@ -2143,6 +2143,127 @@ static void s_unicode(void) {
     t_unicode("fat32 unicode", &im, 512);
 }
 
+/* ------------------------------------------------------------------ */
+/* formatting                                                           */
+
+/* blank image: an MBR partition of type 0x83 (to see the type change), or
+ * no partition table (superfloppy) */
+static void img_blank(img_t *im, const char *name, u32 mb, int part, u32 ss) {
+    snprintf(im->path, sizeof im->path, "%s", wpath(name));
+    unlink(im->path);
+    u32 start = part ? 1024 * 1024 / ss : 0, total = (u32)((u64)mb * 1024 * 1024 / ss);
+    int r = sh("truncate -s %uM '%s'", mb, im->path);
+    if (part)
+        /* MBR written directly: entries count device sectors (sfdisk assumes 512) */
+        r |= sh("python3 -c 'import struct,sys; f=open(sys.argv[1],\"r+b\"); f.seek(440);"
+                " f.write(struct.pack(\"<IH\",0x1234ABCD,0)+struct.pack(\"<B3sB3sII\",0,b\"\\0\\0\\0\",0x83,b\"\\0\\0\\0\",%u,%u)+bytes(48)+b\"\\x55\\xaa\")' '%s'",
+                start, total - start, im->path);
+    CHECK(r == 0, "blank image %s", name);
+    im->off = (u64)start * ss;
+    im->len = (u64)(total - start) * ss;
+}
+
+static blockdev_t *volume_bd(hdisk_t *h) {
+    for (blockdev_t *b = blockdev_first(); b; b = b->next)
+        if (b->parent == &h->bd) return b;
+    return &h->bd;
+}
+
+static int fsck_type(const img_t *im) {
+    /* the FAT type fsck.fat reports, via the boot sector's type string */
+    u8 bs[512];
+    FILE *f = fopen(im->path, "rb");
+    if (!f) return 0;
+    fseek(f, (long)im->off, SEEK_SET);
+    size_t n = fread(bs, 1, 512, f);
+    fclose(f);
+    if (n != 512) return 0;
+    if (!memcmp(bs + 82, "FAT32", 5)) return 32;
+    if (!memcmp(bs + 54, "FAT16", 5)) return 16;
+    if (!memcmp(bs + 54, "FAT12", 5)) return 12;
+    return 0;
+}
+
+static void t_format(const char *tag, u32 mb, int part, u32 ss, const char *fs, int want_type, u32 cluster) {
+    printf("  %s\n", tag);
+    img_t im;
+    char nm[64];
+    snprintf(nm, sizeof nm, "fmt_%s_%u_%u.img", fs, mb, ss);
+    img_blank(&im, nm, mb, part, ss);
+    hdisk_t *h = disk_attach(&im, ss);
+    CHECK(!letter_of(h), "blank disk mounted");
+    blockdev_t *bd = volume_bd(h);
+    EXPECT(vfs_format(bd, fs, "Fmt Tést", cluster), 0);
+    char L = letter_of(h);
+    CHECK(L, "not mounted after format");
+    if (L) {
+        volume_t *v = vfs_volume_by_letter(L);
+        char want[8]; snprintf(want, sizeof want, "FAT%d", want_type);
+        CHECK(v && !strcmp(v->fs_name, want), "fs %s, want %s", v ? v->fs_name : "?", want);
+        CHECK(v && !strcmp(v->label, "FMT T_ST"), "label '%s'", v ? v->label : "?");
+        u64 total = 0, freeb = 0;
+        OK(vfs_statfs(L, &total, &freeb));
+        CHECK(total > im.len * 9 / 10 && freeb > total * 9 / 10, "statfs %lu/%lu of %lu", (unsigned long)freeb, (unsigned long)total, (unsigned long)im.len);
+        u8 *d = pat_alloc(100000, 77);
+        v_put(P(L, "after format.bin"), d, 100000);
+        OK(vfs_mkdir(P(L, "Ordner")));
+        v_put(P(L, "Ordner/x.txt"), d, 10);
+        /* formatting a mounted volume: same letter, contents gone */
+        EXPECT(vfs_format(bd, fs, "AGAIN", cluster), 0);
+        CHECK(letter_of(h) == L, "letter changed from %c to %c", L, letter_of(h));
+        EXPECT(v_count(P(L, "")), 0);
+        v_put(P(L, "after format.bin"), d, 100000);
+        vfs_sync_all();
+        free(d);
+    }
+    disk_detach(h);
+    fsck(&im, tag);
+    CHECK(fsck_type(&im) == want_type, "boot sector says FAT%d, want FAT%d", fsck_type(&im), want_type);
+    if (ss == 512) {
+        u8 *d = pat_alloc(100000, 77);
+        mt_cmp(&im, "after format.bin", d, 100000);
+        free(d);
+    }
+    if (part) {
+        u8 mbr[512];
+        FILE *f = fopen(im.path, "rb");
+        size_t n = f ? fread(mbr, 1, 512, f) : 0;
+        if (f) fclose(f);
+        u8 want = want_type == 32 ? 0x0C : want_type == 16 ? 0x0E : 0x01;
+        CHECK(n == 512 && mbr[446 + 4] == want, "partition type after format: %02x, want %02x", n == 512 ? mbr[450] : 0, want);
+    }
+}
+
+static void s_format(void) {
+    t_format("superfloppy 1.44 MB auto", 2, 0, 512, "FAT", 12, 0);
+    t_format("partition 20 MB auto", 20, 1, 512, "FAT", 16, 0);
+    t_format("partition 20 MB FAT12", 20, 1, 512, "FAT12", 12, 0);
+    t_format("partition 300 MB auto", 300, 1, 512, "FAT", 16, 0);
+    t_format("partition 300 MB FAT32", 300, 1, 512, "FAT32", 32, 0);
+    t_format("partition 600 MB auto", 600, 1, 512, "FAT", 32, 0);
+    t_format("partition 600 MB FAT32 4K", 600, 1, 512, "FAT32", 32, 4096);
+    t_format("partition 2 GB FAT16 32K", 2048, 1, 512, "FAT16", 16, 32768);
+    t_format("4K sectors 300 MB FAT32", 300, 1, 4096, "FAT32", 32, 0);
+    t_format("4K sectors 64 MB FAT16", 64, 0, 4096, "FAT16", 16, 0);
+    /* refusals */
+    img_t im;
+    img_blank(&im, "fmt_refuse.img", 20, 1, 512);
+    hdisk_t *h = disk_attach(&im, 512);
+    EXPECT(vfs_format(&h->bd, "FAT", "X", 0), E_BUSY);           /* partitioned disk */
+    EXPECT(vfs_format(volume_bd(h), "NTFS", "X", 0), E_INVAL);
+    EXPECT(vfs_format(volume_bd(h), "FAT32", "X", 0), E_INVAL);  /* 19 MB: too small for FAT32 */
+    EXPECT(vfs_format(volume_bd(h), "FAT16", "X", 0), 0);
+    char L = letter_of(h);
+    vfs_file_t *f = NULL;
+    OK(vfs_open(P(L, "open.txt"), VFS_O_WRITE | VFS_O_CREATE, &f));
+    EXPECT(vfs_format(volume_bd(h), "FAT16", "X", 0), E_BUSY);   /* open file */
+    if (f) vfs_close(f);
+    h->bd.readonly = 1;
+    EXPECT(vfs_format(volume_bd(h), "FAT16", "X", 0), E_ROFS);
+    h->bd.readonly = 0;
+    disk_detach(h);
+}
+
 static void s_fat16(void) {
     img_t im;
     img_mbr(&im, "fat16_read.img", 16, 32, "DATA16", 0xCAFE0016);
@@ -2216,7 +2337,7 @@ static void s_misc(void) {
 static const scen_t scenarios[] = {
     { "paths", s_paths }, { "fat12", s_fat12 }, { "fat16", s_fat16 }, { "fat32", s_fat32 },
     { "gpt", s_gpt }, { "4k", s_4k }, { "misc", s_misc }, { "random", s_random }, { "testdisks", s_testdisks },
-    { "hostile", s_hostile }, { "unicode", s_unicode },
+    { "hostile", s_hostile }, { "unicode", s_unicode }, { "format", s_format },
 };
 
 int main(int argc, char **argv) {

@@ -1751,3 +1751,188 @@ fail:
     kfree(s);
     return r;
 }
+
+/* ------------------------------------------------------------------ */
+/* formatting                                                           */
+
+/* clusters of a layout; 0 if it does not fit at all */
+static u32 fmt_layout(u32 total, u32 ss, int type, u32 spc, u32 *reserved, u32 *root_secs, u32 *fatsz) {
+    *reserved = type == 32 ? 32 : 1;
+    *root_secs = type == 32 ? 0 : (512 * 32 + ss - 1) / ss;
+    u32 fs = 1;
+    for (int i = 0; i < 64; i++) {
+        u64 meta = (u64)*reserved + *root_secs + 2ull * fs;
+        if (meta >= total) return 0;
+        u32 cl = (u32)((total - meta) / spc);
+        u64 bytes = type == 12 ? ((u64)cl + 2) * 3 / 2 + 1 : ((u64)cl + 2) * (type == 16 ? 2 : 4);
+        u32 need = (u32)((bytes + ss - 1) / ss);
+        if (need <= fs) { *fatsz = fs; return cl; }
+        fs = need;
+    }
+    return 0;
+}
+
+static int fmt_count_ok(int type, u32 cl) {
+    if (type == 12) return cl >= 1 && cl <= 4084;
+    if (type == 16) return cl >= 4085 && cl <= 65524;
+    return cl >= 65525 && cl <= 0x0FFFFFF4;
+}
+
+/* Microsoft's default cluster sizes (fatgen103 / Windows format) */
+static u32 fmt_default_cluster(int type, u64 bytes) {
+    const u64 M = 1024 * 1024;
+    if (type == 16) {
+        if (bytes <= 16 * M) return 1024;
+        if (bytes <= 128 * M) return 2048;
+        if (bytes <= 256 * M) return 4096;
+        if (bytes <= 512 * M) return 8192;
+        if (bytes <= 1024 * M) return 16384;
+        return 32768;
+    }
+    if (type == 32) {
+        if (bytes <= 260 * M) return 512;
+        if (bytes <= 8192 * M) return 4096;
+        if (bytes <= 16384 * M) return 8192;
+        if (bytes <= 32768 * M) return 16384;
+        return 32768;
+    }
+    return 512;
+}
+
+static void fmt_label(const char *label, u8 *out) {
+    memset(out, ' ', 11);
+    int n = 0;
+    for (const char *p = label ? label : ""; *p && n < 11;) {
+        u32 c = utf8_next(&p);
+        c = c < 0x80 ? (u32)toupper((int)c) : '_';
+        if (c < 0x20 || strchr("\"*+,./:;<=>?[\\]|", (int)c)) c = '_';
+        out[n++] = (u8)c;
+    }
+    if (!n) memcpy(out, "NO NAME    ", 11);
+}
+
+int fat_format(blockdev_t *bd, int type, const char *label, u32 cluster_bytes, int *type_out) {
+    if (!bd || !bd->present) return E_NODEV;
+    if (bd->readonly) return E_ROFS;
+    u32 ss = bd->sector_size;
+    if (ss < 512 || ss > 4096 || !is_pow2(ss)) return E_NOTSUP;
+    u32 total = bd->sector_count > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)bd->sector_count;
+    u64 bytes = (u64)total * ss;
+    if (cluster_bytes && (!is_pow2(cluster_bytes) || cluster_bytes < ss || cluster_bytes / ss > 128)) return E_INVAL;
+
+    /* pick type and sectors per cluster: the default first, then smaller /
+     * larger clusters until the cluster count suits the FAT type */
+    int types[3], nt = 0;
+    if (type) types[nt++] = type;
+    else if (bytes < 16ull << 20) { types[nt++] = 12; types[nt++] = 16; }
+    else if (bytes < 512ull << 20) { types[nt++] = 16; types[nt++] = 12; types[nt++] = 32; }
+    else { types[nt++] = 32; types[nt++] = 16; }
+    int ft = 0;
+    u32 spc = 0, reserved = 0, root_secs = 0, fatsz = 0, clusters = 0;
+    for (int ti = 0; ti < nt && !ft; ti++) {
+        int t = types[ti];
+        u32 want = cluster_bytes ? cluster_bytes : fmt_default_cluster(t, bytes);
+        u32 s0 = MAX(1u, want / ss);
+        for (int step = 0; step < 16 && !ft; step++) {
+            /* try s0, s0/2, s0*2, s0/4, s0*4, ... (only s0 if the size was given) */
+            u32 s = s0;
+            int k = (step + 1) / 2;
+            if (step) s = (step & 1) ? s0 >> k : s0 << k;
+            if (!s || s > 128 || (cluster_bytes && step)) continue;
+            u32 r, rs, fz;
+            u32 cl = fmt_layout(total, ss, t, s, &r, &rs, &fz);
+            if (cl && fmt_count_ok(t, cl)) { ft = t; spc = s; reserved = r; root_secs = rs; fatsz = fz; clusters = cl; }
+        }
+    }
+    if (!ft) {
+        kprintf("fat: format: %lu bytes do not suit FAT%d with these settings\n", bytes, type ? type : 32);
+        return E_INVAL;
+    }
+
+    u32 chunk = MAX(64u * 1024, ss);
+    u8 *buf = kzalloc(chunk);
+    if (!buf) return E_NOMEM;
+    int r = 0;
+    u8 lab[11];
+    fmt_label(label, lab);
+    u16 vt, vd; u8 vten;
+    fat_now(&vt, &vd, &vten);
+    static u32 fmt_seq;
+    u32 volid = ((u32)vd << 16 | vt) ^ (++fmt_seq * 2654435761u) ^ (u32)(uptr)bd;
+    u32 data_start = reserved + 2 * fatsz + root_secs;
+    kprintf("fat: formatting %s: FAT%d, %u clusters of %u bytes, FAT %u sectors\n", bd->name, ft, clusters, spc * ss, fatsz);
+
+    /* zero the reserved area, the FATs and the root directory */
+    u32 meta_end = ft == 32 ? data_start + spc : data_start;
+    for (u32 s = 0; s < meta_end && !r; ) {
+        u32 n = MIN(chunk / ss, meta_end - s);
+        r = blk_write(bd, s, n, buf);
+        s += n;
+    }
+
+    /* boot sector */
+    u8 *b = buf;
+    memset(b, 0, ss);
+    b[0] = 0xEB; b[1] = ft == 32 ? 0x58 : 0x3C; b[2] = 0x90;
+    memcpy(b + 3, "MSWIN4.1", 8);
+    wr16(b + 11, (u16)ss);
+    b[13] = (u8)spc;
+    wr16(b + 14, (u16)reserved);
+    b[16] = 2;
+    wr16(b + 17, ft == 32 ? 0 : 512);
+    if (ft != 32 && total < 0x10000) wr16(b + 19, (u16)total); else wr32(b + 32, total);
+    b[21] = 0xF8;
+    if (ft != 32) wr16(b + 22, (u16)fatsz);
+    wr16(b + 24, 63);
+    wr16(b + 26, 255);
+    wr32(b + 28, bd->type == BDEV_PART ? (u32)bd->part_start : 0);
+    u32 ext = ft == 32 ? 64 : 36;
+    if (ft == 32) {
+        wr32(b + 36, fatsz);
+        wr32(b + 44, 2);            /* root cluster */
+        wr16(b + 48, 1);            /* FSInfo */
+        wr16(b + 50, 6);            /* backup boot sector */
+    }
+    b[ext] = 0x80;
+    b[ext + 2] = 0x29;
+    wr32(b + ext + 3, volid);
+    memcpy(b + ext + 7, lab, 11);
+    memcpy(b + ext + 18, ft == 12 ? "FAT12   " : ft == 16 ? "FAT16   " : "FAT32   ", 8);
+    /* not bootable: the jump lands on INT 18h (try the next boot device) */
+    u32 code = ft == 32 ? 0x5A : 0x3E;
+    b[code] = 0xCD; b[code + 1] = 0x18; b[code + 2] = 0xEB; b[code + 3] = 0xFE;
+    b[510] = 0x55; b[511] = 0xAA;
+    if (!r) r = blk_write(bd, 0, 1, b);
+    if (!r && ft == 32) r = blk_write(bd, 6, 1, b);
+    if (!r && ft == 32) {
+        memset(b, 0, ss);
+        wr32(b, 0x41615252);
+        wr32(b + 484, 0x61417272);
+        wr32(b + 488, clusters - 1);   /* cluster 2 holds the root directory */
+        wr32(b + 492, 3);
+        wr32(b + 508, 0xAA550000);
+        r = blk_write(bd, 1, 1, b);
+        if (!r) r = blk_write(bd, 7, 1, b);
+    }
+
+    /* FAT[0] = media, FAT[1] = end of chain (clean), FAT32: root = end of chain */
+    memset(b, 0, ss);
+    if (ft == 12) { b[0] = 0xF8; b[1] = 0xFF; b[2] = 0xFF; }
+    else if (ft == 16) { wr16(b, 0xFFF8); wr16(b + 2, 0xFFFF); }
+    else { wr32(b, 0x0FFFFFF8); wr32(b + 4, 0x0FFFFFFF); wr32(b + 8, 0x0FFFFFFF); }
+    for (int i = 0; i < 2 && !r; i++) r = blk_write(bd, reserved + (u32)i * fatsz, 1, b);
+
+    /* volume label entry at the start of the root directory */
+    if (label && *label) {
+        memset(b, 0, ss);
+        memcpy(b, lab, 11);
+        b[11] = ATTR_VOLUME;
+        u16 t, d; u8 tenths;
+        fat_now(&t, &d, &tenths);
+        wr16(b + 22, t); wr16(b + 24, d);
+        if (!r) r = blk_write(bd, ft == 32 ? data_start : reserved + 2 * fatsz, 1, b);
+    }
+    kfree(buf);
+    if (type_out) *type_out = ft;
+    return r;
+}

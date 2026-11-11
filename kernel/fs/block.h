@@ -47,10 +47,19 @@ struct blockdev {
     int  part_index;        /* 1-based partition number */
     u8   part_type;         /* MBR type byte (0xEE-ish types for GPT: 0) */
     u32  disk_sig;          /* MBR disk signature of the disk (whole-disk devices) */
+    u8   ptab_kind;         /* for BDEV_PART: PTAB_MBR (primary / logical) or PTAB_GPT */
+    u8   ptab_slot;         /* MBR: entry 0-3 in the sector at ptab_lba */
+    u64  ptab_lba;          /* MBR: parent sector holding the entry (0 = MBR, else EBR) */
     blockdev_t *next;       /* registry list */
 };
 
+#define PTAB_MBR 1
+#define PTAB_GPT 2
+
 void blockdev_init(void);
+/* change the MBR type byte of a partition (after formatting it); 0 for GPT
+ * and whole-disk volumes, where there is nothing to change */
+int  blockdev_set_mbr_type(blockdev_t *part, u8 type);
 int  blockdev_register(blockdev_t *bd);
 void blockdev_unregister(blockdev_t *bd);
 
