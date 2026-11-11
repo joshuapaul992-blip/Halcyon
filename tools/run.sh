@@ -25,7 +25,7 @@ if [ "$FW" = uefi ]; then
 fi
 
 if [ -n "$HEADLESS" ]; then
-  DISP="-display none -serial file:$BUILD/serial.log -monitor unix:$BUILD/mon.sock,server,nowait"
+  DISP="-display none -serial file:$BUILD/serial.log -monitor unix:$BUILD/mon.sock,server,nowait -qmp unix:$BUILD/qmp.sock,server,nowait"
 else
   DISP="-serial stdio"
 fi
