@@ -15,7 +15,7 @@ its own drivers for USB, SATA and FAT file systems.
 | Kernel | 64-bit, identity mapped, TSC timing, PCI enumeration, ACPI S5 power-off, PS/2 keyboard and mouse. |
 | Threads and programs | Kernel threads with a scheduler (copies, moves and deletes run in the background with a progress dialog and Cancel). Programs run in user mode in their own address space: static position-independent ELF64 `.EXE` files loaded from disk (`C:\PROGRAMS`), preempted every 10 ms, with system calls for files, memory, processes, the console and windows (an early-2000s style window, drawing and controls API). Pages are no-execute unless they hold code; SMEP, SMAP and UMIP are on where the CPU has them. A program that crashes gets a "has encountered a problem and needs to close" dialog and takes nothing else down. Task Manager (Ctrl+Alt+Del) ends programs that hang. Calculator and Sonar are user programs. |
 | Interrupts | Local APIC (xAPIC or x2APIC) and I/O APICs from the ACPI MADT, or the 8259 PICs. MSI-X and MSI for xHCI and AHCI. PCI INTx for UHCI, OHCI and EHCI: without an AML interpreter the routing is learned from which device raised an interrupt. The CPU halts when there is nothing to do: a one-shot local APIC (or PIT) timer wakes it for the next deadline. A device whose interrupt does not work is polled. |
-| USB | Host controllers: UHCI and OHCI (USB 1.1), EHCI (USB 2.0, with companion hand-off), and xHCI (USB 3.x, SuperSpeed). Class drivers: hubs (USB 2 and SuperSpeed), HID keyboards (boot protocol), HID mice and tablets (report descriptor parsing), and mass storage (Bulk-Only Transport plus SCSI). Hot-plug. |
+| USB | Host controllers: UHCI and OHCI (USB 1.1), EHCI (USB 2.0, with companion hand-off), and xHCI (USB 3.x, SuperSpeed). Class drivers: hubs (USB 2 and SuperSpeed), HID (report descriptor parsing, report protocol as on Windows, boot protocol as the fallback): keyboards including n-key rollover and wireless receivers with several devices on one interface, multimedia keys (volume, media, browser, mail, calculator, power and sleep), mice and tablets; and mass storage (Bulk-Only Transport plus SCSI). Hot-plug. |
 | Storage | AHCI SATA (LBA48, multiple controllers). NVMe SSDs (MSI-X, MSI, INTx or polled; every active namespace with 512- or 4096-byte blocks becomes a disk, `nvme0`, `nvme1`, ...; flushed when the drive has a volatile cache, shutdown notification on Turn Off/Restart). CD/DVD drives on SATA (ATAPI): read-only drive letters, discs detected when inserted, ejected or swapped, Eject in the drive's right-click menu. Block layer with MBR (including extended partitions), GPT and superfloppy detection. |
 | File systems | FAT12, FAT16 and FAT32, read and write: long file names, create, delete, rename and move, mkdir and rmdir, truncate, FSInfo. exFAT, read and write (USB sticks and SD cards over 32 GB): fragmented and contiguous files, ValidDataLength, the volume's up-case table for case-insensitive names, VolumeDirty handling. DOS drive letters; the boot drive is `C:`. Quick format (FAT12/16/32 and exFAT) from Explorer (right-click a drive) or the `FORMAT` command, with Windows' default cluster sizes. |
 | CD/DVD | ISO 9660 with Joliet (long Unicode names) and Rock Ridge names, multi-sector directories and multi-extent files, hardened against corrupt discs. Hybrid ISO images written to USB sticks or disks mount too. |
@@ -95,6 +95,10 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
 - the host keyboard layout test (`tests/host/kbdtest.c`): keys at every level,
   Caps Lock, AltGr, dead keys and shortcut letters of each layout, written from
   the Windows layouts independently of the tables, plus checks on every table
+- the host USB HID tests (`tests/host/hidtest.c`, run first by `tests/host/run.sh`):
+  the report descriptor parser and report decoder against QEMU's keyboard, mouse
+  and tablet, an n-key-rollover gaming keyboard, a wireless receiver, media key
+  interfaces and broken, truncated and randomly mutated descriptors
 - the host storage test suite (`tests/host/run.sh`, about 110,000 checks): the
   FAT, exFAT and ISO 9660 drivers, Unicode names and formatting, compiled for the
   host with ASan/UBSan and run against images made by mkfs.fat, mkfs.exfat and
@@ -120,7 +124,9 @@ make -C tests/host fuzz-run FUZZ_TIME=900 FUZZ_JOBS=2
 ```
 
 Each boot must reach the desktop, mount the boot stick and a SATA disk, and write
-`BOOT.LOG`. With interrupts on, the stick's USB controller must get a working
+`BOOT.LOG`. A USB keyboard and tablet sit on the controller under test: the
+keyboard must run in report protocol, and Caps Lock sent through the QEMU
+monitor must switch its LED on and off. With interrupts on, the stick's USB controller must get a working
 interrupt and QEMU must use under 40% of a host CPU at the idle desktop (it uses
 0–6%; 100% with interrupts off).
 
@@ -151,7 +157,7 @@ kernel/gui   graphics, window manager, widgets, menus, dialogs, desktop, splash
 kernel/apps  applications built into the kernel
 userland/    user-mode runtime (crt0, C library subset, GUI calls) and programs
 tools/       image builder, font and icon generators, QEMU test harness
-tests/host   host-side storage and keyboard layout tests, fuzzer
+tests/host   host-side storage, keyboard layout, USB HID and display tests, fuzzer
 ```
 
 ## Limitations
@@ -180,5 +186,8 @@ tests/host   host-side storage and keyboard layout tests, fuzzer
 - No CJK glyphs: Chinese, Japanese and Korean text shows as replacement boxes.
 - Some code paths are written to spec but can't be exercised in QEMU:
   - EHCI split transactions
+  - USB keyboards beyond QEMU's: n-key rollover bitmaps, wireless receivers,
+    Consumer and System Control keys, LEDs on an interrupt OUT endpoint (these
+    are covered by host tests only)
   - xHCI SuperSpeed hubs and Transaction Translators
   - LBA28-only disks

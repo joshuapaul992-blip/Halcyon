@@ -14,6 +14,9 @@ useful contribution right now, and both a success and a failure are worth report
    - Does it reach the desktop?
    - Do the keyboard and mouse work? Try the stick in different ports, including
      front ports and any USB 3 (blue) ports.
+   - Does Caps Lock switch the keyboard's Caps Lock light? Do the volume, media and
+     Calculator keys of a multimedia keyboard show up in `BOOT.LOG` ("usb-hid: debug:
+     ... key pressed"), and does the Calculator key open the Calculator?
    - Open My Computer and the stick (`C:`). Open `README.TXT`.
    - Write a file: Notepad → type something → File → Save As → `C:\test.txt`.
    - Plug in a second USB stick. Does a "Found New Hardware" balloon appear?
@@ -71,6 +74,22 @@ works.
   regardless.
 - **Keyboards behind a USB 2.0 hub** (monitor or dock hubs) on xHCI depend on
   Transaction Translator support. That is also untested.
+- **USB keyboards are read in HID report protocol**, like Windows does: the driver
+  parses each interface's report descriptor, so gaming keyboards with n-key
+  rollover (a key bitmap on a second interface), wireless receivers (keyboard,
+  mouse and media keys on one interface, told apart by report ID) and the extra
+  Consumer Control / System Control keys work. QEMU only emulates a plain 6-key
+  keyboard, so these are tested on the host with typical report descriptors, not
+  on real devices yet. A keyboard whose descriptor cannot be read or parsed falls
+  back to the boot protocol (6 keys, no media keys). `BOOT.LOG` has one line per
+  interface, e.g. `usb-hid: <name> (interface 1): keyboard (report protocol, NKRO
+  bitmap, report ID 1) + consumer control (report ID 2)`: please include it when
+  a keyboard misbehaves. The keyboard LEDs are set with SET_REPORT; if a keyboard
+  refuses that, the driver tries its interrupt OUT endpoint (logged).
+- **Reports longer than one USB packet** (some low-speed wireless receivers) need
+  multi-packet interrupt transfers, which the UHCI and EHCI drivers don't do; such
+  devices may lose keys there. Plugging the receiver into a USB 3 port (xHCI)
+  avoids it.
 - **Interrupt routing.** Without an ACPI AML interpreter, Halcyon learns which I/O
   APIC input each USB controller uses from the first interrupt it raises. If a
   controller shares its line with a device Halcyon has no driver for, it may stay

@@ -3,10 +3,13 @@
 # images (exFAT results are cross-checked with exfat_tool.py, an independent
 # Python implementation, and fsck.exfat) and ISO 9660 images (isotest.c,
 # built with xorriso). Also the keyboard layouts (kbdtest.c: kernel/drivers/
-# keymap.c and keylayouts.c).
+# keymap.c and keylayouts.c), the USB HID report descriptor parser and report
+# decoder (kernel/usb/hidparse.c, hidtest.c), and the EDID parser and the
+# loaders' video mode choice (displaytest.c).
 #
 #   tests/host/run.sh            (== make -C tests/host kbd test)
 #   make -C tests/host kbd       keyboard layouts only
+#   make -C tests/host hid       only the HID tests (HIDARGS=-v lists every report)
 #                                includes the "hostile" scenario: corrupted
 #                                partition tables / FAT / exFAT volumes and the
 #                                minimized fuzzer crash inputs (fuzz_regress/)
@@ -43,7 +46,7 @@ SEEDS   := $(OUT)/fuzz_seeds
 
 KBD_SRCS := kbdtest.c $(ROOT)/kernel/drivers/keymap.c $(ROOT)/kernel/drivers/keylayouts.c $(ROOT)/kernel/core/unicode.c
 
-all: $(OUT)/fstest $(OUT)/fuzz_replay $(OUT)/kbdtest
+all: $(OUT)/fstest $(OUT)/fuzz_replay $(OUT)/kbdtest $(OUT)/hidtest $(OUT)/displaytest
 
 $(OUT)/kbdtest: $(KBD_SRCS) $(ROOT)/kernel/drivers/keymap.h $(ROOT)/kernel/drivers/input.h Makefile
 	@mkdir -p $(OUT)
@@ -55,6 +58,13 @@ kbd: $(OUT)/kbdtest
 $(OUT)/fstest: $(SRCS) isotest.c $(HDRS) Makefile
 	@mkdir -p $(OUT)
 	gcc $(CFLAGS) $(SRCS) -o $@
+
+HIDSRCS := $(ROOT)/kernel/usb/hidparse.c hidtest.c
+HIDHDRS := $(ROOT)/kernel/usb/hidparse.h $(ROOT)/kernel/drivers/input.h $(wildcard $(ROOT)/kernel/core/*.h)
+
+$(OUT)/hidtest: $(HIDSRCS) $(HIDHDRS) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) $(HIDSRCS) -o $@
 
 $(OUT)/fuzz_replay: $(KSRCS) fuzz_fs.c fuzz_main.c $(HDRS) Makefile
 	@mkdir -p $(OUT)
@@ -75,7 +85,10 @@ $(OUT)/displaytest: displaytest.c $(ROOT)/kernel/drivers/edid.c $(ROOT)/kernel/d
 	@mkdir -p $(OUT)
 	gcc $(CFLAGS) -I$(ROOT)/boot displaytest.c $(ROOT)/kernel/drivers/edid.c -o $@
 
-test: $(OUT)/fstest $(OUT)/displaytest
+hid: $(OUT)/hidtest
+	$(OUT)/hidtest $(HIDARGS)
+
+test: $(OUT)/fstest $(OUT)/displaytest hid
 	$(OUT)/displaytest
 	@rm -rf $(OUT)/work && mkdir -p $(OUT)/work
 	$(OUT)/fstest $(OUT)/work $(ARGS)
@@ -98,4 +111,4 @@ fuzz-run: $(OUT)/fuzz_fs seeds
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all kbd test seeds fuzz fuzz-run fuzz-regress clean
+.PHONY: all kbd hid test seeds fuzz fuzz-run fuzz-regress clean

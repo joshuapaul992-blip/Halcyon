@@ -204,6 +204,7 @@ const char *clipboard_get(int *len);
 void desktop_init(void);
 void desktop_paint(gc_t *g, rect_t clip);
 int  desktop_event(gui_event_t *e);    /* screen coords */
+void desktop_launch_calculator(void);   /* the Calculator key of multimedia keyboards */
 void taskbar_paint(gc_t *g, rect_t clip);
 int  taskbar_event(gui_event_t *e);
 rect_t taskbar_rect(void);
