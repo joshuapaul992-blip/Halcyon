@@ -48,6 +48,17 @@ typedef uintptr_t uptr;
 #define E_NAMETOOLONG -17
 #define E_CANCELED -18
 #define E_PERM    -19     /* not allowed */
+/* sockets (net/) */
+#define E_ADDRINUSE   -20 /* the name / address is taken */
+#define E_NOTCONN     -21 /* the socket is not connected */
+#define E_ISCONN      -22 /* the socket is already connected */
+#define E_CONNREFUSED -23 /* nobody accepts connections / messages there */
+#define E_CONNRESET   -24 /* the peer went away (data was lost) */
+#define E_PIPE        -25 /* the peer does not take any more data */
+#define E_AFNOSUPPORT -26 /* address family not supported */
+#define E_MSGSIZE     -27 /* message too long */
+#define E_NOTSOCK     -28 /* the handle is not a socket */
+#define E_INPROGRESS  -29 /* a non-blocking connect has started */
 
 const char *strerror(int err);
 

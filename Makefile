@@ -84,16 +84,16 @@ endif
 UCFLAGS := -std=gnu11 -O2 -g0 -ffreestanding -fno-builtin -fPIE -fno-stack-protector -fno-asynchronous-unwind-tables \
            -Wall -Wextra -Wno-unused-parameter -Iuserland/include
 ULDFLAGS := -static-pie -nostdlib -Wl,--no-dynamic-linker -Wl,-z,noexecstack -Wl,--build-id=none
-ULIB := $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/gui.o
+ULIB := $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/gui.o $(BUILD)/user/net.o
 UPROGS := $(patsubst userland/programs/%.c,$(BUILD)/user/%.exe,$(wildcard userland/programs/*.c))
 
 $(BUILD)/user/crt0.o: userland/lib/crt0.S
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -c $< -o $@
-$(BUILD)/user/%.o: userland/lib/%.c userland/include/hal.h kernel/core/sysabi.h
+$(BUILD)/user/%.o: userland/lib/%.c userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -c $< -o $@
-$(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) userland/include/hal.h kernel/core/sysabi.h
+$(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $<
 	strip $@

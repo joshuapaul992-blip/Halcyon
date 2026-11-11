@@ -51,6 +51,19 @@ const char *hal_strerror(int e) {
     case E_BUSY: return "Busy";
     case E_CANCELED: return "Canceled";
     case E_PERM: return "Access denied";
+    case E_TIMEOUT: return "Timed out";
+    case E_AGAIN: return "Try again";
+    case E_NAMETOOLONG: return "Name too long";
+    case E_ADDRINUSE: return "Address already in use";
+    case E_NOTCONN: return "Not connected";
+    case E_ISCONN: return "Already connected";
+    case E_CONNREFUSED: return "Connection refused";
+    case E_CONNRESET: return "Connection reset";
+    case E_PIPE: return "Connection closed";
+    case E_AFNOSUPPORT: return "Address family not supported";
+    case E_MSGSIZE: return "Message too long";
+    case E_NOTSOCK: return "Not a socket";
+    case E_INPROGRESS: return "Operation in progress";
     }
     return "Error";
 }
