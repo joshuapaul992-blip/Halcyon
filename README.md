@@ -20,7 +20,8 @@ its own drivers for USB, SATA and FAT file systems.
 | File systems | FAT12, FAT16 and FAT32, read and write: long file names, create, delete, rename and move, mkdir and rmdir, truncate, FSInfo. exFAT, read and write (USB sticks and SD cards over 32 GB): fragmented and contiguous files, ValidDataLength, the volume's up-case table for case-insensitive names, VolumeDirty handling. DOS drive letters; the boot drive is `C:`. Quick format (FAT12/16/32 and exFAT) from Explorer (right-click a drive) or the `FORMAT` command, with Windows' default cluster sizes. |
 | CD/DVD | ISO 9660 with Joliet (long Unicode names) and Rock Ridge names, multi-sector directories and multi-extent files, hardened against corrupt discs. Hybrid ISO images written to USB sticks or disks mount too. |
 | Unicode | File names and text are UTF-8 throughout; FAT long names are stored as UTF-16 (including characters outside the BMP), with Unicode case-insensitive lookup. The fonts cover Latin, Greek, Cyrillic and common symbols; other characters are kept and drawn as a replacement box. |
-| GUI | Compositing window manager (move, resize, minimize, maximize), menus, dialogs, widgets, three colour themes, four procedural wallpapers. |
+| GUI | Compositing window manager (move, resize, minimize, maximize), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Theme and wallpaper are kept across restarts (`C:\HALCYON\SETTINGS.INI`). |
+| Display | The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; the QEMU/Bochs/VirtualBox adapter switches at once, with Windows' "keep these settings?" 15-second revert. The frame buffer is write-combining (PAT). |
 | Apps | Explorer (My Computer, file management), Notepad, Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Sonar (a mine-hunting puzzle), Control Panel, About. |
 
 ## Building
@@ -102,7 +103,10 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   PIC, no MSI, no interrupts) set through a QEMU-only `fw_cfg` hook, NVMe disks
   (512- and 4096-byte blocks, INTx, polled), a CD drive with a disc swap, and
   user mode: `SELFTEST.EXE` runs after boot and checks the system calls, bad
-  pointers, crashing and looping child programs, preemption and windows
+  pointers, crashing and looping child programs, preemption and windows, and
+  the display: a saved resolution chosen by both loaders, the firmware frame
+  buffer alone, and a live mode switch
+- the EDID parser and the loaders' resolution choice (`tests/host/displaytest.c`)
 
 The partition, FAT, exFAT and ISO 9660 code can also be fuzzed with libFuzzer, ASan and UBSan
 (needs clang and `libclang-rt-dev`):
@@ -160,6 +164,11 @@ tests/host   host-side storage tests and fuzzer
 - PCI INTx routes are learned, not read from ACPI (no AML interpreter). A device
   that shares its line with a device that has no driver may stay polled.
 - x2APIC mode is written to spec but QEMU 8.2's emulator cannot run it.
+- Real graphics cards have no driver yet (NVIDIA, Intel and AMD come in later
+  milestones): resolution changes need a restart there, refresh rates are
+  whatever the firmware chose, and there is one monitor. OVMF (QEMU's UEFI)
+  reports no EDID, so the UEFI loader's choice was only tested with a saved
+  setting; real UEFI firmware usually provides it.
 - No networking, audio or isochronous USB.
 - Keyboard layout is US only, so non-ASCII characters can be displayed and kept in
   names but not typed.

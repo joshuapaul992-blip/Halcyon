@@ -48,7 +48,11 @@ offers:
 | Disable interrupts | Hangs or freezes after the "irq:" lines, or input stops working. Everything is polled, as in Halcyon 1.0, and the CPU never idles. |
 | Disable MSI | A USB 3 or SATA controller misbehaves: it then uses its INTx line instead. |
 | Use the legacy PIC | Interrupts misbehave with the I/O APIC. Uses the firmware's PCI interrupt lines. |
-| Safe video mode | Black or garbled screen: forces 800×600. |
+| Safe video mode | Black or garbled screen: forces 800×600 and the firmware frame buffer, ignoring the saved resolution. |
+
+If a resolution chosen in Display Properties leaves the screen black after a
+restart, use F8 "Safe video mode", then pick another one; or delete the
+`display.width` / `display.height` lines from `\HALCYON\SETTINGS.INI` on the stick.
 
 Programs (the `.EXE` files in `C:\PROGRAMS`) run in user mode: if one crashes, only
 that program is ended. Press Ctrl+Alt+Del for Task Manager to end one that hangs.
@@ -75,6 +79,13 @@ works.
 - **Old AMD CPUs (about 2003–2011)** can stop their clocks in HLT (C1E), so on
   CPUs that report neither an always-running APIC timer nor an invariant TSC,
   Halcyon leaves CPU idle off and polls as before.
+- **Native resolution** depends on the firmware reporting the monitor's EDID
+  (VBE/DDC on BIOS, the EDID protocols on UEFI). `BOOT.LOG` shows it (`hw: monitor`)
+  and why a mode was chosen (`hw: video modes`). Without EDID the loaders keep
+  1024×768 (BIOS) or 1024×768 / the firmware's mode (UEFI). The VESA BIOS of many
+  cards offers no wide-screen modes at all; UEFI's GOP usually offers the native
+  one. Write-combining for the screen is logged as `display: frame buffer ...
+  write-combining`.
 - **Laptop touchpads** are usually I2C devices and are not supported. Use a USB
   mouse.
 - **CD/DVD drives** are supported on SATA (AHCI) only, tested with QEMU's
