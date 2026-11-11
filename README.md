@@ -142,7 +142,54 @@ puts it on the image as `C:\PROGRAMS\NAME.EXE`. Type its name in the Command Pro
 different ways on purpose; `TASKMGR.EXE` is Task Manager; `CALC.EXE` and
 `SONAR.EXE` are full GUI programs (they draw into their own pixel buffer and
 blit it, then add text). `SELFTEST.EXE` checks the system calls (`selftest` in
-the Command Prompt; the QEMU `user` test variant runs it).
+the Command Prompt; the QEMU `user` test variant runs it). `GUIDEMO.EXE` (GUI
+Demo) uses every part of the window API below and logs each event it gets.
+
+The window API in `hal.h` (comments there give the details):
+
+- **Windows and events:** `win_create` gives a window whose client area is a
+  canvas kept in the kernel; `win_get_event` returns paint, close, key, mouse,
+  wheel, resize, timer, focus, command (controls), `EVT_MENU` and `EVT_SCROLL`
+  events. A press in the client area captures the mouse until the buttons are
+  released (moves outside the window still arrive), and mouse events carry the
+  modifier keys. `win_set_cursor` picks the pointer shape (arrow, I-beam,
+  wait, crosshair, hand, resize arrows), `win_get_rect` gives the client area's
+  place on screen, `win_set_min_size` the smallest size the user can drag it
+  to, and `win_set_owner` makes a window a (modal) dialog of another one.
+- **Menus:** `menu_set` gives a window a menu bar from a flat array of
+  `hal_menu_item_t` (a `MENU_TITLE` entry starts each menu; items have an id,
+  shortcut text, an icon, and separator, disabled, checked and bold flags;
+  `&` marks mnemonics). The bar sits above the client area, so adding,
+  replacing or removing it leaves the canvas and coordinates as they were.
+  `menu_popup` shows a context menu at a client position, `menu_enable` /
+  `menu_check` change items by id. F10 or a tap of Alt opens the menus from
+  the keyboard; Alt+letter opens one, arrows, Enter and Esc work inside.
+- **Drawing:** fills, lines, rectangles, circles, bevels, icons, pixel blits,
+  text (`gfx_text`, `gfx_text_n` for text without a NUL, `gfx_text_box`
+  with alignment and "..." when it does not fit), gradients and the rounded,
+  sunken and shadowed shapes of the theme (`gfx_shade`), whose colours
+  `gfx_theme` returns. `gfx_clip` / `gfx_clip_origin` limit drawing to a
+  rectangle (and move the origin to it), e.g. to draw a text area next to the
+  program's own scroll bars.
+- **Text measurement without a system call per string:** `text_width`,
+  `text_width_n`, `text_fit` and `text_char_width` measure locally from
+  advance widths the library copies from the kernel once per font and block
+  of 256 characters (`gfx_font_metrics`); `utf8_get` / `utf8_put` /
+  `utf8_prev` walk UTF-8 text the way the kernel draws it.
+- **Controls:** buttons, labels, text boxes, check boxes, list boxes, groups,
+  progress bars, vertical and horizontal scroll bars (`ctl_scroll_set`: range,
+  page, position and line step; arrows repeat while held, the track pages, the
+  thumb drags and the wheel scrolls), flat tool bar buttons with an icon and a
+  tooltip (`ctl_set_tool`), and a status bar docked at the bottom with
+  tab-separated parts. `ctl_move` lays them out again after a resize,
+  `ctl_focus` moves the keyboard between controls and the program's own
+  drawing, and `CTL_NOTIFY` makes Enter in a text box (or a double click in a
+  list box) send a command.
+- **Dialogs and clipboard:** `msgbox`, `file_dialog`, `inputbox` (a one-line
+  question), `clipboard_set_n` for text up to 1 MiB, `clipboard_get`.
+
+Every call checks the program's pointers and bounds its work, and a window's
+menus, controls and canvas go away with the window or the program.
 
 ## Layout
 

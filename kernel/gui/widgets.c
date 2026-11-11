@@ -3,6 +3,7 @@
 #include "core/lib.h"
 #include "core/unicode.h"
 #include "core/mm.h"
+#include "core/kernel.h"
 
 #define LIST_ROW 18
 
@@ -14,6 +15,8 @@ widget_t *widget_add(window_t *w, int type, rect_t r, const char *text, int id) 
     strlcpy(wd->text, text ? text : "", sizeof wd->text);
     if (type == W_TEXTBOX) { wd->cursor = wd->sel_anchor = (int)strlen(wd->text); }
     if (type == W_LISTBOX) wd->value = -1;
+    wd->icon = -1;
+    if (type == W_VSCROLL || type == W_HSCROLL) wd->line = 1;
     widget_t **pp = &w->widgets;
     while (*pp) pp = &(*pp)->next;
     *pp = wd;
@@ -106,8 +109,8 @@ void draw_scrollbar(gc_t *g, rect_t r, int total, int visible, int pos, int vert
     }
     int track = len - 2 * th;
     if (total <= visible || track < 8) return;
-    int tlen = MAX(16, track * visible / total);
-    int tpos = (track - tlen) * pos / MAX(1, total - visible);
+    int tlen = (int)MAX(16, (i64)track * visible / total);
+    int tpos = (int)((i64)(track - tlen) * pos / MAX(1, total - visible));
     rect_t t = vertical ? mkrect(r.x + 1, r.y + th + tpos, r.w - 2, tlen) : mkrect(r.x + th + tpos, r.y + 1, tlen, r.h - 2);
     if (vertical) gfx_rounded(g, t, 3, 15, bt, bb);
     else gfx_rounded(g, t, 3, 15, bt, bb);
@@ -126,8 +129,8 @@ int scrollbar_hit(rect_t r, int total, int visible, int pos, int x, int y, int v
     if (p < th) { *part = 1; return MAX(0, pos - 3); }
     if (p >= len - th) { *part = 2; return MIN(maxpos, pos + 3); }
     int track = len - 2 * th;
-    int tlen = MAX(16, track * visible / MAX(1, total));
-    int tpos = (track - tlen) * pos / MAX(1, maxpos);
+    int tlen = (int)MAX(16, (i64)track * visible / MAX(1, total));
+    int tpos = (int)((i64)(track - tlen) * pos / MAX(1, maxpos));
     int rel = p - th;
     if (rel < tpos) { *part = 3; return MAX(0, pos - visible); }
     if (rel > tpos + tlen) { *part = 4; return MIN(maxpos, pos + visible); }
@@ -204,6 +207,105 @@ static void listbox_paint(window_t *w, gc_t *g, widget_t *wd) {
     if (need_sb) draw_scrollbar(g, mkrect(in.x + in.w - 17, in.y, 17, in.h), wd->nitems, rows, wd->top, 1);
 }
 
+/* ---------------- scroll bars, tool buttons, status bars, tooltips ---------------- */
+static int sb_maxpos(widget_t *wd) { return MAX(0, wd->total - wd->page); }
+
+void widget_scroll_set(window_t *w, widget_t *wd, int total, int page, int pos, int line) {
+    wd->total = MAX(0, total);
+    wd->page = MAX(0, page);
+    wd->line = MAX(1, line);
+    wd->value = CLAMP(pos, 0, sb_maxpos(wd));
+    wm_invalidate(w);
+}
+
+static void toolbutton_paint(gc_t *g, widget_t *wd) {
+    rect_t r = wd->r;
+    const theme_t *th = g_theme;
+    int dis = (wd->style & WS_DISABLED) != 0;
+    if (wd->value && !dis) {
+        gfx_rounded(g, r, 3, 15, color_lighten(th->select, 120), color_lighten(th->select, 80));
+        gfx_rounded_outline(g, r, 3, 15, th->select);
+    } else if (wd->hover && !dis) {
+        if (wd->pressed) gfx_rounded(g, r, 3, 15, color_lighten(th->face, -25), color_lighten(th->face, 10));
+        else gfx_rounded(g, r, 3, 15, HEX(0xFFFFFF), color_lighten(th->face, -15));
+        gfx_rounded_outline(g, r, 3, 15, color_lighten(th->face, -60));
+    }
+    int off = wd->pressed && wd->hover && !dis ? 1 : 0;
+    int tw = wd->text[0] ? gfx_text_width(&font_ui, wd->text) : 0;
+    int iw = wd->icon >= 0 ? 16 : 0;
+    int cw = iw + (iw && tw ? 4 : 0) + tw;
+    int x = r.x + MAX(4, (r.w - cw) / 2) + off;
+    if (iw) {
+        if (dis) gfx_icon_alpha(g, x, r.y + (r.h - 16) / 2 + off, &icons16[wd->icon], 90);
+        else gfx_icon(g, x, r.y + (r.h - 16) / 2 + off, &icons16[wd->icon]);
+        x += 20;
+    }
+    if (tw) gfx_text_box(g, &font_ui, mkrect(x, r.y + off, r.x + r.w - x - 2, r.h), wd->text, dis ? HEX(0xA0A0A0) : HEX(0x000000), 0);
+}
+
+/* parts separated by tabs: the first takes what the others (value px each, default 150) leave */
+static void statusbar_paint(gc_t *g, widget_t *wd) {
+    rect_t st = wd->r;
+    const theme_t *th = g_theme;
+    gfx_gradient_v(g, st, color_lighten(th->face, 20), color_lighten(th->face, -10));
+    gfx_hline(g, st.x, st.y, st.w, color_lighten(th->face, -35));
+    const char *parts[8];
+    int lens[8], n = 0;
+    const char *s = wd->text;
+    while (n < 8) {
+        const char *t = strchr(s, '\t');
+        parts[n] = s;
+        lens[n] = t ? (int)(t - s) : (int)strlen(s);
+        n++;
+        if (!t) break;
+        s = t + 1;
+    }
+    int pw = wd->value > 0 ? wd->value : 150;
+    int right = st.x + st.w;
+    char buf[sizeof wd->text];
+    for (int i = n - 1; i >= 0; i--) {
+        int x = i ? right - pw : st.x;
+        if (i && x < st.x + 60) continue;
+        memcpy(buf, parts[i], (size_t)lens[i]);
+        buf[lens[i]] = 0;
+        gfx_text_box(g, &font_ui, mkrect(x + 8, st.y + 1, right - x - 12, st.h - 1), buf, HEX(0x303440), 0);
+        if (i) {
+            gfx_vline(g, x, st.y + 3, st.h - 6, color_lighten(th->face, -40));
+            gfx_vline(g, x + 1, st.y + 3, st.h - 6, HEX(0xFFFFFF));
+        }
+        right = x;
+    }
+}
+
+static widget_t *tip_wd;
+static window_t *tip_win;
+static u64 tip_since;
+static int tip_shown;
+
+static int widget_of(window_t *w, widget_t *x) {
+    for (widget_t *wd = w->widgets; wd; wd = wd->next) if (wd == x) return 1;
+    return 0;
+}
+
+static void tip_hide(void) {
+    if (tip_shown && tip_win && wm_alive(tip_win)) wm_invalidate(tip_win);
+    tip_wd = NULL; tip_win = NULL; tip_shown = 0;
+}
+
+static void tip_paint(window_t *w, gc_t *g) {
+    if (!tip_shown || tip_win != w || !widget_of(w, tip_wd) || !w->client) return;
+    widget_t *wd = tip_wd;
+    int tw = MIN(gfx_text_width(&font_ui, wd->tip) + 10, w->client->w - 4);
+    int h = font_ui.height + 6;
+    int x = CLAMP(wd->r.x + 4, 2, MAX(2, w->client->w - tw - 2));
+    int y = wd->r.y + wd->r.h + 3;
+    if (y + h > w->client->h) y = MAX(0, wd->r.y - h - 3);
+    rect_t r = mkrect(x, y, tw, h);
+    gfx_fill(g, r, HEX(0xFFFFE1));
+    gfx_rect(g, r, HEX(0x6E6E5A));
+    gfx_text_box(g, &font_ui, mkrect(x + 5, y, tw - 8, h), wd->tip, HEX(0x000000), 0);
+}
+
 void widgets_paint(window_t *w, gc_t *g) {
     for (widget_t *wd = w->widgets; wd; wd = wd->next) {
         if (wd->style & WS_HIDDEN) continue;
@@ -247,8 +349,15 @@ void widgets_paint(window_t *w, gc_t *g) {
         case W_ICON:
             gfx_icon(g, wd->r.x, wd->r.y, wd->r.w >= 48 ? &icons48[wd->value] : &icons32[wd->value]);
             break;
+        case W_VSCROLL: case W_HSCROLL:
+            /* disabled: no thumb, like a bar with nothing to scroll */
+            draw_scrollbar(g, wd->r, (wd->style & WS_DISABLED) ? 0 : wd->total, wd->page, wd->value, wd->type == W_VSCROLL);
+            break;
+        case W_TOOLBUTTON: toolbutton_paint(g, wd); break;
+        case W_STATUSBAR: statusbar_paint(g, wd); break;
         }
     }
+    tip_paint(w, g);
 }
 
 /* ---------------- events ---------------- */
@@ -361,6 +470,61 @@ static int textbox_pos(widget_t *wd, int x) {
 
 static widget_t *pressed_widget;
 static int sb_drag;
+/* scroll bar widget being pressed: part, thumb grab, auto-repeat */
+static int sbw_part, sbw_grab_pos, sbw_grab_mouse, sbw_mx, sbw_my;
+static u64 sbw_next;
+
+void widget_gone(widget_t *wd) {
+    if (pressed_widget == wd) { pressed_widget = NULL; sb_drag = 0; sbw_part = 0; }
+    if (tip_wd == wd) { tip_wd = NULL; tip_win = NULL; tip_shown = 0; }
+}
+
+static int sb_vertical(widget_t *wd) { return wd->type == W_VSCROLL; }
+static int sb_track(widget_t *wd, int *tlen) {
+    int len = sb_vertical(wd) ? wd->r.h : wd->r.w, th = sb_vertical(wd) ? wd->r.w : wd->r.h;
+    int track = len - 2 * th;
+    *tlen = (int)MAX(16, (i64)track * wd->page / MAX(1, wd->total));
+    return track;
+}
+
+/* move a scroll bar and tell its owner */
+static void sb_move(window_t *w, widget_t *wd, int pos, int part) {
+    pos = CLAMP(pos, 0, sb_maxpos(wd));
+    if (pos == wd->value && part != SBP_THUMB_END) return;
+    wd->value = pos;
+    wm_invalidate(w);
+    if (wd->on_scroll) wd->on_scroll(w, wd, part);
+}
+
+/* one step for an arrow or page part; 0 when the pointer left that part */
+static int sb_step(widget_t *wd, int part, int x, int y) {
+    int p;
+    if (!rect_contains(wd->r, x, y)) return 0;
+    scrollbar_hit(wd->r, wd->total, wd->page, wd->value, x, y, sb_vertical(wd), &p);
+    if (p != part) return 0;
+    switch (part) {
+    case SBP_LINE_UP: return -wd->line;
+    case SBP_LINE_DOWN: return wd->line;
+    case SBP_PAGE_UP: return -MAX(1, wd->page);
+    case SBP_PAGE_DOWN: return MAX(1, wd->page);
+    }
+    return 0;
+}
+
+void widgets_tick(window_t *w) {
+    u64 now = time_ms();
+    if (tip_wd && tip_win == w && !tip_shown && now - tip_since >= 600 && widget_of(w, tip_wd)) {
+        tip_shown = 1;
+        wm_invalidate(w);
+    }
+    /* holding an arrow or the track repeats */
+    if (pressed_widget && sbw_part >= SBP_LINE_UP && sbw_part <= SBP_PAGE_DOWN && now >= sbw_next && widget_of(w, pressed_widget)) {
+        widget_t *wd = pressed_widget;
+        int d = sb_step(wd, sbw_part, sbw_mx, sbw_my);
+        if (d) sb_move(w, wd, wd->value + d, sbw_part);
+        sbw_next = now + 50;
+    }
+}
 
 int widgets_event(window_t *w, gui_event_t *e) {
     if (e->type == GE_KEY) {
@@ -410,9 +574,27 @@ int widgets_event(window_t *w, gui_event_t *e) {
 
     if (e->type == GE_MOUSE_MOVE || e->type == GE_MOUSE_LEAVE) {
         int changed = 0;
+        widget_t *tip = NULL;
         for (widget_t *wd = w->widgets; wd; wd = wd->next) {
             int h = !(wd->style & (WS_DISABLED | WS_HIDDEN)) && rect_contains(wd->r, e->x, e->y);
-            if (h != wd->hover && (wd->type == W_BUTTON || wd->type == W_CHECKBOX)) { wd->hover = h; changed = 1; }
+            if (h != wd->hover && (wd->type == W_BUTTON || wd->type == W_CHECKBOX || wd->type == W_TOOLBUTTON)) { wd->hover = h; changed = 1; }
+            if (e->type == GE_MOUSE_MOVE && wd->tip[0] && !(wd->style & WS_HIDDEN) && rect_contains(wd->r, e->x, e->y)) tip = wd;
+        }
+        if (e->buttons) tip = NULL;
+        if (tip != tip_wd || (tip && tip_win != w)) {
+            if (tip_wd || tip) tip_hide();
+            if (tip) { tip_wd = tip; tip_win = w; tip_since = time_ms(); }
+        }
+        if (pressed_widget && (pressed_widget->type == W_VSCROLL || pressed_widget->type == W_HSCROLL) && widget_of(w, pressed_widget)) {
+            widget_t *wd = pressed_widget;
+            sbw_mx = e->x; sbw_my = e->y;
+            if (sbw_part == SBP_THUMB_TRACK && (e->buttons & MOUSE_LEFT)) {
+                int tlen, track = sb_track(wd, &tlen);
+                int delta = (sb_vertical(wd) ? e->y : e->x) - sbw_grab_mouse;
+                sb_move(w, wd, (int)CLAMP(sbw_grab_pos + (i64)delta * sb_maxpos(wd) / MAX(1, track - tlen), 0, sb_maxpos(wd)), SBP_THUMB_TRACK);
+            }
+            if (changed) wm_invalidate(w);
+            return 1;
         }
         if (pressed_widget && pressed_widget->type == W_TEXTBOX && (e->buttons & MOUSE_LEFT)) {
             pressed_widget->cursor = textbox_pos(pressed_widget, e->x);
@@ -432,6 +614,11 @@ int widgets_event(window_t *w, gui_event_t *e) {
 
     if (e->type == GE_WHEEL) {
         for (widget_t *wd = w->widgets; wd; wd = wd->next)
+            if ((wd->type == W_VSCROLL || wd->type == W_HSCROLL) && !(wd->style & (WS_DISABLED | WS_HIDDEN)) && rect_contains(wd->r, e->x, e->y)) {
+                sb_move(w, wd, wd->value - e->dz * 3 * wd->line, SBP_WHEEL);
+                return 1;
+            }
+        for (widget_t *wd = w->widgets; wd; wd = wd->next)
             if (wd->type == W_LISTBOX && rect_contains(wd->r, e->x, e->y)) {
                 int rows = (wd->r.h - 2) / LIST_ROW;
                 wd->top = CLAMP(wd->top - e->dz * 3, 0, MAX(0, wd->nitems - rows));
@@ -442,9 +629,35 @@ int widgets_event(window_t *w, gui_event_t *e) {
     }
 
     if (e->type == GE_MOUSE_DOWN || e->type == GE_DBLCLICK) {
+        if (tip_wd) tip_hide();
         if (e->button != MOUSE_LEFT) return 0;
         for (widget_t *wd = w->widgets; wd; wd = wd->next) {
             if ((wd->style & (WS_DISABLED | WS_HIDDEN)) || !rect_contains(wd->r, e->x, e->y)) continue;
+            if (wd->type == W_VSCROLL || wd->type == W_HSCROLL) {
+                /* not a tab stop: the keyboard focus stays where it was */
+                pressed_widget = wd;
+                sbw_mx = e->x; sbw_my = e->y;
+                int part;
+                scrollbar_hit(wd->r, wd->total, wd->page, wd->value, e->x, e->y, sb_vertical(wd), &part);
+                sbw_part = 0;
+                if (wd->total <= wd->page) return 1;
+                if (part == 5) {
+                    sbw_part = SBP_THUMB_TRACK;
+                    sbw_grab_pos = wd->value;
+                    sbw_grab_mouse = sb_vertical(wd) ? e->y : e->x;
+                } else {
+                    sbw_part = part;
+                    sb_move(w, wd, wd->value + sb_step(wd, part, e->x, e->y), part);
+                    sbw_next = time_ms() + 400;
+                }
+                return 1;
+            }
+            if (wd->type == W_TOOLBUTTON) {
+                pressed_widget = wd;
+                wd->pressed = 1;
+                wm_invalidate(w);
+                return 1;
+            }
             if (!focusable(wd)) continue;
             w->focus = wd;
             pressed_widget = wd;
@@ -480,15 +693,21 @@ int widgets_event(window_t *w, gui_event_t *e) {
         widget_t *wd = pressed_widget;
         pressed_widget = NULL;
         sb_drag = 0;
-        if (!wd) return 0;
+        if (!wd || !widget_of(w, wd)) { sbw_part = 0; return 0; }
         wd->pressed = 0;
+        if (wd->type == W_VSCROLL || wd->type == W_HSCROLL) {
+            int part = sbw_part;
+            sbw_part = 0;
+            if (part == SBP_THUMB_TRACK) sb_move(w, wd, wd->value, SBP_THUMB_END);
+            return 1;
+        }
         int inside = rect_contains(wd->r, e->x, e->y);
         wm_invalidate(w);
         if (inside && wd->type == W_CHECKBOX) {
             wd->value = !wd->value;
             if (wd->on_change) wd->on_change(w, wd);
             if (wd->on_click) wd->on_click(w, wd);
-        } else if (inside && wd->type == W_BUTTON && wd->on_click) {
+        } else if (inside && (wd->type == W_BUTTON || wd->type == W_TOOLBUTTON) && wd->on_click) {
             wd->on_click(w, wd);
         }
         return 1;

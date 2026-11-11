@@ -220,6 +220,7 @@ static void free_widgets(window_t *w) {
     widget_t *wd = w->widgets;
     while (wd) {
         widget_t *n = wd->next;
+        widget_gone(wd);
         if (wd->items) { for (int i = 0; i < wd->nitems; i++) kfree(wd->items[i]); kfree(wd->items); }
         kfree(wd);
         wd = n;
@@ -245,6 +246,7 @@ void wm_destroy(window_t *w) {
     if (drag_win == w) { drag_win = NULL; drag_mode = DRAG_NONE; }
     if (title_btn_win == w) title_btn_win = NULL;
     if (prev_active == w) prev_active = NULL;
+    menu_close_owned(w);
     if (w->on_destroy) w->on_destroy(w);
     free_widgets(w);
     surface_free(w->client);
@@ -327,6 +329,15 @@ void wm_show(window_t *w) {
         }
     }
     wm_raise(w);
+}
+
+static int cursor_kind(void);
+static rect_t cursor_rect(int kind, int x, int y);
+static int drawn_cursor = -1, drawn_cx, drawn_cy;
+void wm_cursor_changed(void) {
+    if (cursor_kind() == drawn_cursor) return;
+    wm_invalidate_rect(cursor_rect(drawn_cursor < 0 ? 0 : drawn_cursor, drawn_cx, drawn_cy));
+    wm_invalidate_rect(cursor_rect(cursor_kind(), mx, my));
 }
 
 void wm_set_busy(int b) {
@@ -462,7 +473,6 @@ static const char *cur_hand[] = {
 static const char *cur_cross[] = {
     "     X", "     X", "     X", "     X", "", "XXXX   XXXX", "", "     X", "     X", "     X", "     X", NULL };
 
-static int cursor_kind(void);
 static void cursor_info(int kind, const char ***img, int *hx, int *hy) {
     switch (kind) {
     case CURSOR_IBEAM: *img = cur_ibeam; *hx = 3; *hy = 7; break;
@@ -475,7 +485,6 @@ static void cursor_info(int kind, const char ***img, int *hx, int *hy) {
     default: *img = cur_arrow; *hx = 0; *hy = 0; break;
     }
 }
-static int drawn_cursor = -1, drawn_cx, drawn_cy;
 static rect_t cursor_rect(int kind, int x, int y) {
     const char **img; int hx, hy;
     cursor_info(kind, &img, &hx, &hy);
@@ -586,8 +595,11 @@ static void set_title_hover(window_t *w, int idx) {
     if (w) wm_invalidate_rect(mkrect(w->frame.x, w->frame.y, w->frame.w, TITLE_H));
 }
 
+static int alt_tap;             /* the left Alt key is down and nothing else happened yet */
+
 static void mouse_down(int button) {
     u64 now = time_ms();
+    alt_tap = 0;
     int dbl = button == last_click_btn && now - last_click_ms < 450 &&
               ABS_DIFF_OK(mx, last_click_x) && ABS_DIFF_OK(my, last_click_y);
     last_click_ms = dbl ? 0 : now; last_click_x = mx; last_click_y = my; last_click_btn = button;
@@ -776,10 +788,23 @@ static void cycle_windows(void) {
 }
 
 static void key_event(input_event_t *k) {
+    if (k->pressed && k->key != KEY_LALT) alt_tap = 0;      /* Alt+Tab, Alt+F4, Alt+letter... */
     if (k->pressed) {
         if (k->key == KEY_LGUI || k->key == KEY_RGUI || (k->key == KEY_ESC && (k->mods & MOD_CTRL))) { start_menu_toggle(); return; }
         if (k->key == KEY_TAB && (k->mods & MOD_ALT)) { cycle_windows(); return; }
         if (k->key == KEY_F4 && (k->mods & MOD_ALT)) { window_t *a = wm_active(); if (a) wm_close(a); else shutdown_dialog(); return; }
+    }
+    /* a tap of the left Alt key opens the active window's menu bar (or closes an open menu) */
+    if (k->key == KEY_LALT) {
+        if (k->pressed) alt_tap = !(k->mods & (MOD_CTRL | MOD_SHIFT));
+        else if (alt_tap) {
+            alt_tap = 0;
+            window_t *a = wm_active();
+            if (top_popup()) menu_close_all();
+            else if (a && a->menubar && a->menubar->count && !(a->modal && wm_alive(a->modal))) menubar_open(a, 0, 1);
+        }
+    } else if (k->pressed) {
+        alt_tap = 0;
     }
     window_t *pop = top_popup();
     window_t *w = pop ? pop : wm_active();
