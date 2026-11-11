@@ -991,7 +991,9 @@ void gui_step(void) {
     /* windows with on_tick want ~10 Hz; the shell (clock, balloons) 1 Hz */
     u64 tick = last_tick + (ticking ? 100 : 1000);
     if (tick < deadline) deadline = tick;
-    if (!irq_enabled_now()) { idle_wait(gen, deadline); return; }
+    /* no interrupts (boot option): nothing can wake a waiting thread, so let
+     * the other threads (net, workers) run before spinning on */
+    if (!irq_enabled_now()) { thread_yield(); idle_wait(gen, deadline); return; }
     /* also wake for work from other threads: a program's gui_call job or a
      * window it invalidated (otherwise they wait for the next tick) */
     irq_service();

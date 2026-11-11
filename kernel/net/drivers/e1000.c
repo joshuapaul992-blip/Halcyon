@@ -115,8 +115,6 @@ static int e1000_xmit(netdev_t *nd, const void *frame, u32 len) {
     e->tx_next = n;
     __asm__ volatile("sfence" ::: "memory");
     wr(e, REG_TDT, e->tx_next);
-    nd->tx_packets++;
-    nd->tx_bytes += len;
     return 0;
 }
 
@@ -130,7 +128,7 @@ static void e1000_poll(netdev_t *nd) {
         rxd_t *d = &e->rx[e->rx_next];
         if (!(d->status & RXS_DD)) break;
         work = 1;
-        if ((d->status & RXS_EOP) && !d->errors && d->len >= ETH_HDR) {
+        if ((d->status & RXS_EOP) && !d->errors && d->len >= ETH_HDR && d->len <= ETH_MAX_FRAME + 4) {
             nd->rx_packets++;
             nd->rx_bytes += d->len;
             netdev_rx(nd, e->rxbuf + e->rx_next * BUFSZ, d->len);
@@ -144,6 +142,9 @@ static void e1000_poll(netdev_t *nd) {
     }
     /* transmit: reclaim finished descriptors */
     while (e->tx_clean != e->tx_next && (e->tx[e->tx_clean].status & TXS_DD)) {
+        txd_t *t = &e->tx[e->tx_clean];
+        if (t->status & 0x06) nd->tx_errors++;   /* excess / late collisions */
+        else { nd->tx_packets++; nd->tx_bytes += t->len; }
         e->tx_clean = (e->tx_clean + 1) % NTX;
         work = 1;
     }
@@ -231,6 +232,8 @@ static void e1000_attach(pci_dev_t *pd, const char *model) {
     e->nd.xmit = e1000_xmit;
     e->nd.poll = e1000_poll;
     e->nd.priv = e;
+    e->nd.pci = pd;
+    e->nd.irq = &e->irq;
     pd->driver = "e1000";
     if (netdev_register(&e->nd)) kprintf("e1000: too many network adapters\n");
 }

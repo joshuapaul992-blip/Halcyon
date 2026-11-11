@@ -16,6 +16,9 @@
 #define NET_NETDEV_H
 #include "core/types.h"
 
+struct pci_dev;
+struct irq_handle;
+
 #define ETH_HDR 14
 #define ETH_MAX_FRAME 1514
 #define NETDEV_MAX 8
@@ -42,7 +45,10 @@ struct netdev {
     void *priv;                     /* driver */
     void *stack;                    /* protocol stack's interface state */
     int irq_live;                   /* the driver's interrupt works (else the thread polls often) */
-    /* statistics (drivers count rx/tx; the stack counts drops it makes) */
+    struct pci_dev *pci;            /* the adapter's PCI function (System Information), may be NULL */
+    struct irq_handle *irq;         /* its interrupt (System Information), may be NULL */
+    /* statistics (drivers count rx/tx; the stack counts drops it makes).
+     * tx_packets / tx_bytes count frames the adapter reports sent. */
     u64 rx_packets, rx_bytes, rx_errors, rx_dropped;
     u64 tx_packets, tx_bytes, tx_errors, tx_dropped;
 };
@@ -64,6 +70,8 @@ void net_stack_link(netdev_t *d) __attribute__((weak));    /* link_up changed */
 /* drivers (weak: probe the PCI bus, register what they find) */
 void virtio_net_init(void) __attribute__((weak));
 void e1000_init(void) __attribute__((weak));
+void e1000e_init(void) __attribute__((weak));
+void igb_init(void) __attribute__((weak));
 void rtl8139_init(void) __attribute__((weak));
 void rtl8169_init(void) __attribute__((weak));
 

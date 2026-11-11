@@ -37,9 +37,24 @@ interrupts on, get a working interrupt:
           (built with xorriso): the disc must mount, and after the desktop is
           up the disc is ejected and another one inserted through the QEMU
           monitor; the volume must go away and the new one mount
+or attach a network adapter on QEMU's user-mode network (-netdev user):
+  virtio        virtio-net-pci (transitional: the virtio 1.0 interface is used)
+  virtiolegacy  virtio-net-pci with disable-modern=on (the legacy I/O interface)
+  virtiomodern  virtio-net-pci-non-transitional (virtio 1.0 only)
+  e1000         Intel 82540EM          e1000e   Intel 82574L
+  igb           Intel 82576            rtl8139  Realtek RTL8139C+
+          The adapter's driver must register it as eth0 with its link up; the
+          kernel's net probe (QEMU fw_cfg netprobe) sends 3000 ARP requests for
+          10.0.2.2 (at most 32 outstanding) and then a burst of 750 as fast as
+          the transmit ring takes them: the gateway's reply must arrive, every
+          request must be answered and reported transmitted, the burst must
+          be transmitted (replies to it may be dropped when the receive ring
+          overruns), and the adapter must have the expected interrupt (MSI-X,
+          INTx, or polled with noirq).
 Exit status is the number of failed configurations.
 """
 import os
+import re
 import subprocess
 import sys
 import time
@@ -50,9 +65,19 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:nomsi", "uhci:bios:pic", "xhci:uefi:pic", "ehci:bios:noirq",
           "xhci:bios:nvme", "xhci:uefi:nvme4k", "xhci:bios:nvme+nomsi", "xhci:uefi:nvme+noirq",
           "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user", "xhci:bios:sock",
-          "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch"]
+          "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
+          "xhci:bios:virtio", "xhci:uefi:e1000e"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0}
+# network variants: QEMU device, the driver's name, whether it has MSI-X
+NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
+        "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
+        "virtiomodern": ("virtio-net-pci-non-transitional", "virtio-net", True),
+        "e1000": ("e1000", "e1000", False), "e1000e": ("e1000e", "e1000e", True),
+        "igb": ("igb", "igb", True), "rtl8139": ("rtl8139", "rtl8139", False)}
+for _n in NICS:
+    VARIANTS[_n] = 0
+NET_PROBE = 3000
 NVME_ERRORS = ["failed", "timed out", "fatal", "offline", "not responding", "no interrupt seen"]
 IDLE_MAX_CPU = 40      # % of one host CPU used by QEMU at the idle desktop
 TIMEOUT = {"uhci": 90, "ohci": 60}
@@ -135,6 +160,41 @@ def keyboard_leds(log):
     return fails
 
 
+def net_failures(text, nic, opts):
+    """the network adapter variant's checks (see the docstring)"""
+    dev, driver, msix = NICS[nic]
+    lines = text.splitlines()
+    fails = []
+    if not any(l.startswith("net: eth0: ") and "(%s), MAC" % driver in l for l in lines):
+        return ["no %s adapter registered" % driver]
+    if not any(l.startswith("net: eth0: ") and "link up" in l for l in lines):
+        fails.append("link not up")
+    if "net: eth0: probe reply from 52:55:0a:00:02:02" not in text:
+        fails.append("no reply from 10.0.2.2")
+    m = re.search(r"net: eth0: probe: (\d+) sent, (\d+) replies, (\d+) transmitted in \d+ ms; "
+                  r"errors: (\d+) send, (\d+) tx, (\d+) rx; interrupt (.*)", text)
+    if not m:
+        fails.append("probe did not finish")
+    else:
+        sent, replies, done, e1, e2, e3 = (int(x) for x in m.groups()[:6])
+        irq = m.group(7).strip()
+        if sent != NET_PROBE or replies != sent or done != sent or e1 or e2 or e3:
+            fails.append("probe: %s" % m.group(0).split("probe: ")[1])
+        want = "polled" if "noirq" in opts else "MSI-X" if msix and "nomsi" not in opts else "INTx"
+        if not irq.startswith(want) or "lost" in irq or "none seen" in irq or (want != "polled" and "polled" in irq):
+            fails.append("interrupt %s (expected %s)" % (irq, want))
+    m = re.search(r"net: eth0: probe burst: (\d+) sent \(transmit ring full \d+ times\), (\d+) transmitted, "
+                  r"\d+ replies in \d+ ms; errors: (\d+) tx, (\d+) rx", text)
+    if not m:
+        fails.append("probe burst did not finish")
+    elif int(m.group(1)) != NET_PROBE // 4 or int(m.group(2)) != int(m.group(1)) or int(m.group(3)) or int(m.group(4)):
+        fails.append("burst: %s" % m.group(0).split("burst: ")[1])
+    bad = [l for l in lines if l.startswith("irq: ") and driver in l and ("stopped arriving" in l or "polling it" in l)]
+    if bad:
+        fails.append(bad[0].strip())
+    return fails
+
+
 def run(cfg):
     parts = cfg.split(":")
     hc, fw = parts[0], parts[1]
@@ -173,6 +233,10 @@ def run(cfg):
         extra += " -drive if=none,id=d1,format=raw,file=%s -device ide-hd,drive=d1,bus=ide.2" % sata_x
     if flags:
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
+    nic = next((v for v in opts if v in NICS), None)
+    if nic:
+        extra += " -netdev user,id=n0 -device %s,netdev=n0 -fw_cfg name=opt/halcyon/netprobe,string=%d" % (
+            NICS[nic][0], NET_PROBE)
     prog = next((PROGRAMS[v] for v in opts if v in PROGRAMS), None)
     if prog:
         extra += " -fw_cfg name=opt/halcyon/autorun,string=C:/PROGRAMS/" + prog[0]
@@ -226,6 +290,11 @@ def run(cfg):
             time.sleep(0.5)
         time.sleep(1)
         text = open(log, errors="replace").read()
+    if nic:
+        t1 = time.time()
+        while time.time() - t1 < 20 and p.poll() is None and "probe burst:" not in text:
+            time.sleep(0.5)
+            text = open(log, errors="replace").read()
     idle = None
     if p.poll() is None and "gui: desktop ready" in text and not prog:
         time.sleep(2)
@@ -259,6 +328,8 @@ def run(cfg):
             failures.append("CD volume")
         failures += cd_fails
     failures += kbd_fails
+    if nic:
+        failures += net_failures(text, nic, opts)
     want_mode = {"": "irq: mode I/O APIC", "pic": "irq: mode 8259 PIC", "nomsi": "irq: mode I/O APIC",
                  "noirq": "interrupts disabled by boot option"}[irqmode]
     if want_mode not in text:
@@ -280,7 +351,7 @@ def run(cfg):
             failures.append("idle desktop uses %.0f%% CPU" % idle)
     status = "PASS" if not failures else "FAIL (%s)" % ", ".join(failures)
     cpu = "" if idle is None else "  idle CPU %3.0f%%" % idle
-    print("%-16s %5.1fs%s  %s" % (cfg, elapsed, cpu, status), flush=True)
+    print("%-22s %5.1fs%s  %s" % (cfg, elapsed, cpu, status), flush=True)
     if failures:
         print("    --- last lines of the serial log ---")
         for line in text.strip().splitlines()[-15:]:

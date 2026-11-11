@@ -28,6 +28,11 @@ useful contribution right now, and both a success and a failure are worth report
      not found. `IRQ > C:\IRQ.TXT` saves the table to the stick.
    - Leave the desktop idle for a minute. The fan should stay quiet and the CPU
      cool: Halcyon halts the CPU when there is nothing to do.
+   - If the PC has wired Ethernet, plug a cable in and look at "Network adapters"
+     in System Information: the adapter should be listed with its MAC address,
+     and "connected" with the right speed once the cable is in (unplugging it
+     should show "cable unplugged" within a second). BOOT.LOG has a `net: eth0:`
+     line per adapter and the driver's own lines (`e1000e:`, `r8169:`, ...).
    - Turn Off and Restart from the Start menu.
 4. Use Turn Off or Restart, so the log is written, then collect
    **`\HALCYON\BOOT.LOG`** and **`\HALCYON\BOOTPREV.LOG`** from the stick on another
@@ -114,14 +119,68 @@ works.
 - **NVMe SSDs** are tested in QEMU only (512- and 4096-byte blocks; MSI-X, INTx
   and polled). If an NVMe disk is missing, check the `nvme:` lines in BOOT.LOG and
   try F8 "Disable MSI"; "Disable NVMe controllers" turns the driver off.
+- **Network adapters** other than QEMU's are untested (see below). The drivers
+  only start the adapter, receive and send frames and report the link; a driver
+  that hangs the boot can be avoided with F8 "Safe Mode", which leaves network
+  adapters off.
 - **exFAT** volumes (most USB sticks and SD cards larger than 32 GB) are read and
   written, but have only been tested in QEMU and with images made by Linux tools.
   Please report sticks formatted by Windows, a Mac or a camera that don't mount,
   with `BOOT.LOG`.
 
+## Network adapters
+
+Each driver gives the adapter's MAC address, link state and speed, receive and
+transmit rings, statistics, and its interrupt (MSI-X, MSI or INTx, polled when
+none works). "Tested" means in QEMU with `tools/boottest.py`: the adapter on
+QEMU's user-mode network under BIOS and UEFI, with MSI-X, INTx (I/O APIC and
+legacy PIC) and polled, an ARP exchange with the gateway and 3,000 more
+requests (every ring wraps many times), then a burst that fills the transmit
+ring and overruns the receive ring.
+
+| Driver | Adapters | PCI IDs | Status |
+|--------|----------|---------|--------|
+| `virtio-net` | virtio network device (QEMU/KVM, most cloud and VM hosts) | 1AF4:1000 (transitional), 1AF4:1041 (virtio 1.0) | Tested: virtio 1.0 interface, legacy I/O interface (with and without ANY_LAYOUT), non-transitional device; MSI-X, INTx, polled |
+| `e1000` | Intel 82540EM/EP, 82541, 82545EM/GM, 82546, 82547 (8254x PCI/PCI-X) | 8086:100E and relatives | Tested with QEMU `e1000` (82540EM, INTx) |
+| `e1000e` | Intel 82574L/LA | 8086:10D3, 10F6 | Tested with QEMU `e1000e`: MSI-X, INTx, polled |
+| `e1000e` | Intel 82571EB/PT, 82572EI, 82573E/L/V, 82583V (copper) | 8086:105E, 10A4, 10BC, 10D5, 107D, 10B9, 108B, 108C, 109A, 150C | Written to the datasheets, untested |
+| `e1000e` | Intel I217-LM/V, I218-LM/V, I219-LM/V (on-board, Haswell to Raptor Lake chipsets) | 8086:153A, 153B, 155A, 1559, 15A0-15A3, I219: 156F, 1570, 15B7-15B9, 15D6-15D8, 15E3, 0D53, 0D55, 15BB-15BE, 15DF-15E2, 0D4C-0D4F, 15F4, 15F5, 15F9-15FC, 1A1C-1A1F, 550C, 550D, 0DC5-0DC8 | Written to spec, untested: see below |
+| `igb` | Intel 82576 (copper) | 8086:10C9, 10E8, 1526, 150A | Tested with QEMU `igb`: MSI-X, INTx, polled |
+| `igb` | Intel I350, I210, I211 (copper) | 8086:1521, 1533, 1534, 1535, 157B, 1539 | Written to the datasheets, untested |
+| `rtl8139` | Realtek RTL8139/8139A-D/8139C+, RTL8100/8130 and cards built on them | 10EC:8139 and 17 OEM IDs | Tested with QEMU `rtl8139` (INTx, polled) |
+| `r8169` | Realtek RTL8169/8110 (PCI), RTL8111/8168 B to H (PCIe), RTL8411 | 10EC:8161, 8167, 8168, 8169 and 5 OEM IDs | **Untested**: QEMU has no model of these chips |
+
+What is written to spec only, and what may go wrong on a real PC:
+
+- **I217/I218/I219.** The PHY sits in the chipset and is shared with Intel's
+  Management Engine. The driver takes the software semaphore (EXTCNF_CTRL.SWFLAG)
+  for every PHY access, wakes the PHY from Ultra Low Power mode (through the ME
+  when ME firmware is present, else by toggling LANPHYPC and clearing the ULP and
+  SMBus settings in the PHY), and does not reset the PHY when the ME blocks it.
+  Not done: the I219 descriptor ring flush that a reset after another driver
+  (e.g. the UEFI network stack) used the rings can need (it is logged), EEE and
+  the K1 power state, Wake-on-LAN. The MAC address is taken from the receive
+  address register the hardware loads from the NVM; the NVM (in the platform
+  flash) is not read. Meteor Lake and newer I219s, the 82577/82578/82579
+  (2010-2012 chipsets) and ICH8-10 Ethernet are not supported.
+- **82571/82572/82573/82583, I350/I210/I211.** The reset and semaphore
+  sequences and the register bits the specification updates require are
+  implemented; fiber, SerDes and SGMII ports are not claimed. An I210/I211
+  with a blank iNVM has no MAC address and is not used.
+- **RTL8169/8111/8168.** The chip version (TCR XID) selects the
+  version-specific steps public documentation describes: MAC reset handling for
+  the first 8169s, PHY wake-up, C+ mode, early-receive settings, the 8168G+
+  receive gate. Realtek's per-version PHY parameter tables (undocumented
+  register writes Realtek's own drivers make) are not applied, so some boards may
+  link at a lower speed or not at all; the 8168G+ out-of-band (DASH) hand-over
+  is not done. The RTL8101/8102/8105/8106 Fast Ethernet chips (10EC:8136) and
+  the RTL8125 (2.5 Gbit/s) are not supported.
+- Jumbo frames, checksum and segmentation offloads, VLANs and Wake-on-LAN are
+  not used by any driver.
+
 ## Compatibility list
 
 | Machine | Year | Firmware | USB controllers | Result | Notes |
 |---------|------|----------|-----------------|--------|-------|
-| QEMU q35 | – | SeaBIOS / OVMF | UHCI, OHCI, EHCI, EHCI+UHCI, xHCI | Works | All 13 boot configurations pass in CI, including the legacy PIC, no-MSI and no-interrupt modes |
+| QEMU q35 | – | SeaBIOS / OVMF | UHCI, OHCI, EHCI, EHCI+UHCI, xHCI | Works | All 13 boot configurations pass in CI, including the legacy PIC, no-MSI and no-interrupt modes; network adapters virtio-net, e1000, e1000e (82574L), igb (82576) and rtl8139 |
 | *your PC here* | | | | | |

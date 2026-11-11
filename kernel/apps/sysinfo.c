@@ -11,6 +11,7 @@
 #include "usb/usb.h"
 #include "fileops.h"
 #include "core/irq.h"
+#include "net/netdev.h"
 
 blockdev_t *ahci_cd_get(int i) __attribute__((weak));   /* drivers/ahci.c */
 
@@ -31,7 +32,7 @@ typedef struct si {
     row_t *rows; int n;
     int sel, top;
     u8 collapsed[16];
-    u32 ugen, vgen;
+    u32 ugen, vgen, ngen;
     int sb_drag;
     u64 live_t;
     window_t *win;
@@ -78,11 +79,31 @@ static void pci_detail(pci_dev_t *d, char *b, int n) {
     }
 }
 
+/* changes when an adapter's link state or speed changes */
+static u32 net_state(void) {
+    u32 h = (u32)netdev_count();
+    for (int i = 0; i < netdev_count(); i++) {
+        netdev_t *nd = netdev_get(i);
+        h = h * 31 + (u32)nd->link_up * 7 + (u32)nd->speed_mbps + (u32)nd->full_duplex;
+    }
+    return h;
+}
+
+static const char *link_text(const netdev_t *nd, char *b, int n) {
+    if (!nd->link_up) snprintf(b, n, "cable unplugged");
+    else if (!nd->speed_mbps) snprintf(b, n, "connected");
+    else if (nd->speed_mbps >= 1000 && nd->speed_mbps % 1000 == 0)
+        snprintf(b, n, "connected, %d Gbit/s%s", nd->speed_mbps / 1000, nd->full_duplex ? "" : " half duplex");
+    else snprintf(b, n, "connected, %d Mbit/s%s", nd->speed_mbps, nd->full_duplex ? "" : " half duplex");
+    return b;
+}
+
 static void build(si_t *s) {
     for (int i = 0; i < s->n; i++) kfree(s->rows[i].detail);
     s->n = 0;
     s->ugen = usb_generation();
     s->vgen = vfs_generation();
+    s->ngen = net_state();
     char *d = kmalloc(2048);
     struct mm_stats ms; mm_get_stats(&ms);
 
@@ -211,9 +232,24 @@ static void build(si_t *s) {
 
     /* network */
     add(s, 0, ICON_HUB, CAT_NET, NULL, "%s", cat_names[CAT_NET]);
+    for (int i = 0; i < netdev_count(); i++) {
+        netdev_t *nd = netdev_get(i);
+        char lk[48], irq[48] = "polled";
+        if (nd->irq) irq_describe(nd->irq, irq, sizeof irq);
+        int o = snprintf(d, 2048, "%s (%s)\n\nMAC address: %02x:%02x:%02x:%02x:%02x:%02x\nLink: %s\nDriver: %s\nInterrupt: %s\n\n"
+                         "Received: %lu frames, %lu bytes; %lu errors, %lu dropped\nSent: %lu frames, %lu bytes; %lu errors, %lu dropped\n",
+                         nd->desc, nd->name, nd->mac[0], nd->mac[1], nd->mac[2], nd->mac[3], nd->mac[4], nd->mac[5],
+                         link_text(nd, lk, sizeof lk), nd->driver, irq, nd->rx_packets, nd->rx_bytes, nd->rx_errors,
+                         nd->rx_dropped, nd->tx_packets, nd->tx_bytes, nd->tx_errors, nd->tx_dropped);
+        if (nd->pci && o < 2047) { d[o++] = '\n'; pci_detail(nd->pci, d + o, 2048 - o); }
+        add(s, 1, nd->link_up ? ICON_HUB : ICON_WARNING, CAT_NET, d, "%s: %s (%s)", nd->name, nd->desc, lk);
+    }
     for (int i = 0; i < pci_count(); i++) {
         pci_dev_t *p = pci_get(i);
         if (p->class_code != 2) continue;
+        int claimed = 0;
+        for (int k = 0; k < netdev_count(); k++) if (netdev_get(k)->pci == p) claimed = 1;
+        if (claimed) continue;
         pci_detail(p, d, 2048);
         strlcat(d, "\nNo driver is available for this device.", 2048);
         add(s, 1, ICON_WARNING, CAT_NET, d, "%s %s", pci_vendor_name(p->vendor), pci_class_name(p->class_code, p->subclass, p->prog_if));
@@ -324,7 +360,7 @@ static void si_event(window_t *w, gui_event_t *e) {
 
 static void si_tick(window_t *w) {
     si_t *s = w->data;
-    if (usb_generation() != s->ugen || vfs_generation() != s->vgen) build(s);
+    if (usb_generation() != s->ugen || vfs_generation() != s->vgen || net_state() != s->ngen) { build(s); wm_invalidate(w); }
     if (time_ms() - s->live_t >= 1000) {
         s->live_t = time_ms();
         for (int i = 0; i < s->n; i++)

@@ -16,6 +16,7 @@ its own drivers for USB, SATA and FAT file systems.
 | Threads and programs | Kernel threads with a scheduler (copies, moves and deletes run in the background with a progress dialog and Cancel). Programs run in user mode in their own address space: static position-independent ELF64 `.EXE` files loaded from disk (`C:\PROGRAMS`), preempted every 10 ms, with threads (up to 32 per program; mutexes and condition variables on futexes), named shared memory, system calls for files, memory, processes, the console and windows (an early-2000s style window, drawing and controls API with menus, scroll bars, toolbars, status bars and direct access to the window's pixels), and BSD sockets: local stream and datagram sockets between programs, by name (back-pressure, non-blocking calls, timeouts, peers told when a program ends), and `poll` over sockets, files and the program's window events. Pages are no-execute unless they hold code; SMEP, SMAP and UMIP are on where the CPU has them. A program that crashes gets a "has encountered a problem and needs to close" dialog and takes nothing else down. Task Manager (Ctrl+Alt+Del) ends programs that hang; a program can end only programs it started, anything else needs your OK in a dialog of the system. Calculator, Sonar, Notepad, Paint and Explorer are user programs. |
 | Interrupts | Local APIC (xAPIC or x2APIC) and I/O APICs from the ACPI MADT, or the 8259 PICs. MSI-X and MSI for xHCI and AHCI. PCI INTx for UHCI, OHCI and EHCI: without an AML interpreter the routing is learned from which device raised an interrupt. The CPU halts when there is nothing to do: a one-shot local APIC (or PIT) timer wakes it for the next deadline. A device whose interrupt does not work is polled. |
 | USB | Host controllers: UHCI and OHCI (USB 1.1), EHCI (USB 2.0, with companion hand-off), and xHCI (USB 3.x, SuperSpeed). Class drivers: hubs (USB 2 and SuperSpeed), HID (report descriptor parsing, report protocol as on Windows, boot protocol as the fallback): keyboards including n-key rollover and wireless receivers with several devices on one interface, multimedia keys (volume, media, browser, mail, calculator, power and sleep), mice and tablets; and mass storage (Bulk-Only Transport plus SCSI). Hot-plug. |
+| Network | Drivers for virtio-net (virtio 1.0 and legacy), Intel e1000 (8254x), e1000e (82574L; 82571/2/3/83 and the on-board I217/I218/I219 to spec), igb (82576; I350/I210/I211 to spec), Realtek RTL8139 and, to spec, RTL8169/8111/8168. MAC address, link state and speed, receive and transmit rings, MSI-X/MSI/INTx or polled, statistics; adapters, link and counters in System Information. |
 | Storage | AHCI SATA (LBA48, multiple controllers). NVMe SSDs (MSI-X, MSI, INTx or polled; every active namespace with 512- or 4096-byte blocks becomes a disk, `nvme0`, `nvme1`, ...; flushed when the drive has a volatile cache, shutdown notification on Turn Off/Restart). CD/DVD drives on SATA (ATAPI): read-only drive letters, discs detected when inserted, ejected or swapped, Eject in the drive's right-click menu. Block layer with MBR (including extended partitions), GPT and superfloppy detection. |
 | File systems | FAT12, FAT16 and FAT32, read and write: long file names, create, delete, rename and move, mkdir and rmdir, truncate, FSInfo. exFAT, read and write (USB sticks and SD cards over 32 GB): fragmented and contiguous files, ValidDataLength, the volume's up-case table for case-insensitive names, VolumeDirty handling. DOS drive letters; the boot drive is `C:`. Quick format (FAT12/16/32 and exFAT) from Explorer (right-click a drive) or the `FORMAT` command, with Windows' default cluster sizes. |
 | CD/DVD | ISO 9660 with Joliet (long Unicode names) and Rock Ridge names, multi-sector directories and multi-extent files, hardened against corrupt discs. Hybrid ISO images written to USB sticks or disks mount too. |
@@ -51,6 +52,13 @@ tools/run.sh xhci bios
 
 ```bash
 EXTRA="-drive if=none,id=d0,format=raw,file=build/fat16.img -device ide-hd,drive=d0,bus=ide.0 -device usb-tablet,bus=usb.0" tools/run.sh xhci uefi
+```
+
+A network adapter on QEMU's user-mode network (the device can also be `e1000`,
+`e1000e`, `igb` or `rtl8139`):
+
+```bash
+EXTRA="-netdev user,id=n0 -device virtio-net-pci,netdev=n0" tools/run.sh xhci bios
 ```
 
 `make testdisks` builds sample FAT12, FAT16 and GPT/FAT32 images for testing.
@@ -110,6 +118,9 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   companions, and xHCI, under BIOS and UEFI, plus the interrupt fallbacks (legacy
   PIC, no MSI, no interrupts) set through a QEMU-only `fw_cfg` hook, NVMe disks
   (512- and 4096-byte blocks, INTx, polled), a CD drive with a disc swap, and
+  network adapters (virtio-net in its three PCI forms, e1000, e1000e, igb and
+  rtl8139: an ARP exchange with QEMU's gateway and a few thousand more frames
+  through every ring, with MSI-X, INTx and polled), and
   user mode: `SELFTEST.EXE` runs after boot and checks the system calls, bad
   pointers, crashing and looping child programs, preemption and windows;
   `SOCKTEST.EXE` checks sockets and poll between copies of itself (large
@@ -265,3 +276,7 @@ tests/host   host-side storage, keyboard layout, USB HID and display tests, fuzz
     are covered by host tests only)
   - xHCI SuperSpeed hubs and Transaction Translators
   - LBA28-only disks
+  - network adapters other than QEMU's virtio-net, e1000, e1000e (82574L), igb
+    (82576) and rtl8139: the Realtek RTL8169/8111/8168 (QEMU has none), the Intel
+    I217/I218/I219 with their Management Engine and ULP handling, 82571/2/3/83,
+    I350/I210/I211 (see docs/HARDWARE.md)
