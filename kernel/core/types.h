@@ -47,6 +47,7 @@ typedef uintptr_t uptr;
 #define E_BUSY    -16
 #define E_NAMETOOLONG -17
 #define E_CANCELED -18
+#define E_PERM    -19     /* not allowed */
 
 const char *strerror(int err);
 

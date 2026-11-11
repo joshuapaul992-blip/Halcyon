@@ -50,6 +50,7 @@ const char *hal_strerror(int e) {
     case E_ROFS: return "Read-only file system";
     case E_BUSY: return "Busy";
     case E_CANCELED: return "Canceled";
+    case E_PERM: return "Access denied";
     }
     return "Error";
 }

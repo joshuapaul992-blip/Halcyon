@@ -24,7 +24,14 @@ enum {
     SYS_CTL_CREATE = 80, SYS_CTL_SET_TEXT, SYS_CTL_GET_TEXT, SYS_CTL_SET_VALUE, SYS_CTL_GET_VALUE,
     SYS_CTL_SET_STYLE, SYS_CTL_LIST_SET,
     SYS_MSGBOX = 90, SYS_FILE_DIALOG, SYS_CLIPBOARD_SET, SYS_CLIPBOARD_GET,
-    SYS_COUNT = 100
+    /* M9 number ranges (each owned by one part of the kernel):
+     *   13-19   threads and futexes (core/proc.c, core/syscall.c)
+     *   33-39   shell and shared memory (core/syscall.c)
+     *   48      SYS_WIN_CANVAS: the window's pixels mapped into the program
+     *   49-59, 70-79, 87-89, 94-99, 140-159   more window / drawing / control /
+     *           menu calls (gui/usergui.c)
+     *   100-139 sockets and poll (net/) */
+    SYS_COUNT = 160
 };
 
 /* SYS_OPEN flags */

@@ -135,6 +135,7 @@ const char *strerror(int e) {
     case E_BUSY: return "Device busy";
     case E_NAMETOOLONG: return "Name too long";
     case E_CANCELED: return "Canceled";
+    case E_PERM: return "Access denied";
     }
     return "Unknown error";
 }

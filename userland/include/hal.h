@@ -21,6 +21,7 @@
 #define E_ROFS    -14
 #define E_BUSY    -16
 #define E_CANCELED -18
+#define E_PERM    -19
 const char *hal_strerror(int err);
 
 /* ---- raw system calls ---- */
