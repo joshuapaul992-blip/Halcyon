@@ -84,6 +84,7 @@ struct widget {
 #define WF_TOPMOST     0x0020
 #define WF_NO_CLOSE    0x0040
 #define WF_CENTER      0x0080   /* center on screen when created */
+#define WF_NOSHADOW    0x0100
 
 enum { WS_NORMAL = 0, WS_MINIMIZED, WS_MAXIMIZED };
 

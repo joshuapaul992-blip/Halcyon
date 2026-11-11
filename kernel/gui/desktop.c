@@ -553,7 +553,8 @@ static char balloon_title[64], balloon_text[160];
 
 static void balloon_paint(window_t *w, gc_t *g) {
     rect_t r = mkrect(0, 0, w->client->w, w->client->h - 10);
-    gfx_fill(g, mkrect(0, 0, w->client->w, w->client->h), HEX(0xFFFFFF));
+    /* "transparent" background: show the wallpaper behind the balloon */
+    if (wallpaper) gfx_blit(g, 0, 0, wallpaper, w->frame);
     /* the popup has no frame; draw a rounded tooltip */
     gfx_rounded(g, r, 8, 15, HEX(0xFFFFE6), HEX(0xFFF7C8));
     gfx_rounded_outline(g, r, 8, 15, HEX(0x6E6E5A));
@@ -575,10 +576,7 @@ static void show_balloon(const char *title, const char *text) {
     strlcpy(balloon_title, title, sizeof balloon_title);
     strlcpy(balloon_text, text, sizeof balloon_text);
     int w = 300, h = 34 + gfx_text_wrap_height(&font_ui, w - 24, text) + 16;
-    balloon = wm_create("", -1, screen_w() - w - 10, screen_h() - TASKBAR_H - h - 2, w, h, WF_TOPMOST);
-    balloon->flags = WF_TOPMOST | WF_POPUP;   /* frameless */
-    balloon->flags &= ~WF_POPUP;
-    balloon->flags |= WF_POPUP;
+    balloon = wm_create("", -1, screen_w() - w - 10, screen_h() - TASKBAR_H - h - 2, w, h, WF_TOPMOST | WF_POPUP | WF_NOSHADOW);
     balloon->on_paint = balloon_paint;
     balloon->on_event = balloon_event;
     balloon->on_destroy = balloon_destroy;

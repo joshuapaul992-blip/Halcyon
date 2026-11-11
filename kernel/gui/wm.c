@@ -838,7 +838,7 @@ static void compose(rect_t r) {
         rect_t vr = vis_rect(w);
         if (rect_empty(rect_intersect(vr, r))) continue;
         if (framed(w)) draw_frame(&g, w, w == active);
-        else gfx_shadow(&g, w->frame, 4, 80);
+        else if (!(w->flags & WF_NOSHADOW)) gfx_shadow(&g, w->frame, 4, 80);
         if (w->needs_paint) paint_client(w);
         rect_t c = wm_client_rect(w);
         if (w->client) gfx_blit(&g, c.x, c.y, w->client, mkrect(0, 0, w->client->w, w->client->h));
