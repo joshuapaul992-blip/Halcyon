@@ -1,5 +1,6 @@
 /* Halcyon OS - System Information / device manager */
 #include "gui/wm.h"
+#include "drivers/display.h"
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
@@ -107,9 +108,26 @@ static void build(si_t *s) {
         pci_dev_t *p = pci_get(i);
         if (p->class_code != 3) continue;
         pci_detail(p, d, 2048);
-        strlcat(d, "\nMode: linear framebuffer (VESA/GOP)\n", 2048);
+        char m[160];
+        snprintf(m, sizeof m, "\nDriver: %s (%s)\nMode: %ux%u, %u-bit, %d modes available\n",
+                 p->driver ? display_adapter() : "firmware frame buffer (VESA/GOP)",
+                 display_live() ? "resolution changes at once" : "resolution changes at the next start",
+                 g_bootinfo.fb_width, g_bootinfo.fb_height, g_bootinfo.fb_bpp, display_mode_count());
+        strlcat(d, m, 2048);
         add(s, 1, ICON_DISPLAY, CAT_DISPLAY, d, "%s %s (%ux%u)", pci_vendor_name(p->vendor), "display adapter", g_bootinfo.fb_width, g_bootinfo.fb_height);
     }
+    const edid_info_t *mon = display_monitor();
+    char mname[64];
+    edid_describe(mon, mname, sizeof mname);
+    if (mon->valid) {
+        char yr[16] = "";
+        if (mon->year) snprintf(yr, sizeof yr, ", %d", mon->year);
+        snprintf(d, 2048, "Monitor: %s\nManufacturer: %s, product %04X%s\nNative resolution: %dx%d at %d Hz\nSize: %d x %d mm",
+                 mname, mon->vendor, mon->product, yr, mon->native_w, mon->native_h, mon->native_hz, mon->width_mm, mon->height_mm);
+    }
+    else
+        snprintf(d, 2048, "The firmware did not report the monitor (no EDID).");
+    add(s, 1, ICON_DISPLAY, CAT_DISPLAY, d, "%s", mname);
 
     /* disks */
     add(s, 0, ICON_HDD, CAT_DISKS, NULL, "%s", cat_names[CAT_DISKS]);
