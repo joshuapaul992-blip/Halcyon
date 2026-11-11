@@ -134,6 +134,10 @@ testing sets its pace.
   compiler. Programmable shaders (and with them a compiler) are a later step.
   The alternative, porting Mesa's nouveau driver, needs a far larger C/C++
   runtime and kernel interface than Halcyon has; not recommended at first.
+  **Open decision:** M16 (Roblox) needs OpenGL ES 3 or Vulkan with
+  programmable shaders, which this design does not provide. If M16 stays in
+  the plan, M12 is better done as a Mesa port on top of M14, and the shader
+  generator above is skipped.
 - The card stays at its boot clocks (no power-management firmware for Pascal),
   so it is much slower than under NVIDIA's own driver, but still far faster than
   software.
@@ -166,4 +170,66 @@ NVIDIA. Proposed range, matching M10's Pascal (2016):
 - Depends on M5. Independent of M10 to M12, so it can move earlier if running
   well on laptops matters more than the NVIDIA card.
 
-**Recommended order:** 5 → 9 → 6 → 7 → 8 → 10 → 11 → 12 → 13.
+### M14 (proposed): Linux compatibility layer
+
+Both M15 and M16 need far more than Halcyon's program interface offers: a full
+C/C++ runtime, POSIX threads and futexes, `mmap` with protection changes
+(JIT compilers), signals (JITs use fault handlers), sockets and `poll`,
+shared libraries (`dlopen`), thread-local storage, and several CPU cores to
+be usable. The proposed way to get all of it at once:
+
+- Run unmodified Linux x86-64 programs: the Linux system call interface on top
+  of Halcyon's kernel (the approach of FreeBSD's Linux emulation and WSL 1), a
+  Linux user land (libraries from a distribution) under a Halcyon directory,
+  and `/proc` and `/sys` as far as programs need them.
+- A Wayland compositor that puts Linux programs' windows on the Halcyon
+  desktop (shared-memory buffers first, GPU buffers with M12).
+- Multi-core support (SMP), with a real kernel locking scheme in place of the
+  big lock: browsers and games are unusable on one core.
+- Depends on M6 (sockets) and M9. Comparable in size to everything built so
+  far.
+
+### M15: A web browser for modern sites
+
+Only three engines render today's web: Gecko (Firefox), Blink (Chromium) and
+WebKit. Ladybird, a new independent engine, is promising but not yet complete.
+
+- **Recommended: the official Linux Firefox build, unmodified, on M14.** No
+  port to maintain, and the security updates a browser needs every few weeks
+  come for free. Firefox's own software renderer (SWGL) draws without a GPU;
+  with M12 it can use the GPU. Its sandbox needs Linux features (seccomp,
+  namespaces) that M14 can add later or switch off at first.
+- Alternative, a native port: Firefox with a new Halcyon window back end
+  (beside its GTK, Windows and macOS ones), or WPE WebKit, the WebKit version
+  made for porting to new platforms. Either still needs most of M14's POSIX
+  layer, and every release has to be ported again.
+- Halcyon side: the browser as the default for web links, downloads into the
+  file system, and a handler for app links (needed by M16).
+- Depends on M14 (and M6, M5; M7 for sound).
+
+### M16: A Roblox launcher (Sober-style)
+
+Runs the official Roblox client, unmodified, the way Sober does on Linux: the
+Windows client cannot work (its anti-tamper protection rejects compatibility
+layers), so the launcher runs the x86-64 build of the Android app.
+
+- An Android runtime for one app: load the app's native libraries, provide the
+  Android C library (bionic) interfaces, and a stand-in for the Java side
+  (JNI): the native code calls into hundreds of Android and Roblox Java
+  classes, which must be reimplemented. This is most of the work, and it is
+  reverse engineering.
+- Graphics: OpenGL ES 3 or Vulkan with programmable shaders (see the open
+  decision under M12). Audio through M7, input (mouse lock, keyboard,
+  controllers), the window through M14's compositor.
+- Browser integration: roblox.com's "Play" buttons and app links open the
+  launcher through M15's link handler; parts of the app that show web pages
+  (Android WebView) can be served by M15's engine.
+- Getting the client: the launcher downloads the official app package; how to
+  obtain it in a legitimate way is part of the design.
+- Risks: Roblox ships a new client every week, so the runtime needs constant
+  upkeep (Sober is maintained by a dedicated team). Roblox does not support
+  unofficial runtimes and could block them, and running one may conflict with
+  its terms of use, with a risk to the account.
+- Depends on M14, M15, M7, and GPU 3D (M12 as a Mesa port).
+
+**Recommended order:** 5 → 9 → 6 → 7 → 8 → 10 → 11 → 12 → 13 → 14 → 15 → 16.
