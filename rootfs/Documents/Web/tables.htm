@@ -1,0 +1,19 @@
+<html><head><title>Tables</title></head><body>
+<h1>Tables</h1>
+<table border="1" cellpadding="4">
+<tr><th>Planet</th><th>Diameter (km)</th><th>Moons</th></tr>
+<tr><td>Mercury</td><td align="right">4,879</td><td align="center">0</td></tr>
+<tr><td>Earth</td><td align="right">12,742</td><td align="center">1</td></tr>
+<tr bgcolor="#FFF4C0"><td>Jupiter</td><td align="right">139,820</td><td align="center">95</td></tr>
+<tr><td colspan="2">Two columns joined</td><td>last</td></tr>
+</table>
+<p>A table without borders used for layout, 100% wide:</p>
+<table width="100%" cellspacing="0" cellpadding="6">
+<tr><td bgcolor="#3A6EA5" width="150"><font color="white"><b>Menu</b></font><br><a href="index.htm"><font color="white">Index</font></a></td>
+<td bgcolor="#F0F4FA">The content column takes the rest of the width. Its text wraps inside the cell as the window gets narrower, while the menu column keeps its width of 150 pixels.</td></tr>
+</table>
+<p>A nested table:</p>
+<table border="2" cellpadding="3"><tr><td>Outer cell
+<table border="1"><tr><td>inner a</td><td>inner b</td></tr><tr><td>inner c</td><td>inner d</td></tr></table>
+</td><td valign="top">Another outer cell</td></tr></table>
+</body></html>

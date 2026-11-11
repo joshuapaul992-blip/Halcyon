@@ -101,6 +101,56 @@ $(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) userland/include/hal.h kernel
 IMG_DEPS += $(UPROGS)
 .SECONDARY: $(ULIB)
 
+# ---- libraries linked only into the programs that use them ----
+# BearSSL (userland/third_party/bearssl, unmodified): its own C sources with
+# our flags, against the compiler's freestanding headers and the few C library
+# headers in bearssl-port/ (no system headers). No OS random source or clock:
+# libweb seeds it from getrandom() and gives it the time.
+BEARSSL := userland/third_party/bearssl
+BEARPORT := userland/third_party/bearssl-port
+BEAR_SRC := $(shell find $(BEARSSL)/src -name '*.c' | sort)
+BEAR_OBJ := $(patsubst $(BEARSSL)/src/%.c,$(BUILD)/user/bearssl/%.o,$(BEAR_SRC))
+BEAR_CFLAGS := -std=gnu99 -O2 -g0 -ffreestanding -fPIE -fno-stack-protector -fno-asynchronous-unwind-tables \
+               -nostdinc -isystem $(shell $(CC) -print-file-name=include) -I$(BEARPORT) \
+               -I$(BEARSSL)/inc -I$(BEARSSL)/src -DBR_USE_URANDOM=0 -DBR_USE_WIN32_RAND=0 -DBR_RDRAND=0 \
+               -DBR_USE_UNIX_TIME=0 -DBR_USE_WIN32_TIME=0 -Wall -Wextra
+$(BUILD)/user/bearssl/%.o: $(BEARSSL)/src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(BEAR_CFLAGS) -c $< -o $@
+$(BUILD)/user/libbearssl.a: $(BEAR_OBJ)
+	rm -f $@
+	ar rcs $@ $^
+
+# libweb (userland/lib/web): URLs, HTTP/HTTPS, inflate; trust anchors from
+# Mozilla's CA bundle, converted by tools/mktrust.py
+WEBLIB_SRC := $(wildcard userland/lib/web/*.c)
+WEBLIB_OBJ := $(patsubst userland/lib/web/%.c,$(BUILD)/user/web/%.o,$(WEBLIB_SRC)) $(BUILD)/user/web/trust.o
+$(BUILD)/user/web/trust.c: tools/mktrust.py userland/third_party/cacert/cacert.pem
+	@mkdir -p $(dir $@)
+	$(PY) tools/mktrust.py userland/third_party/cacert/cacert.pem $@
+$(BUILD)/user/web/trust.o: $(BUILD)/user/web/trust.c
+	$(CC) $(BEAR_CFLAGS) -c $< -o $@
+$(BUILD)/user/web/%.o: userland/lib/web/%.c $(wildcard userland/lib/web/*.h) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) -I$(BEARPORT) -I$(BEARSSL)/inc -c $< -o $@
+$(BUILD)/user/libweb.a: $(WEBLIB_OBJ)
+	rm -f $@
+	ar rcs $@ $^
+WEBLIBS := $(BUILD)/user/libweb.a $(BUILD)/user/libbearssl.a
+
+# programs that use libweb (explicit rules: they replace the pattern rule above)
+BROWSER_SRC := $(wildcard userland/programs/browser/*.c)
+$(BUILD)/user/browser.exe: userland/programs/browser.c $(BROWSER_SRC) $(wildcard userland/programs/browser/*.h) \
+                           userland/lib/web/web.h $(ULIB) $(WEBLIBS) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) -Iuserland/lib/web $(ULDFLAGS) -o $@ $(ULIB) $< $(BROWSER_SRC) $(WEBLIBS)
+	strip $@
+$(BUILD)/user/wget.exe $(BUILD)/user/webtest.exe: $(BUILD)/user/%.exe: userland/programs/%.c userland/lib/web/web.h $(ULIB) $(WEBLIBS) \
+                           userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h $(wildcard userland/programs/webtest_certs.h)
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) -Iuserland/lib/web -I$(BEARPORT) -I$(BEARSSL)/inc $(ULDFLAGS) -o $@ $(ULIB) $< $(WEBLIBS)
+	strip $@
+
 $(BUILD)/halcyon.img: $(IMG_DEPS)
 	BUILD=$(BUILD) sh tools/mkimage.sh
 

@@ -18,6 +18,13 @@ make testdisks >/dev/null
 echo "== host file system tests"
 tests/host/run.sh 2>&1 | tail -1
 
+echo "== host web tests"
+if ! web=$(sh tests/web/run.sh 2>&1); then
+    echo "$web" | grep -v "^RESULT" | tail -30
+    exit 1
+fi
+echo "$web" | grep -E "^(url|trust anchors|inflate|images|html|web):"
+
 echo "== QEMU boot matrix"
 if [ "$1" = quick ]; then
     python3 tools/boottest.py xhci:bios xhci:uefi

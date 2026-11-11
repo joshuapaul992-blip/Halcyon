@@ -1,0 +1,21 @@
+Mozilla's CA certificate list, as converted to PEM by the curl project
+=====================================================================
+
+File:      cacert.pem (unmodified)
+Source:    https://curl.se/ca/cacert.pem
+Data:      "Certificate data from Mozilla as of: Thu Nov  5 04:12:01 2026 GMT"
+           (see the "##" header at the top of cacert.pem)
+SHA-256:   427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285
+           (checked against the publisher's https://curl.se/ca/cacert.pem.sha256)
+Contents:  118 root certificates (all usable by BearSSL: RSA and P-256 / P-384 keys)
+License:   Mozilla Public License 2.0 (MPL-2.0.txt in this directory). The
+           certificate data come from Mozilla's certdata.txt (NSS).
+
+Use: tools/mktrust.py converts it at build time into BearSSL trust anchors
+(build/user/web/trust.c, linked into libweb), keeping the bundle's "##"
+header as a comment. tests/web/tatest.c checks the conversion against
+BearSSL's own decoders.
+
+To update: download cacert.pem and cacert.pem.sha256 into an empty
+directory, check the hash, replace the file here, update this file, run
+tests/web/run.sh.
