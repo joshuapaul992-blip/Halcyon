@@ -334,7 +334,7 @@ static void vga_fill(int y, u8 attr) {
 struct opt { const char *label; u32 flag; };
 static const struct opt opts[] = {
     { "Start Halcyon normally", 0 },
-    { "Safe Mode (no USB or SATA drivers, verbose)", 0 },
+    { "Safe Mode (no USB, SATA or interrupts; verbose)", 0 },
     { "Start with the options below", 0 },
     { "Verbose boot: show kernel messages on screen", BOOTF_VERBOSE },
     { "Disable USB 3.x controllers (xHCI)", BOOTF_NO_XHCI },
@@ -342,6 +342,9 @@ static const struct opt opts[] = {
     { "Disable USB 1.1 controllers (UHCI/OHCI)", BOOTF_NO_USB11 },
     { "Disable SATA controllers (AHCI)", BOOTF_NO_AHCI },
     { "Disable ACPI", BOOTF_NO_ACPI },
+    { "Disable interrupts (poll all devices, no CPU idle)", BOOTF_NO_IRQ },
+    { "Disable MSI (PCI devices use INTx)", BOOTF_NO_MSI },
+    { "Use the legacy PIC instead of the I/O APIC", BOOTF_NO_IOAPIC },
     { "Safe video mode (800 x 600)", BOOTF_SAFE_VIDEO },
 };
 #define NOPTS ((int)(sizeof opts / sizeof opts[0]))
@@ -369,8 +372,8 @@ static u32 boot_menu(void) {
             for (int x = 6; x < 74; x++) LAUNDER((volatile u16 *)0xB8000)[y * 80 + x] = (u16)((a << 8) | ' ');
             vga_put(8, y, line, a);
         }
-        vga_put(4, 20, "The kernel log is saved to \\HALCYON\\BOOT.LOG on the boot drive", 0x08);
-        vga_put(4, 21, "once Halcyon reaches the desktop.", 0x08);
+        vga_put(4, 22, "The kernel log is saved to \\HALCYON\\BOOT.LOG on the boot drive", 0x08);
+        vga_put(4, 23, "once Halcyon reaches the desktop.", 0x08);
         u16 k = key_read();
         u8 sc = k >> 8, ch = (u8)k;
         if (sc == 0x48) sel = (sel + NOPTS - 1) % NOPTS;

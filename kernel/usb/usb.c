@@ -100,11 +100,12 @@ void usb_init(void) {
 }
 
 /* Root hub service. A HC whose interrupts work is serviced when it
- * interrupts (plus a slow safety scan); others every 20 ms. */
+ * interrupts (plus a slow safety scan); others every 100 ms (transfers in
+ * progress on such a HC are polled faster, see usb_intr_poll). */
 void usb_poll(void) {
     u64 now = time_ms();
     for (usb_hc_t *hc = hcs; hc; hc = hc->next) {
-        u64 period = !irq_live(&hc->irq) ? 20 : hc->no_port_irq ? 250 : 1000;
+        u64 period = !irq_live(&hc->irq) ? 100 : hc->no_port_irq ? 250 : 1000;
         if (irq_fired(&hc->irq) || now - hc->last_poll >= period || !hc->last_poll) {
             hc->last_poll = now;
             hc->ops->poll(hc);

@@ -4,6 +4,7 @@
 # Environment:
 #   HEADLESS=1   no window; serial log to $BUILD/serial.log, monitor at $BUILD/mon.sock
 #   EXTRA="..."  extra QEMU arguments
+#   CPUARG="..." CPU model, e.g. "-cpu max"
 BUILD=${BUILD:-build}
 HC=${1:-xhci}
 FW=${2:-bios}
@@ -30,7 +31,7 @@ else
   DISP="-serial stdio"
 fi
 
-exec qemu-system-x86_64 -machine q35 -m 512 -no-reboot $FWARGS $DISP $CTRL \
+exec qemu-system-x86_64 -machine q35 $CPUARG -m 512 -no-reboot $FWARGS $DISP $CTRL \
   -drive if=none,id=stick,format=raw,file=$IMG \
   -device usb-storage,bus=$BUS,drive=stick,bootindex=0 \
   $EXTRA

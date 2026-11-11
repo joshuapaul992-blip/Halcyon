@@ -1,5 +1,6 @@
 /* Halcyon OS - boot splash screen with progress bar, or (F8 -> verbose boot)
  * a scrolling on-screen console showing the kernel log */
+#include "core/irq.h"
 #include "gfx.h"
 #include "core/lib.h"
 #include "core/kernel.h"
@@ -121,11 +122,15 @@ void splash_finish(void) {
     kprintf("\nBoot complete. Press any key or click to start the desktop (continuing in 15 seconds)...\n");
     u64 end = time_ms() + 15000;
     while (time_ms() < end) {
+        u32 gen = irq_generation();
+        irq_service();
         input_poll_devices();
+        u64 wake = idle_take_deadline();
         input_event_t e;
         int go = 0;
         while (input_get(&e)) if ((e.type == EV_KEY && e.pressed) || (e.type == EV_MOUSE && e.buttons)) go = 1;
         if (go) break;
+        idle_wait(gen, MIN(wake, end));
     }
     klog_hook = NULL;
 }

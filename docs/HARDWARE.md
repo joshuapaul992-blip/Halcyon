@@ -20,6 +20,11 @@ useful contribution right now, and both a success and a failure are worth report
      Can you open it in My Computer?
    - Are your internal SATA disks listed? Only FAT-formatted volumes get a drive
      letter.
+   - Open the Command Prompt and type `IRQ`. Every USB and SATA controller should
+     be listed with a count above zero; one marked "polled" means its interrupt was
+     not found. `IRQ > C:\IRQ.TXT` saves the table to the stick.
+   - Leave the desktop idle for a minute. The fan should stay quiet and the CPU
+     cool: Halcyon halts the CPU when there is nothing to do.
    - Turn Off and Restart from the Start menu.
 4. Use Turn Off or Restart, so the log is written, then collect
    **`\HALCYON\BOOT.LOG`** and **`\HALCYON\BOOTPREV.LOG`** from the stick on another
@@ -35,10 +40,13 @@ offers:
 | Option | Use it when |
 |--------|-------------|
 | Verbose boot | Boot hangs: the kernel log scrolls on screen, so the last line shows where it stopped. Take a photo of the screen. |
-| Safe Mode | Verbose boot with no USB, SATA or ACPI drivers. If this reaches the desktop, re-enable drivers one at a time. |
+| Safe Mode | Verbose boot with no USB, SATA or ACPI drivers and no interrupts. If this reaches the desktop, re-enable drivers one at a time. |
 | Disable USB 3.x / 2.0 / 1.1 | Find which USB controller driver misbehaves. With the stick's controller disabled, `C:` won't appear. That is expected. |
 | Disable SATA | Hangs or errors while detecting disks. |
-| Disable ACPI | Hangs right at the start. |
+| Disable ACPI | Hangs right at the start. Also switches to the legacy PIC (the I/O APIC is described by ACPI). |
+| Disable interrupts | Hangs or freezes after the "irq:" lines, or input stops working. Everything is polled, as in Halcyon 1.0, and the CPU never idles. |
+| Disable MSI | A USB 3 or SATA controller misbehaves: it then uses its INTx line instead. |
+| Use the legacy PIC | Interrupts misbehave with the I/O APIC. Uses the firmware's PCI interrupt lines. |
 | Safe video mode | Black or garbled screen: forces 800×600. |
 
 If Halcyon crashes, the crash screen tries to save `BOOT.LOG` to the stick before it
@@ -54,6 +62,14 @@ works.
   regardless.
 - **Keyboards behind a USB 2.0 hub** (monitor or dock hubs) on xHCI depend on
   Transaction Translator support. That is also untested.
+- **Interrupt routing.** Without an ACPI AML interpreter, Halcyon learns which I/O
+  APIC input each USB controller uses from the first interrupt it raises. If a
+  controller shares its line with a device Halcyon has no driver for, it may stay
+  polled: it still works, but the CPU wakes up more often. The `IRQ` command and
+  `BOOT.LOG` show this.
+- **Old AMD CPUs (before about 2011)** may stop the local APIC timer when idle, so
+  Halcyon uses the PIT timer on AMD CPUs that don't report an always-running APIC
+  timer.
 - **Laptop touchpads** are usually I2C devices and are not supported. Use a USB
   mouse.
 - **NVMe-only laptops** show no internal disks yet.
@@ -63,5 +79,5 @@ works.
 
 | Machine | Year | Firmware | USB controllers | Result | Notes |
 |---------|------|----------|-----------------|--------|-------|
-| QEMU q35 | – | SeaBIOS / OVMF | UHCI, OHCI, EHCI, EHCI+UHCI, xHCI | Works | All 9 boot configurations pass in CI |
+| QEMU q35 | – | SeaBIOS / OVMF | UHCI, OHCI, EHCI, EHCI+UHCI, xHCI | Works | All 13 boot configurations pass in CI, including the legacy PIC, no-MSI and no-interrupt modes |
 | *your PC here* | | | | | |

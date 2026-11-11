@@ -449,7 +449,14 @@ int irq_attach(irq_handle_t *h) {
     h->kind = IRQ_INTX;
     if (mode == IRQ_MODE_PIC) {
         int irq = h->pci->irq_line;
-        if (irq <= 0 || irq >= 16 || irq == 2) { h->kind = IRQ_NONE; return IRQ_NONE; }
+        /* not a usable PIC line, or one taken by the PIT / PS/2 (edge) */
+        int taken = irq > 0 && irq < 16 && (vecs[VEC_PIC_BASE + irq].kind == V_HANDLE ||
+                                            vecs[VEC_PIC_BASE + irq].kind == V_TIMER || irq == 1 || irq == 12);
+        if (irq <= 0 || irq >= 16 || irq == 2 || taken) {
+            kprintf("irq: %s: no usable INTx line (Interrupt Line %d), polled\n", h->name, irq);
+            h->kind = IRQ_NONE;
+            return IRQ_NONE;
+        }
         u64 f = irq_save();
         line_t *l = line_get(irq);
         if (l) bind(h, l);
@@ -764,6 +771,7 @@ void irq_init(void) {
         if (!ok) { kprintf("irq: PIT interrupt does not arrive\n"); pit_timer_off(); }
     }
     idle_ok = ok;
+    load_tsc = rdtsc(); load_idle = idle_tsc;     /* first CPU usage figure: since here */
     kprintf("irq: mode %s, timer %s%s, MSI %s\n", irq_mode_name(), irq_timer_name(),
             ok ? "" : " (no working timer interrupt: CPU idle off)", msi_ok ? "on" : "off");
 }

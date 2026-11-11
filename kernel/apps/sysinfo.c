@@ -9,6 +9,7 @@
 #include "drivers/input.h"
 #include "usb/usb.h"
 #include "fileops.h"
+#include "core/irq.h"
 
 void app_notepad_text(const char *title, const char *text);
 
@@ -20,6 +21,7 @@ typedef struct row {
     int depth, icon, cat;
     char text[128];
     char *detail;
+    int live;           /* refreshed every second (CPU usage) */
 } row_t;
 
 typedef struct si {
@@ -28,6 +30,7 @@ typedef struct si {
     u8 collapsed[16];
     u32 ugen, vgen;
     int sb_drag;
+    u64 live_t;
     window_t *win;
 } si_t;
 
@@ -45,6 +48,19 @@ static void add(si_t *s, int depth, int icon, int cat, const char *detail, const
     vsnprintf(r->text, sizeof r->text, fmt, ap);
     va_end(ap);
     r->detail = strdup(detail ? detail : r->text);
+    r->live = 0;
+}
+
+/* "Interrupts and CPU usage" row: text and detail */
+static void live_fill(row_t *r) {
+    int load = cpu_load_percent();
+    snprintf(r->text, sizeof r->text, "CPU usage: %d%% (%s)", load, idle_enabled() ? "idle halts the CPU" : "always busy: no idle");
+    char *d = kmalloc(4096);
+    if (!d) return;
+    int o = snprintf(d, 4096, "Interrupts and CPU usage\n\nCPU usage: %d%%\n", load);
+    irq_list(d + o, 4096 - o);
+    kfree(r->detail);
+    r->detail = d;
 }
 
 static void pci_detail(pci_dev_t *d, char *b, int n) {
@@ -77,6 +93,11 @@ static void build(si_t *s) {
     add(s, 1, ICON_SYSINFO, CAT_COMPUTER, d, "Processor: %s", cpu_brand());
     add(s, 1, ICON_MEMORY, CAT_COMPUTER, d, "Memory: %lu MB", ms.total_ram >> 20);
     add(s, 1, ICON_LOGO, CAT_COMPUTER, d, "Firmware: %s", g_bootinfo.boot_type == BOOT_TYPE_UEFI ? "UEFI" : "PC BIOS");
+    add(s, 1, ICON_SYSINFO, CAT_COMPUTER, NULL, "Interrupts: %s", irq_mode_name());
+    if (s->n && s->rows[s->n - 1].cat == CAT_COMPUTER && s->rows[s->n - 1].depth == 1) {
+        s->rows[s->n - 1].live = 1;
+        live_fill(&s->rows[s->n - 1]);
+    }
 
     /* display */
     add(s, 0, ICON_DISPLAY, CAT_DISPLAY, NULL, "%s", cat_names[CAT_DISPLAY]);
@@ -128,7 +149,8 @@ static void build(si_t *s) {
     add(s, 0, ICON_USB, CAT_USB, NULL, "%s", cat_names[CAT_USB]);
     for (usb_hc_t *hc = usb_first_hc(); hc; hc = hc->next) {
         if (hc->pci) pci_detail(hc->pci, d, 2048); else strlcpy(d, hc->desc, 2048);
-        char extra[64]; snprintf(extra, sizeof extra, "\nRoot hub ports: %u\n", hc->nports);
+        char irqd[64]; irq_describe(&hc->irq, irqd, sizeof irqd);
+        char extra[128]; snprintf(extra, sizeof extra, "\nRoot hub ports: %u\nInterrupt: %s (%u so far)\n", hc->nports, irqd, hc->irq.events);
         strlcat(d, extra, 2048);
         add(s, 1, ICON_HUB, CAT_USB, d, "%s (%s)", hc->name, hc->desc);
         for (usb_device_t *u = usb_first_device(); u; u = u->next) {
@@ -275,6 +297,11 @@ static void si_event(window_t *w, gui_event_t *e) {
 static void si_tick(window_t *w) {
     si_t *s = w->data;
     if (usb_generation() != s->ugen || vfs_generation() != s->vgen) build(s);
+    if (time_ms() - s->live_t >= 1000) {
+        s->live_t = time_ms();
+        for (int i = 0; i < s->n; i++)
+            if (s->rows[i].live) { live_fill(&s->rows[i]); wm_invalidate(w); }
+    }
 }
 
 static void si_refresh(window_t *w, widget_t *b) { build(w->data); }

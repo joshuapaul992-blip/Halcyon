@@ -1,6 +1,7 @@
 /* Halcyon OS - Command Prompt: terminal window + DOS-style shell */
 #include "gui/wm.h"
 #include "core/lib.h"
+#include "core/irq.h"
 #include "core/mm.h"
 #include "core/kernel.h"
 #include "fs/vfs.h"
@@ -354,6 +355,7 @@ static void cmd_help(term_t *t) {
         "  START file            open with its program   NOTEPAD [f] EXPLORER [d] PAINT CALC\n"
         "  SYNC                  flush disks             REBOOT / SHUTDOWN / EXIT\n"
         "  BOOTLOG               save \\HALCYON\\BOOT.LOG   CRASHTEST   test the crash screen\n"
+        "  IRQ                   interrupts, timer and CPU usage\n"
         "\nAny command's output can be redirected with > file or >> file.\n");
 }
 
@@ -479,6 +481,15 @@ static void execute(term_t *t, int argc, char **argv, const char *rest) {
         int bootlog_save(const char *reason);
         int r = bootlog_save("user request");
         tprintf(t, r == 0 ? "Kernel log saved to \\HALCYON\\BOOT.LOG on the boot drive.\n" : "Could not save the log: %s\n", strerror(r));
+    }
+    else if (!strcasecmp(c, "irq")) {
+        char *buf = kmalloc(4096);
+        if (buf) {
+            irq_list(buf, 4096);
+            tputs(t, buf);
+            tprintf(t, "CPU usage: %d%%\n", cpu_load_percent());
+            kfree(buf);
+        }
     }
     else if (!strcasecmp(c, "sync")) { vfs_sync_all(); tputs(t, "All volumes flushed.\n"); }
     else if (!strcasecmp(c, "notepad") || !strcasecmp(c, "edit")) {
