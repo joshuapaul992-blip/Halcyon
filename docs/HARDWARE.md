@@ -43,6 +43,7 @@ offers:
 | Safe Mode | Verbose boot with no USB, SATA or ACPI drivers and no interrupts. If this reaches the desktop, re-enable drivers one at a time. |
 | Disable USB 3.x / 2.0 / 1.1 | Find which USB controller driver misbehaves. With the stick's controller disabled, `C:` won't appear. That is expected. |
 | Disable SATA | Hangs or errors while detecting disks. |
+| Disable NVMe | Hangs or errors while detecting NVMe SSDs. |
 | Disable ACPI | Hangs right at the start. Also switches to the legacy PIC (the I/O APIC is described by ACPI). |
 | Disable interrupts | Hangs or freezes after the "irq:" lines, or input stops working. Everything is polled, as in Halcyon 1.0, and the CPU never idles. |
 | Disable MSI | A USB 3 or SATA controller misbehaves: it then uses its INTx line instead. |
@@ -72,7 +73,9 @@ works.
   Halcyon leaves CPU idle off and polls as before.
 - **Laptop touchpads** are usually I2C devices and are not supported. Use a USB
   mouse.
-- **NVMe-only laptops** show no internal disks yet.
+- **NVMe SSDs** are tested in QEMU only (512- and 4096-byte blocks; MSI-X, INTx
+  and polled). If an NVMe disk is missing, check the `nvme:` lines in BOOT.LOG and
+  try F8 "Disable MSI"; "Disable NVMe controllers" turns the driver off.
 - **exFAT USB sticks** (most sticks larger than 32 GB) don't get a drive letter yet.
 
 ## Compatibility list
