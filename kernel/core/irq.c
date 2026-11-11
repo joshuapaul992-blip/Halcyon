@@ -147,7 +147,7 @@ static int pic_in_service(int irq) {
 }
 
 /* ---------------- I/O APIC ---------------- */
-typedef struct ioapic { volatile u32 *base; u32 gsi_base; int n; u8 id; } ioapic_t;
+typedef struct ioapic { volatile u32 *base; u32 gsi_base; int n; u8 id, ver; } ioapic_t;
 static ioapic_t ioapics[MADT_MAX_IOAPIC];
 static int nioapic;
 static const acpi_madt_t *madt;
@@ -200,6 +200,7 @@ static int ioapic_init(void) {
         u32 ver = ioa_rd(io, 1);
         if (ver == 0xFFFFFFFF) { kprintf("irq: I/O APIC %u at %#x not responding\n", m->id, m->addr); continue; }
         io->n = (int)((ver >> 16) & 0xFF) + 1;
+        io->ver = (u8)ver;
         for (int p = 0; p < io->n; p++) { ioa_wr(io, 0x10 + 2 * p, RTE_MASKED); ioa_wr(io, 0x11 + 2 * p, 0); }
         kprintf("irq: I/O APIC %u: version %#x, GSI %u-%u\n", io->id, ver & 0xFF, io->gsi_base, io->gsi_base + io->n - 1);
         nioapic++;
@@ -226,11 +227,11 @@ static int gsi_is_isa(u32 gsi) {
 }
 
 /* ---------------- PCI INTx lines ---------------- */
-#define MAX_LINES 48
+#define MAX_LINES 160
 struct line {
     int num;                /* GSI or PIC IRQ */
     int vector;
-    u8 used, pending, foreign, dead, level, logged;
+    u8 used, pending, foreign, dead, logged;
     irq_handle_t *clients;
     u32 fires, unhandled, stuck;
 };
@@ -244,9 +245,33 @@ static int alloc_vector(int kind, void *ptr) {
     return -1;
 }
 
+/* Some I/O APICs (82093AA erratum, see Linux io_apic.c) can keep Remote IRR
+ * set when a level input is masked between delivery and EOI; the input then
+ * never delivers again. Clear it with the EOI register (version >= 0x20) or
+ * by switching the entry to edge and back. */
+static void gsi_fix_irr(line_t *l) {
+    int pin;
+    ioapic_t *io = gsi_ioapic((u32)l->num, &pin);
+    if (!io) return;
+    u64 f = irq_save();
+    u32 lo = ioa_rd(io, 0x10 + 2 * pin);
+    if ((lo & (1u << 14)) && !(lo & RTE_MASKED) && !l->pending) {
+        if (io->ver >= 0x20) io->base[0x40 / 4] = (u32)l->vector;
+        else {
+            ioa_wr(io, 0x10 + 2 * pin, (lo | RTE_MASKED) & ~RTE_LEVEL);
+            ioa_wr(io, 0x10 + 2 * pin, lo | RTE_MASKED);
+            ioa_wr(io, 0x10 + 2 * pin, lo);
+        }
+    }
+    irq_restore(f);
+}
+
 static void line_mask(line_t *l, int masked) {
     if (mode == IRQ_MODE_PIC) pic_set(l->num, masked);
-    else gsi_mask((u32)l->num, masked);
+    else {
+        gsi_mask((u32)l->num, masked);
+        if (!masked) gsi_fix_irr(l);
+    }
 }
 
 static line_t *line_get(int num) {
@@ -257,11 +282,13 @@ static line_t *line_get(int num) {
     l->num = num;
     if (mode == IRQ_MODE_PIC) {
         l->vector = VEC_PIC_BASE + num;
-        l->level = (inb((u16)(0x4D0 + (num >> 3))) >> (num & 7)) & 1;   /* ELCR */
+        /* PCI INTx is level triggered: make sure the ELCR agrees, an edge
+         * input shared by two devices can stay high with no new edge */
+        u16 elcr = (u16)(0x4D0 + (num >> 3));
+        if (!((inb(elcr) >> (num & 7)) & 1)) outb(elcr, inb(elcr) | (u8)(1u << (num & 7)));
     } else {
         l->vector = alloc_vector(V_LINE, l);
         if (l->vector < 0) return NULL;
-        l->level = 1;
         if (gsi_program((u32)num, l->vector, 1, 1, 1) < 0) { vecs[l->vector].kind = V_FREE; return NULL; }
     }
     vecs[l->vector].kind = V_LINE;
@@ -273,21 +300,30 @@ static line_t *line_get(int num) {
 
 static int is_learner(pci_dev_t *d) {
     for (irq_handle_t *h = handles; h; h = h->next_all)
-        if (h->pci == d && h->kind == IRQ_INTX) return 1;
+        if (h->pci == d && h->kind == IRQ_INTX && !h->broken) return 1;
     return 0;
 }
 
-/* Unmask every I/O APIC input that nobody claims, to learn PCI INTx routes.
- * Devices without an INTx user are told not to assert INTx first (firmware
- * may have left one interrupting); a line that fired with nobody to claim it
- * is masked, and armed again when another device starts learning. */
-static void learning_start(void) {
-    if (mode != IRQ_MODE_APIC) return;
+static void pci_intx(pci_dev_t *d, int on) {
+    u16 cmd = pci_read16(d, 0x04);
+    pci_write16(d, 0x04, on ? (cmd & ~(1u << 10)) : (cmd | (1u << 10)));
+}
+
+/* Devices without an INTx user are told not to assert INTx (firmware may
+ * have left one interrupting, and lines are shared). */
+static void quiet_others(void) {
     for (int i = 0; i < pci_count(); i++) {
         pci_dev_t *d = pci_get(i);
         if (d->header_type & 0x7F) continue;     /* bridges */
-        if (!is_learner(d)) pci_write16(d, 0x04, pci_read16(d, 0x04) | (1u << 10));
+        if (!is_learner(d)) pci_intx(d, 0);
     }
+}
+
+/* Unmask every I/O APIC input that nobody claims, to learn PCI INTx routes.
+ * Inputs that fired with nobody to claim them are armed again whenever
+ * another device starts learning. */
+static void learning_start(void) {
+    if (mode != IRQ_MODE_APIC) return;
     if (learning) {
         for (int i = 0; i < nlines; i++)
             if (lines[i].foreign && !lines[i].dead) { lines[i].foreign = 0; line_mask(&lines[i], 0); }
@@ -300,7 +336,7 @@ static void learning_start(void) {
             u32 gsi = ioapics[i].gsi_base + (u32)p;
             if (gsi < 16 || gsi_is_isa(gsi)) continue;
             line_t *l = line_get((int)gsi);
-            if (!l || l->foreign || l->dead) continue;
+            if (!l) break;
             line_mask(l, 0);
             n++;
         }
@@ -320,8 +356,35 @@ static int pci_int_status(irq_handle_t *h) {
     return h->pci && (pci_read16(h->pci, 0x06) & (1u << 3));
 }
 
+/* unmask a level line and see whether it fires again at once (~50 us) */
+static int refires(line_t *l) {
+    l->pending = 0;
+    line_mask(l, 0);
+    u64 end = rdtsc() + tsc_khz() / 20;
+    while (rdtsc() < end && !l->pending) cpu_relax();
+    return l->pending;
+}
+
+/* Does h drive line l? (l masked and pending, h asserting.) "Asserting"
+ * alone proves nothing about which line it uses, so check that the line
+ * goes quiet with h's INTx disabled and fires again when it is re-enabled.
+ * 1 = yes, 0 = no, -1 = can't tell (something else holds the line). */
+static int confirm(line_t *l, irq_handle_t *h) {
+    pci_intx(h->pci, 0);
+    int other = refires(l);
+    pci_intx(h->pci, 1);
+    if (other) return -1;
+    return refires(l);
+}
+
+static void give_up(irq_handle_t *h, const char *why) {
+    h->broken = 1;
+    if (h->pci) pci_intx(h->pci, 0);
+    kprintf("irq: %s: %s, polling it instead\n", h->name, why);
+}
+
 void irq_service(void) {
-    if (mode == IRQ_MODE_POLL) return;
+    if (mode == IRQ_MODE_POLL || !irq_enabled_now()) return;   /* e.g. the crash screen */
     for (int i = 0; i < nlines; i++) {
         line_t *l = &lines[i];
         if (!l->pending) continue;
@@ -329,19 +392,41 @@ void irq_service(void) {
         l->pending = 0;
         irq_restore(f);
         if (l->dead) continue;
-        /* devices still waiting for a route that are asserting right now */
-        for (irq_handle_t *h = handles; h; h = h->next_all)
-            if (h->kind == IRQ_INTX && h->line < 0 && pci_int_status(h)) bind(h, l);
+        const char *kind = mode == IRQ_MODE_PIC ? "IRQ" : "GSI";
+
+        /* learn: devices waiting for a route that assert right now */
+        int held = 0;
+        if (mode == IRQ_MODE_APIC) {
+            for (irq_handle_t *h = handles; h && !held; h = h->next_all) {
+                if (h->kind != IRQ_INTX || h->line >= 0 || h->broken || !pci_int_status(h)) continue;
+                l->pending = 1;
+                int c = confirm(l, h);
+                if (c == 1) bind(h, l);
+                if (c < 0) held = 1;
+            }
+            l->pending = 0;          /* the line is masked again if it re-fired */
+        }
+
         if (!l->clients) {
-            if (!l->logged) kprintf("irq: %s %d asserted by a device without a driver, masked\n",
-                                    mode == IRQ_MODE_PIC ? "IRQ" : "GSI", l->num);
-            l->logged = 1;
-            l->foreign = 1;
+            /* nobody claims it: keep it armed if it is quiet, mask it if
+             * something without a driver holds it */
+            if (held || refires(l)) {
+                if (!l->logged) kprintf("irq: %s %d asserted by a device without a driver, masked\n", kind, l->num);
+                l->logged = 1;
+                l->foreign = 1;
+                l->pending = 0;
+            }
             continue;
         }
+
         int handled = 0;
-        for (irq_handle_t *h = l->clients; h; h = h->next_on_line)
+        for (irq_handle_t *h = l->clients; h; h = h->next_on_line) {
+            if (h->broken) continue;
             if (h->ack && h->ack(h->ctx)) { h->events++; handled = 1; }
+            /* still asserting after its acknowledge: it cannot be quieted */
+            if (pci_int_status(h)) { if (++h->noack >= 8) give_up(h, "its interrupt cannot be acknowledged"); }
+            else h->noack = 0;
+        }
         line_mask(l, 0);
         if (handled) { l->stuck = 0; continue; }
         /* Nobody was asserting: normal when a driver already cleared its
@@ -350,14 +435,14 @@ void irq_service(void) {
         l->unhandled++;
         udelay(20);
         int asserted = 0;
-        for (irq_handle_t *h = l->clients; h; h = h->next_on_line) asserted |= pci_int_status(h);
+        for (irq_handle_t *h = l->clients; h; h = h->next_on_line) if (!h->broken) asserted |= pci_int_status(h);
         if (!l->pending || asserted) { l->stuck = 0; continue; }
         if (++l->stuck >= 3) {
             line_mask(l, 1);
+            l->pending = 0;
             l->dead = 1;
-            kprintf("irq: %s %d is held asserted by another device: disabled, its devices are polled\n",
-                    mode == IRQ_MODE_PIC ? "IRQ" : "GSI", l->num);
-            for (irq_handle_t *h = l->clients; h; h = h->next_on_line) h->broken = 1;
+            kprintf("irq: %s %d is held asserted by another device: disabled\n", kind, l->num);
+            for (irq_handle_t *h = l->clients; h; h = h->next_on_line) if (!h->broken) give_up(h, "its interrupt line is unusable");
         }
     }
 }
@@ -438,7 +523,7 @@ int irq_attach(irq_handle_t *h) {
     h->kind = IRQ_NONE; h->line = -1; h->vector = -1; h->broken = 0;
     if (mode == IRQ_MODE_POLL || !h->pci) return IRQ_NONE;
     handle_link(h);
-    if (msi_ok && msi_attach(h) == 0) {
+    if (msi_ok && !h->intx_only && msi_attach(h) == 0) {
         kprintf("irq: %s: %s, vector %#x\n", h->name, h->kind == IRQ_MSIX ? "MSI-X" : "MSI", h->vector);
         return h->kind;
     }
@@ -451,7 +536,8 @@ int irq_attach(irq_handle_t *h) {
         int irq = h->pci->irq_line;
         /* not a usable PIC line, or one taken by the PIT / PS/2 (edge) */
         int taken = irq > 0 && irq < 16 && (vecs[VEC_PIC_BASE + irq].kind == V_HANDLE ||
-                                            vecs[VEC_PIC_BASE + irq].kind == V_TIMER || irq == 1 || irq == 12);
+                                            vecs[VEC_PIC_BASE + irq].kind == V_TIMER ||
+                                            irq == 1 || irq == 8 || irq == 12 || irq == 13);
         if (irq <= 0 || irq >= 16 || irq == 2 || taken) {
             kprintf("irq: %s: no usable INTx line (Interrupt Line %d), polled\n", h->name, irq);
             h->kind = IRQ_NONE;
@@ -462,9 +548,11 @@ int irq_attach(irq_handle_t *h) {
         if (l) bind(h, l);
         irq_restore(f);
         if (!l) { h->kind = IRQ_NONE; return IRQ_NONE; }
+        quiet_others();
         h->ack(h->ctx);
         line_mask(l, 0);
     } else {
+        quiet_others();
         learning_start();
     }
     return h->kind;
@@ -526,11 +614,12 @@ int irq_fired(irq_handle_t *h) {
     return 1;
 }
 
+/* Work found by polling with no interrupt from the device since the last
+ * time: after a run of those its interrupts are taken to be lost. */
 void irq_note_work(irq_handle_t *h) {
     if (!irq_live(h)) return;
-    u64 now = time_ms();
-    if (now - h->wd_start > 2000) { h->wd_start = now; h->wd_work = 0; h->wd_events = h->events; return; }
-    if (++h->wd_work >= 50 && h->events == h->wd_events) {
+    if (h->events != h->wd_events) { h->wd_events = h->events; h->wd_work = 0; return; }
+    if (++h->wd_work >= 8) {
         h->broken = 1;
         kprintf("irq: %s: its interrupts stopped arriving, polling it instead\n", h->name);
     }
@@ -744,7 +833,8 @@ void irq_init(void) {
     }
     madt = acpi_madt();
     lapic_init(madt);
-    int apic = have_lapic && madt && madt->nioapic && !(bf & BOOTF_NO_IOAPIC) && ioapic_init() == 0;
+    /* I/O APIC destinations are 8-bit physical IDs */
+    int apic = have_lapic && lapic_id < 256 && madt && madt->nioapic && !(bf & BOOTF_NO_IOAPIC) && ioapic_init() == 0;
     if (have_lapic && madt && madt->nioapic && (bf & BOOTF_NO_IOAPIC)) kprintf("irq: I/O APIC disabled by boot option\n");
     mode = apic ? IRQ_MODE_APIC : IRQ_MODE_PIC;
     if (have_lapic) lapic_lints(madt, !apic);
@@ -761,12 +851,19 @@ void irq_init(void) {
     if (a >= 6) { cpuid(6, 0, &a, &b, &c, &d); arat = (a >> 2) & 1; }
     cpuid(1, 0, &a, &b, &c, &d);
     int hv = (c >> 31) & 1;
+    cpuid(0x80000000, 0, &a, &b, &c, &d);
+    int invtsc = 0;
+    if (a >= 0x80000007) { cpuid(0x80000007, 0, &a, &b, &c, &d); invtsc = (d >> 8) & 1; }
     int ok = 0;
-    if (have_lapic && (arat || intel || hv) && lapic_timer_setup() == 0) {
+    /* Older AMD CPUs with C1E stop the TSC (and the APIC timer) in HLT.
+     * All timing here is TSC based, so only idle where it keeps running. */
+    int safe = intel || arat || invtsc || hv;
+    if (!safe) kprintf("irq: this CPU may stop its clocks in HLT (AMD C1E): CPU idle off\n");
+    if (safe && have_lapic && lapic_timer_setup() == 0) {
         ok = timer_test();
         if (!ok) { kprintf("irq: local APIC timer interrupt does not arrive\n"); lapic_wr(LAPIC_LVT_TIMER, LVT_MASKED | VEC_TIMER); timer_kind = TMR_NONE; }
     }
-    if (!ok && pit_timer_setup() == 0) {
+    if (safe && !ok && pit_timer_setup() == 0) {
         ok = timer_test();
         if (!ok) { kprintf("irq: PIT interrupt does not arrive\n"); pit_timer_off(); }
     }

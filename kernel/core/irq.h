@@ -33,6 +33,7 @@ struct irq_handle {
      * only. Return 1 if the device was asserting its interrupt. */
     int (*ack)(void *ctx);
     void *ctx;
+    u8 intx_only;          /* driver: never MSI (status is only acked for INTx) */
     /* managed by irq.c */
     u8 kind;               /* IRQ_NONE: polled */
     u8 broken;             /* interrupts stopped arriving: polled again */
@@ -42,7 +43,7 @@ struct irq_handle {
     volatile u32 events;   /* interrupts seen from this device */
     u32 seen;
     u64 wd_start;
-    u32 wd_work, wd_events;
+    u32 wd_work, wd_events, noack;
     irq_handle_t *next_on_line, *next_all;
 };
 

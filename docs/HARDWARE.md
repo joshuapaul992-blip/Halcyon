@@ -67,9 +67,9 @@ works.
   controller shares its line with a device Halcyon has no driver for, it may stay
   polled: it still works, but the CPU wakes up more often. The `IRQ` command and
   `BOOT.LOG` show this.
-- **Old AMD CPUs (before about 2011)** may stop the local APIC timer when idle, so
-  Halcyon uses the PIT timer on AMD CPUs that don't report an always-running APIC
-  timer.
+- **Old AMD CPUs (about 2003–2011)** can stop their clocks in HLT (C1E), so on
+  CPUs that report neither an always-running APIC timer nor an invariant TSC,
+  Halcyon leaves CPU idle off and polls as before.
 - **Laptop touchpads** are usually I2C devices and are not supported. Use a USB
   mouse.
 - **NVMe-only laptops** show no internal disks yet.

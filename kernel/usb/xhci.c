@@ -434,6 +434,10 @@ static void process_events(xhci_t *x) {
         if (++x->evt_deq == EVT_TRBS) { x->evt_deq = 0; x->evt_cycle ^= 1; }
     }
     if (n) ir_write64(x, IR_ERDP, virt_to_phys(&x->evt[x->evt_deq]) | ERDP_EHB);
+    else if (x->hc.irq.kind != IRQ_NONE && (ir_read(x, IR_ERDP) & ERDP_EHB))
+        /* busy flag set by an interrupt whose events were already drained:
+         * it blocks further interrupts until cleared */
+        ir_write64(x, IR_ERDP, virt_to_phys(&x->evt[x->evt_deq]) | ERDP_EHB);
 }
 
 /* Host controller health: HSE / HCE / unexpected halt. Logged once. */
@@ -1206,9 +1210,15 @@ static void port_service(xhci_t *x, int p) {
 /* INTx acknowledge (main loop): event interrupt + interrupter pending */
 static int xhci_ack(void *ctx) {
     xhci_t *x = ctx;
-    if (x->dead) return 0;
     u32 sts = op_read(x, OP_USBSTS), im = ir_read(x, IR_IMAN);
     if (sts == 0xFFFFFFFF) return 0;
+    if (x->dead) {
+        /* failed controller: stop it interrupting at all */
+        op_write(x, OP_USBCMD, op_read(x, OP_USBCMD) & ~CMD_INTE);
+        ir_write(x, IR_IMAN, IMAN_IP);
+        op_write(x, OP_USBSTS, STS_EINT);
+        return (sts & STS_EINT) || (im & IMAN_IP);
+    }
     int asserted = (sts & STS_EINT) || (im & IMAN_IP);
     if (sts & STS_EINT) op_write(x, OP_USBSTS, STS_EINT);
     if (im & IMAN_IP) ir_write(x, IR_IMAN, IMAN_IE | IMAN_IP);
@@ -1448,7 +1458,7 @@ static void xhci_setup(pci_dev_t *pd) {
     x->hc.nports = (u8)x->nports;
     pd->driver = "xhci";
     /* interrupter 0: MSI-X / MSI, else INTx; ~40 us moderation like Linux */
-    if (usb_hc_irq(&x->hc, xhci_ack, x) != IRQ_NONE) {
+    if (usb_hc_irq(&x->hc, xhci_ack, x, 1) != IRQ_NONE) {
         ir_write(x, IR_IMOD, 160);
         ir_write(x, IR_IMAN, IMAN_IE | IMAN_IP);
         op_write(x, OP_USBSTS, STS_EINT);

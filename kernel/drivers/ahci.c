@@ -348,6 +348,7 @@ static int port_exec(ahci_port_t *p, u8 cmd, u64 lba, u32 count, void *buf, u32 
     px_wr(p, PX_IS, 0xFFFFFFFF);
     hba_wr(p->hba, HBA_IS, 1u << p->index);
     p->is_acc = 0;
+    u32 gen0 = irq_generation();
     px_wr(p, PX_CI, 1);
 
     u64 deadline = time_ms() + timeout_ms, last = 0;
@@ -369,7 +370,13 @@ static int port_exec(ahci_port_t *p, u8 cmd, u64 lba, u32 count, void *buf, u32 
     rmb();
     /* INTx: let irq_service() see (and learn) the interrupt before the
      * status that drives it is cleared below */
-    if (p->hba->irq.kind == IRQ_INTX) irq_service();
+    if (p->hba->irq.kind == IRQ_INTX) {
+        /* while the route is being learned, give the (posted) INTx message a
+         * moment to arrive before the status that drives it is cleared */
+        if (p->hba->irq.line < 0)
+            for (u64 end = time_us() + 500; irq_generation() == gen0 && time_us() < end;) cpu_relax();
+        irq_service();
+    }
     u32 tfd = px_rd(p, PX_TFD);
     is = px_rd(p, PX_IS) | p->is_acc;
     if (timed_out || (is & IS_ERR_MASK) || (tfd & (TFD_ERR | TFD_BSY | TFD_DRQ))) {

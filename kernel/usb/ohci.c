@@ -68,6 +68,8 @@
 #define INT_WDH  0x00000002
 #define INT_SF   0x00000004
 #define INT_UE   0x00000010
+#define INT_RHSC 0x00000040
+#define INT_MIE  0x80000000u
 #define INT_ALL  0xC000007F     /* all sources + OC + MIE */
 
 #define FMI_FIT  0x80000000u
@@ -759,6 +761,12 @@ static int port_reset(ohci_t *o, int p) {
 
 static void ohci_poll(usb_hc_t *hc) {
     ohci_t *o = hc->priv;
+    if (hc->irq.kind != IRQ_NONE) {
+        u32 rs = rd(o, HC_RHSTATUS);
+        if (rs != 0xFFFFFFFF && (rs & 0x00020000)) wr(o, HC_RHSTATUS, 0x00020000);   /* OCIC */
+        wr(o, HC_INTSTATUS, INT_RHSC);
+        wr(o, HC_INTENABLE, INT_RHSC);
+    }
     if (!o->ue_reported && (rd(o, HC_INTSTATUS) & INT_UE)) {
         o->ue_reported = 1;
         kprintf("ohci: %s: unrecoverable error, controller halted\n", hc->desc);
@@ -840,8 +848,6 @@ static int alloc_schedule(ohci_t *o) {
     return 0;
 }
 
-#define INT_RHSC 0x00000040
-#define INT_MIE  0x80000000u
 /* INTx acknowledge: WritebackDoneHead and RootHubStatusChange (UE stays
  * set for the driver to see; it is not an enabled source) */
 static int ohci_ack(void *ctx) {
@@ -849,6 +855,9 @@ static int ohci_ack(void *ctx) {
     u32 st = rd(o, HC_INTSTATUS);
     if (st == 0xFFFFFFFF) return 0;
     st &= INT_WDH | INT_RHSC;
+    /* RHSC can behave level-triggered: disable it until ohci_poll has
+     * serviced the ports (as Linux does) */
+    if (st & INT_RHSC) wr(o, HC_INTDISABLE, INT_RHSC);
     if (st) wr(o, HC_INTSTATUS, st);
     return st != 0;
 }
@@ -945,7 +954,7 @@ static void ohci_setup(pci_dev_t *pd) {
     pd->driver = "ohci";
     kprintf("ohci: rev %x.%x, %d ports, FI %u, %s power switching\n", rev >> 4, rev & 0xF, ndp, fi,
             (rha & RHA_NPS) ? "no" : ((rha & RHA_PSM) ? "per-port" : "global"));
-    if (usb_hc_irq(&o->hc, ohci_ack, o) != IRQ_NONE) {
+    if (usb_hc_irq(&o->hc, ohci_ack, o, 0) != IRQ_NONE) {
         wr(o, HC_INTSTATUS, INT_WDH | INT_RHSC);
         wr(o, HC_INTENABLE, INT_WDH | INT_RHSC | INT_MIE);
     }

@@ -52,10 +52,12 @@ const char *usb_class_name(u8 c) {
 }
 
 /* ---------- controllers ---------- */
-/* HC interrupt setup: MSI-X/MSI or INTx (ack is required for INTx). The HC
+/* HC interrupt setup: MSI-X/MSI (if allow_msi: the HC must not need its
+ * status acknowledged to interrupt again) or INTx (ack required). The HC
  * driver then enables its interrupt sources. Returns the irq kind. */
-int usb_hc_irq(usb_hc_t *hc, int (*ack)(void *ctx), void *ctx) {
+int usb_hc_irq(usb_hc_t *hc, int (*ack)(void *ctx), void *ctx, int allow_msi) {
     hc->irq.name = hc->desc;
+    hc->irq.intx_only = !allow_msi;
     hc->irq.pci = hc->pci;
     hc->irq.ack = ack;
     hc->irq.ctx = ctx;

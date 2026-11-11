@@ -991,7 +991,7 @@ static void ehci_setup(pci_dev_t *pd) {
             HCC_64BIT(hcc) ? ", 64-bit" : "", HCS_PPC(hcs) ? ", port power control" : "");
     /* transfer completion (IOC / short packet), errors and port changes.
      * Async-advance stays polled (iaa_wait reads STS_IAA itself). */
-    if (usb_hc_irq(&e->hc, ehci_ack, e) != IRQ_NONE) {
+    if (usb_hc_irq(&e->hc, ehci_ack, e, 0) != IRQ_NONE) {
         op_wr(e, USBSTS, STS_USBINT | STS_ERRINT | STS_PCD);
         op_wr(e, USBINTR, STS_USBINT | STS_ERRINT | STS_PCD);
     }

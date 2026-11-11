@@ -69,6 +69,7 @@ typedef struct uhci {
     uhci_intr_t *intr_list;
     usb_device_t *port_dev[8];
     u8 port_failed[8];
+    u16 fatal;                 /* HSE / HCPE seen by the INTx acknowledge */
 } uhci_t;
 
 static u32 phys(const void *p) { return (u32)virt_to_phys(p); }
@@ -107,7 +108,7 @@ static int run_tds(uhci_t *u, uhci_td_t *tds, int n, int status_idx, int timeout
         rmb();
         u32 st = tds[i].status;
         if (st & TD_ACTIVE) {
-            if (inw(u->io + USBSTS) & 0x18) { result = E_IO; break; }   /* HSE / HCPE */
+            if ((inw(u->io + USBSTS) & 0x18) || u->fatal) { result = E_IO; break; }   /* HSE / HCPE */
             irq_wait(&u->hc.irq, gen, deadline);
             continue;
         }
@@ -336,10 +337,15 @@ static const usb_hc_ops_t uhci_ops = {
     .poll = uhci_poll,
 };
 
-/* INTx acknowledge: USBINT, USBERRINT and resume detect are write-1-to-clear */
+/* INTx acknowledge: USBINT, USBERRINT, resume detect, host system error and
+ * HC process error are write-1-to-clear (the last two cannot be masked, so
+ * they must be cleared too); the errors are remembered for run_tds */
 static int uhci_ack(void *ctx) {
     uhci_t *u = ctx;
-    u16 st = inw(u->io + USBSTS) & 0x07;
+    u16 st = inw(u->io + USBSTS);
+    if (st == 0xFFFF) return 0;
+    st &= 0x1F;
+    u->fatal |= st & 0x18;
     if (st) outw(u->io + USBSTS, st);
     return st != 0;
 }
@@ -399,7 +405,7 @@ static void uhci_setup(pci_dev_t *pd) {
     u->hc.nports = (u8)n;
     pd->driver = "uhci";
     u->hc.no_port_irq = 1;           /* UHCI has no port change interrupt */
-    if (usb_hc_irq(&u->hc, uhci_ack, u) == IRQ_INTX) {
+    if (usb_hc_irq(&u->hc, uhci_ack, u, 0) == IRQ_INTX) {
         pci_write16(pd, 0xC0, 0x2000);   /* LEGSUP: USBPIRQDEN, interrupts to the PCI INTx pin */
         outw(u->io + USBSTS, 0x07);
         outw(u->io + USBINTR, 0x0D);     /* timeout/CRC, IOC, short packet */

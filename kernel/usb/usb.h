@@ -260,7 +260,7 @@ void usb_init(void);
 void usb_poll(void);
 
 void usb_register_hc(usb_hc_t *hc);
-int  usb_hc_irq(usb_hc_t *hc, int (*ack)(void *ctx), void *ctx);
+int  usb_hc_irq(usb_hc_t *hc, int (*ack)(void *ctx), void *ctx, int allow_msi);
 
 /* Called by HC drivers (root ports) and the hub driver after a port reset
  * completed with a device present. Enumerates and binds drivers.
