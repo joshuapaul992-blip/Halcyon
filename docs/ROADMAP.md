@@ -11,15 +11,14 @@
 4. **Threads and user mode:** kernel threads (background copies), programs in
    their own address space loaded from `C:\PROGRAMS`, crash isolation, Task
    Manager, Calculator and Sonar as programs.
+5. **Input and display:** 20 keyboard layouts (dead keys, AltGr, switching),
+   USB keyboards in report protocol (n-key rollover, receivers, media keys),
+   the monitor's native resolution from EDID, Display Properties (live switching
+   on QEMU/Bochs/VirtualBox, otherwise at the next start), write-combining frame
+   buffer, settings kept in `C:\HALCYON\SETTINGS.INI`. Not done: I2C touchpads
+   (optional; no test machine needs them yet).
 
 ## Planned (in recommended order)
-
-### M5: Input and display
-- Non-US keyboard layouts; HID keyboards that need the report protocol.
-- The monitor's native resolution (EDID) and a resolution picker, through the
-  firmware (VBE / GOP).
-- Write-combining for the framebuffer (PAT), so drawing is faster everywhere.
-- Optional: I2C touchpads (hard; only if test machines need them).
 
 ### M9: Program platform
 - Threads, menus and a sockets API for programs.
