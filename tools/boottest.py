@@ -39,6 +39,7 @@ interrupts on, get a working interrupt:
           8 MiB upload with CRCs, 40 parallel connections, UDP, the loopback,
           errors, and a server in Halcyon that the host connects to through
           hostfwd); it must report "nettest: all N checks passed"
+          (net+virtio etc.: the same on another adapter of the list below)
   loss    (with net) 3% of frames dropped on receive and transmit by the
           stack's test hook (fw_cfg opt/halcyon/netloss): a shorter NETTEST
           run that must still pass, with retransmissions
@@ -209,7 +210,8 @@ def net_failures(text, nic, opts):
     else:
         sent, replies, done, e1, e2, e3 = (int(x) for x in m.groups()[:6])
         irq = m.group(7).strip()
-        if sent != NET_PROBE or replies != sent or done != sent or e1 or e2 or e3:
+        # (transmitted: the driver's count, which includes the stack's own frames: DHCP, ARP)
+        if sent != NET_PROBE or replies != sent or done < sent or done > sent + 40 or e1 or e2 or e3:
             fails.append("probe: %s" % m.group(0).split("probe: ")[1])
         want = "polled" if "noirq" in opts else "MSI-X" if msix and "nomsi" not in opts else "INTx"
         if not irq.startswith(want) or "lost" in irq or "none seen" in irq or (want != "polled" and "polled" in irq):
@@ -218,7 +220,7 @@ def net_failures(text, nic, opts):
                   r"\d+ replies in \d+ ms; errors: (\d+) tx, (\d+) rx", text)
     if not m:
         fails.append("probe burst did not finish")
-    elif int(m.group(1)) != NET_PROBE // 4 or int(m.group(2)) != int(m.group(1)) or int(m.group(3)) or int(m.group(4)):
+    elif int(m.group(1)) != NET_PROBE // 4 or not 0 <= int(m.group(2)) - int(m.group(1)) <= 40 or int(m.group(3)) or int(m.group(4)):
         fails.append("burst: %s" % m.group(0).split("burst: ")[1])
     bad = [l for l in lines if l.startswith("irq: ") and driver in l and ("stopped arriving" in l or "polling it" in l)]
     if bad:
@@ -265,6 +267,10 @@ def run(cfg):
     if flags:
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
     nic = next((v for v in opts if v in NICS), None)
+    if nic and "net" in opts:           # net+NIC: NETTEST on that adapter (no probe)
+        nic_dev, nic = NICS[nic][0], None
+    else:
+        nic_dev = "e1000"
     if nic:
         extra += " -netdev user,id=n0 -device %s,netdev=n0 -fw_cfg name=opt/halcyon/netprobe,string=%d" % (
             NICS[nic][0], NET_PROBE)
@@ -275,7 +281,7 @@ def run(cfg):
     if net:
         ns_mod, ports = net_servers()
         fwd = ns_mod.free_port()
-        extra += " -netdev user,id=n0,hostfwd=tcp:127.0.0.1:%d-:8080 -device e1000,netdev=n0" % fwd
+        extra += " -netdev user,id=n0,hostfwd=tcp:127.0.0.1:%d-:8080 -device %s,netdev=n0" % (fwd, nic_dev)
         if os.environ.get("NETDUMP"):       # debugging: the guest's frames in a pcap file
             extra += " -object filter-dump,id=fd0,netdev=n0,maxlen=128,file=%s" % os.path.abspath(os.environ["NETDUMP"])
         ini_lines.append("net.dns=10.0.2.2:%d" % ports["dns"])
