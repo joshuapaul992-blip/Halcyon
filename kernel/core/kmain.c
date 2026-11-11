@@ -16,6 +16,9 @@ void usb_poll(void) WEAK;
 void ps2_init(void) WEAK;
 void gui_main(void) WEAK;
 void kernel_selftest(void) WEAK;   /* optional test hook (debug builds) */
+void splash_init(void) WEAK;
+void splash_progress(int pct, const char *msg) WEAK;
+#define PROGRESS(p, m) do { if (splash_progress) splash_progress(p, m); } while (0)
 
 
 
@@ -31,12 +34,18 @@ void kmain(struct bootinfo *bi) {
     time_init();
     kprintf("fb: %ux%u bpp %u pitch %u at %lx\n", g_bootinfo.fb_width, g_bootinfo.fb_height,
             g_bootinfo.fb_bpp, g_bootinfo.fb_pitch, g_bootinfo.fb_addr);
+    if (splash_init) splash_init();
+    PROGRESS(10, "Scanning PCI devices...");
     pci_init();
     if (blockdev_init) blockdev_init();
     if (vfs_init) vfs_init();
+    PROGRESS(20, "Starting keyboard and mouse...");
     if (ps2_init) ps2_init();
+    PROGRESS(35, "Detecting SATA disks...");
     if (ahci_init) ahci_init();
+    PROGRESS(55, "Starting USB controllers...");
     if (usb_init) usb_init();
+    PROGRESS(100, "Starting the desktop...");
     if (kernel_selftest) kernel_selftest();
     if (gui_main) gui_main();
 

@@ -1,0 +1,17 @@
+Getting started with Halcyon
+----------------------------
+
+Keyboard shortcuts
+  Ctrl+Esc or the Windows key   open the Start menu
+  Alt+Tab                       switch between windows
+  Alt+F4                        close the active window
+  F2 / Delete / F5              rename / delete / refresh in Explorer
+  Ctrl+C, Ctrl+X, Ctrl+V        copy, cut, paste (text and files)
+
+The Command Prompt understands DIR, CD, COPY, MOVE, DEL, REN, MD, RD,
+TYPE, TREE, LSUSB, LSPCI, DISKS, MEM, DMESG and more. Output can be
+redirected to a file:   DIR > listing.txt
+
+Drives
+  C:  is always the drive Halcyon was started from.
+  D:, E:, ... are other partitions, SATA disks and USB sticks.

@@ -1,0 +1,3 @@
+- try every USB port
+- copy a file from a SATA disk to a USB stick
+- beat Sonar on Expert

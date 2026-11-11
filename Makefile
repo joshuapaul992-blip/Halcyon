@@ -75,7 +75,7 @@ $(BUILD)/KERNEL.BIN: $(BUILD)/kernel.elf
 
 # ---- disk images ----
 IMG_DEPS := $(BUILD)/boot/mbr.bin $(BUILD)/boot/stage2.bin $(BUILD)/KERNEL.BIN \
-            $(shell find rootfs -type f 2>/dev/null) tools/mkimage.sh
+            $(BUILD)/rootfs.stamp tools/mkimage.sh
 ifneq ($(EFI_SRC),)
 IMG_DEPS += $(BUILD)/efi/BOOTX64.EFI
 endif
@@ -83,11 +83,16 @@ endif
 $(BUILD)/halcyon.img: $(IMG_DEPS)
 	BUILD=$(BUILD) sh tools/mkimage.sh
 
+# content hash of rootfs/ (file names may contain spaces)
+$(BUILD)/rootfs.stamp: FORCE
+	@mkdir -p $(BUILD)
+	@find rootfs -type f -exec md5sum {} + 2>/dev/null | sort > $@.tmp; cmp -s $@.tmp $@ || mv $@.tmp $@; rm -f $@.tmp
+
 testdisks: tools/mktestdisks.sh
 	BUILD=$(BUILD) sh tools/mktestdisks.sh
 
 clean:
 	rm -rf ./build
 
-.PHONY: all clean testdisks
+.PHONY: all clean testdisks FORCE
 -include $(shell find $(BUILD) -name '*.d' 2>/dev/null)

@@ -395,6 +395,7 @@ int screen_h(void) { return (int)g_bootinfo.fb_height; }
 static int fb_native;   /* 32bpp with R at 16, G at 8, B at 0 */
 
 void screen_init(void) {
+    if (g_screen) return;
     g_screen = surface_new((int)g_bootinfo.fb_width, (int)g_bootinfo.fb_height);
     if (!g_screen) panic("cannot allocate the screen back buffer");
     fb_native = g_bootinfo.fb_bpp == 32 && g_bootinfo.fb_red_pos == 16 && g_bootinfo.fb_green_pos == 8 && g_bootinfo.fb_blue_pos == 0;
