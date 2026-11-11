@@ -296,6 +296,61 @@ static long sys_volumes(u64 ubuf, int max) {
     return n;
 }
 
+/* ---- Explorer: the shell's built-in tools, file details ---- */
+
+/* open a built-in tool on the GUI thread (like shell_open, without
+ * waiting); a few may be queued at a time, so a looping program cannot
+ * pile up windows faster than the GUI makes them */
+typedef struct { int app; char path[VFS_MAX_PATH]; } app_job_t;
+static volatile int app_jobs;
+static void job_app(void *a) {
+    app_job_t *j = a;
+    const char *path = j->path[0] ? j->path : NULL;
+    switch (j->app) {
+    case SHELL_APP_TERMINAL: app_terminal_in(path); break;
+    case SHELL_APP_SYSINFO: app_sysinfo(); break;
+    case SHELL_APP_CONTROL: app_control(); break;
+    case SHELL_APP_ABOUT: app_about(); break;
+    case SHELL_APP_NOTEPAD: shell_notepad(path); break;
+    }
+    kfree(j);
+    app_jobs--;
+}
+static long sys_shell_app(proc_t *p, u64 app, u64 upath) {
+    if (app < SHELL_APP_TERMINAL || app > SHELL_APP_NOTEPAD) return E_INVAL;
+    if (app_jobs >= 4) return E_BUSY;
+    app_job_t *j = kzalloc(sizeof *j);
+    if (!j) return E_NOMEM;
+    j->app = (int)app;
+    if (upath && (app == SHELL_APP_TERMINAL || app == SHELL_APP_NOTEPAD)) {
+        vfs_dirent_t st;
+        int r = user_path(p, upath, j->path);
+        if (!r) r = vfs_stat(j->path, &st);
+        if (!r && st.is_dir != (app == SHELL_APP_TERMINAL)) r = app == SHELL_APP_TERMINAL ? E_NOTDIR : E_ISDIR;
+        if (r) { kfree(j); return r; }
+    }
+    app_jobs++;
+    gui_post(job_app, j);
+    return 0;
+}
+
+static long sys_stat_ex(proc_t *p, u64 upath, u64 ubuf) {
+    char path[VFS_MAX_PATH];
+    vfs_dirent_t st;
+    int r = user_path(p, upath, path);
+    if (!r) r = vfs_stat(path, &st);
+    if (r) return r;
+    hal_statx_t x;
+    memset(&x, 0, sizeof x);
+    to_user_dirent(&st, &x.d);
+    x.cyear = st.ctime.year; x.cmonth = st.ctime.month; x.cday = st.ctime.day;
+    x.chour = st.ctime.hour; x.cminute = st.ctime.minute; x.csecond = st.ctime.second;
+    strlcpy(x.short_name, st.short_name, sizeof x.short_name);
+    volume_t *v = vfs_volume_by_letter(path[0]);
+    if (v && v->bd) strlcpy(x.model, v->bd->model, sizeof x.model);
+    return copyout(ubuf, &x, sizeof x) ? E_INVAL : 0;
+}
+
 /* ---- dispatcher ---- */
 
 void syscall_dispatch(struct sysframe *f) {
@@ -363,6 +418,8 @@ void syscall_dispatch(struct sysframe *f) {
     }
     case SYS_VOLUME_INFO: r = sys_volume_info(a1, a2); break;
     case SYS_VFS_GENERATION: r = vfs_generation(); break;
+    case SYS_SHELL_APP: r = sys_shell_app(p, a1, a2); break;
+    case SYS_STAT_EX: r = sys_stat_ex(p, a1, a2); break;
     case SYS_PROCLIST: r = sys_proclist(a1, (int)MIN(a2, 256)); break;
     case SYS_SYSINFO: r = sys_sysinfo(a1); break;
 

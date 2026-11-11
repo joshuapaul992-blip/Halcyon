@@ -240,6 +240,7 @@ void shell_tick(void);
 void app_explorer(const char *path);
 void app_notepad(const char *path);
 void app_terminal(void);
+void app_terminal_in(const char *dir);   /* in a folder (an absolute, normalised path) */
 void app_paint(const char *path);
 void app_calc(void);
 void app_sysinfo(void);
