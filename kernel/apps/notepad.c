@@ -1,6 +1,7 @@
 /* Halcyon OS - Notepad text editor */
 #include "gui/wm.h"
 #include "core/lib.h"
+#include "core/unicode.h"
 #include "core/mm.h"
 #include "core/kernel.h"
 #include "fs/vfs.h"
@@ -40,7 +41,7 @@ static menu_t np_menus[] = {
     { "File", f_items, ARRAY_SIZE(f_items) }, { "Edit", e_items, ARRAY_SIZE(e_items) }, { "Help", h_items, ARRAY_SIZE(h_items) },
 };
 
-static int cw(void) { return font_mono.glyphs['M' - font_mono.first].adv; }
+static int cw(void) { return gfx_char_width(&font_mono, 'M'); }
 static int lh(void) { return font_mono.height + 1; }
 
 /* ---------------- buffer ---------------- */
@@ -68,14 +69,20 @@ static int line_of(np_t *n, int off) {
 }
 static int line_end(np_t *n, int l) { return l + 1 < n->nlines ? n->lines[l + 1] - 1 : n->len; }
 
-static int x_of(np_t *n, int off) {
+/* The text is UTF-8 (other bytes show as Latin-1): one column per character,
+ * tabs to multiples of 4. Offsets are bytes at character boundaries. */
+static int next_ch(np_t *n, int i) { return utf8_after(n->buf, n->len, i); }
+static int prev_ch(np_t *n, int i) { return utf8_prev(n->buf, i); }
+
+static int col_of(np_t *n, int off) {
     int l = line_of(n, off), col = 0;
-    for (int i = n->lines[l]; i < off; i++) col = n->buf[i] == '\t' ? (col / 4 + 1) * 4 : col + 1;
-    return col * cw();
+    for (int i = n->lines[l]; i < off; i = next_ch(n, i)) col = n->buf[i] == '\t' ? (col / 4 + 1) * 4 : col + 1;
+    return col;
 }
+static int x_of(np_t *n, int off) { return col_of(n, off) * cw(); }
 static int off_at_x(np_t *n, int l, int px) {
     int col = 0, e = line_end(n, l);
-    for (int i = n->lines[l]; i < e; i++) {
+    for (int i = n->lines[l]; i < e; i = next_ch(n, i)) {
         int nc = n->buf[i] == '\t' ? (col / 4 + 1) * 4 : col + 1;
         if (px < (col * cw() + nc * cw()) / 2) return i;
         col = nc;
@@ -156,17 +163,17 @@ static void np_paint(window_t *w, gc_t *g) {
         int l = n->top + i, y = i * lh() + 1;
         int a = n->lines[l], e = line_end(n, l);
         int col = 0;
-        for (int k = a; k <= e; k++) {
+        for (int k = a; k <= e;) {
             int x = col * cw() - n->left + 2;
             int nc = (k < e && n->buf[k] == '\t') ? (col / 4 + 1) * 4 : col + 1;
+            int k2 = k < e ? next_ch(n, k) : k + 1;
             int sel = k >= s0 && k < s1;
             if (sel) gfx_fill(&sub, mkrect(x, y, (nc - col) * cw(), lh()), active ? g_theme->select : HEX(0xC8C8C8));
-            if (k < e && n->buf[k] != '\t' && x > -cw() && x < tr.w) {
-                char c[2] = { n->buf[k], 0 };
-                gfx_text(&sub, &font_mono, x, y, c, sel && active ? g_theme->select_text : HEX(0x000000));
-            }
+            if (k < e && n->buf[k] != '\t' && x > -cw() && x < tr.w)
+                gfx_text_n(&sub, &font_mono, x, y, n->buf + k, k2 - k, sel && active ? g_theme->select_text : HEX(0x000000));
             col = nc;
             if (x > tr.w && k >= s1) break;
+            k = k2;
         }
     }
     if (active && n->caret_on) {
@@ -183,7 +190,7 @@ static void np_paint(window_t *w, gc_t *g) {
     gfx_hline(g, 0, sb.y, sb.w, color_lighten(g_theme->face, -30));
     int l = line_of(n, n->cur);
     char st[96];
-    snprintf(st, sizeof st, "Ln %d, Col %d", l + 1, n->cur - n->lines[l] + 1);
+    snprintf(st, sizeof st, "Ln %d, Col %d", l + 1, utf8_count(n->buf + n->lines[l], n->cur - n->lines[l]) + 1);
     gfx_text_box(g, &font_ui, mkrect(sb.w - 160, sb.y + 1, 150, STATUS_H - 1), st, HEX(0x000000), 0);
     char sz[48];
     snprintf(sz, sizeof sz, "%d bytes, %d lines%s", n->len, n->nlines, n->crlf ? ", CR/LF" : "");
@@ -318,7 +325,7 @@ static void np_menu(window_t *w, int id) {
     case NP_CUT: copy_sel(n); del_sel(n); break;
     case NP_COPY: copy_sel(n); break;
     case NP_PASTE: { int l; const char *c = clipboard_get(&l); if (c && l) insert(n, c, l); break; }
-    case NP_DEL: if (!del_sel(n) && n->cur < n->len) del_range(n, n->cur, n->cur + 1); break;
+    case NP_DEL: if (!del_sel(n) && n->cur < n->len) del_range(n, n->cur, next_ch(n, n->cur)); break;
     case NP_SELALL: n->anchor = 0; n->cur = n->len; break;
     case NP_FIND: do_find(n); return;
     case NP_TIME: {
@@ -345,7 +352,7 @@ static int pos_at(np_t *n, int x, int y) {
     return off_at_x(n, l, x - tr.x - 2 + n->left);
 }
 
-static int is_word(char c) { return isalnum(c) || c == '_'; }
+static int is_word(char c) { return isalnum(c) || c == '_' || (u8)c >= 0x80; }   /* non-ASCII: letters */
 
 static void np_event(window_t *w, gui_event_t *e) {
     np_t *n = w->data;
@@ -439,8 +446,8 @@ static void np_event(window_t *w, gui_event_t *e) {
         }
     } else {
         switch (k->key) {
-        case KEY_LEFT: if (!shift && n->cur != n->anchor) n->cur = MIN(n->cur, n->anchor); else if (n->cur > 0) n->cur--; break;
-        case KEY_RIGHT: if (!shift && n->cur != n->anchor) n->cur = MAX(n->cur, n->anchor); else if (n->cur < n->len) n->cur++; break;
+        case KEY_LEFT: if (!shift && n->cur != n->anchor) n->cur = MIN(n->cur, n->anchor); else if (n->cur > 0) n->cur = prev_ch(n, n->cur); break;
+        case KEY_RIGHT: if (!shift && n->cur != n->anchor) n->cur = MAX(n->cur, n->anchor); else if (n->cur < n->len) n->cur = next_ch(n, n->cur); break;
         case KEY_UP: if (l > 0) n->cur = off_at_x(n, l - 1, n->pref_x); keep_pref = 1; break;
         case KEY_DOWN: if (l + 1 < n->nlines) n->cur = off_at_x(n, l + 1, n->pref_x); keep_pref = 1; break;
         case KEY_PAGEUP: n->cur = off_at_x(n, MAX(0, l - vl), n->pref_x); n->top = MAX(0, n->top - vl); keep_pref = 1; break;
@@ -454,11 +461,11 @@ static void np_event(window_t *w, gui_event_t *e) {
         }
         case KEY_END: n->cur = line_end(n, l); break;
         case KEY_BACKSPACE:
-            if (!del_sel(n) && n->cur > 0) del_range(n, n->cur - 1, n->cur);
+            if (!del_sel(n) && n->cur > 0) del_range(n, prev_ch(n, n->cur), n->cur);
             moved = 0;
             break;
         case KEY_DELETE:
-            if (!del_sel(n) && n->cur < n->len) del_range(n, n->cur, n->cur + 1);
+            if (!del_sel(n) && n->cur < n->len) del_range(n, n->cur, next_ch(n, n->cur));
             moved = 0;
             break;
         case KEY_ENTER: case KEY_KP_ENTER: {

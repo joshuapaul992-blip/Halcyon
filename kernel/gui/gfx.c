@@ -1,5 +1,6 @@
 /* Halcyon OS - 2D graphics primitives */
 #include "gfx.h"
+#include "core/unicode.h"
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
@@ -307,22 +308,30 @@ void gfx_icon_tinted(gc_t *g, int x, int y, const icon_t *ic, color_t tint, int 
 void gfx_icon_alpha(gc_t *g, int x, int y, const icon_t *ic, int alpha) { icon_draw(g, x, y, ic, 0, 0, alpha); }
 
 /* ---- text ---- */
-static const glyph_t *glyph(const font_t *f, char ch) {
-    int c = (u8)ch;
-    if (c < f->first || c > f->last) c = '?';
-    return &f->glyphs[c - f->first];
+/* Text is UTF-8 (see core/unicode.h). Glyphs cover ranges of code points;
+ * anything else is drawn as U+FFFD. Lengths (n) are in bytes. */
+static const glyph_t *glyph_cp(const font_t *f, u32 cp) {
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < f->nranges; i++) {
+            const font_range_t *r = &f->ranges[i];
+            if (cp >= r->first && cp <= r->last) return &f->glyphs[r->index + cp - r->first];
+        }
+        cp = pass ? '?' : UC_REPLACEMENT;
+    }
+    return &f->glyphs[0];
 }
-int gfx_char_width(const font_t *f, char c) { return glyph(f, c)->adv; }
+int gfx_char_width(const font_t *f, u32 cp) { return glyph_cp(f, cp)->adv; }
 int gfx_text_width_n(const font_t *f, const char *s, int n) {
-    int w = 0;
-    for (int i = 0; i < n && s[i]; i++) w += glyph(f, s[i])->adv;
+    int w = 0, pos = 0;
+    while (pos < n && s[pos]) w += glyph_cp(f, utf8_get(s, n, &pos))->adv;
     return w;
 }
 int gfx_text_width(const font_t *f, const char *s) { return gfx_text_width_n(f, s, 1 << 30); }
 
 int gfx_text_n(gc_t *g, const font_t *f, int x, int y, const char *s, int n, color_t c) {
-    for (int k = 0; k < n && s[k]; k++) {
-        const glyph_t *gl = glyph(f, s[k]);
+    int pos = 0;
+    while (pos < n && s[pos]) {
+        const glyph_t *gl = glyph_cp(f, utf8_get(s, n, &pos));
         if (gl->w && gl->h) {
             int gx = x + gl->xoff + g->ox, gy = y + gl->yoff + g->oy;
             rect_t r = rect_intersect(mkrect(gx, gy, gl->w, gl->h), g->clip);
@@ -345,6 +354,19 @@ int gfx_text_n(gc_t *g, const font_t *f, int x, int y, const char *s, int n, col
 }
 int gfx_text(gc_t *g, const font_t *f, int x, int y, const char *s, color_t c) { return gfx_text_n(g, f, x, y, s, 1 << 30, c); }
 
+/* bytes of s that fit in width w (whole characters) */
+int gfx_text_fit(const font_t *f, const char *s, int w) {
+    int pos = 0, acc = 0;
+    while (s[pos]) {
+        int p2 = pos;
+        int cw = glyph_cp(f, utf8_get(s, 1 << 30, &p2))->adv;
+        if (acc + cw > w) break;
+        acc += cw;
+        pos = p2;
+    }
+    return pos;
+}
+
 void gfx_text_box(gc_t *g, const font_t *f, rect_t r, const char *s, color_t c, int align) {
     int w = gfx_text_width(f, s);
     int y = r.y + (r.h - f->height) / 2;
@@ -356,8 +378,7 @@ void gfx_text_box(gc_t *g, const font_t *f, rect_t r, const char *s, color_t c, 
         return;
     }
     int ell = gfx_text_width(f, "...");
-    int n = 0, acc = 0, len = (int)strlen(s);
-    while (n < len && acc + glyph(f, s[n])->adv + ell <= r.w) acc += glyph(f, s[n++])->adv;
+    int n = gfx_text_fit(f, s, r.w - ell);
     int x = gfx_text_n(&sub, f, r.x, y, s, n, c);
     gfx_text(&sub, f, x, y, "...", c);
 }
@@ -366,13 +387,14 @@ static int wrap_impl(gc_t *g, const font_t *f, rect_t r, const char *s, color_t 
     int y = r.y, lh = f->height + 1;
     const char *p = s;
     while (*p) {
-        /* find how many chars fit on this line */
+        /* find how many bytes fit on this line (whole characters) */
         int n = 0, w = 0, last_space = -1;
         while (p[n] && p[n] != '\n') {
-            int cw = glyph(f, p[n])->adv;
+            int n2 = n;
+            int cw = glyph_cp(f, utf8_get(p, 1 << 30, &n2))->adv;
             if (w + cw > r.w && n > 0) break;
             if (p[n] == ' ') last_space = n;
-            w += cw; n++;
+            w += cw; n = n2;
         }
         int brk = n;
         if (p[n] && p[n] != '\n' && last_space > 0) brk = last_space;

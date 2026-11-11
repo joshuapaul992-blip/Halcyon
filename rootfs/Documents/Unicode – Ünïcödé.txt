@@ -1,0 +1,13 @@
+Halcyon stores file names and text as Unicode (UTF-8).
+
+Français : Ça va très bien, merci !
+Deutsch: Grüße aus Köln – schöne Straße.
+Español: ¿Dónde está el niño? ¡Olé!
+Ελληνικά: Καλημέρα κόσμε.
+Русский: Привет, мир! Ёлка и щука.
+Čeština: Příliš žluťoučký kůň úpěl ďábelské ódy.
+Polski: Zażółć gęślą jaźń.
+Symbols: € £ ¥ © ® ™ ± × ÷ ° µ ½ “quotes” ‘single’ … → ≤ ≥ ≠
+
+Characters without a glyph (for example 日本語) are kept but
+drawn as a replacement box.

@@ -1,6 +1,6 @@
 /* Halcyon OS - virtual file system
  *
- * Paths are DOS style with drive letters: "C:/Documents/readme.txt".
+ * Paths are DOS style with drive letters: "C:/Documents/readme.txt", in UTF-8.
  * Both '/' and '\\' are accepted as separators, names are case-insensitive,
  * "." and ".." components are resolved. A path without a drive letter is
  * invalid (E_INVAL). "C:" and "C:/" both name the root directory.
@@ -17,8 +17,8 @@
 #include "core/types.h"
 #include "fs/block.h"
 
-#define VFS_MAX_PATH 260
-#define VFS_MAX_NAME 255
+#define VFS_MAX_PATH 520          /* bytes of UTF-8 */
+#define VFS_MAX_NAME 255          /* bytes of UTF-8 */
 
 /* open flags */
 #define VFS_O_READ   0x01
@@ -42,7 +42,7 @@ typedef struct vfs_time {
 } vfs_time_t;
 
 typedef struct vfs_dirent {
-    char name[VFS_MAX_NAME + 1];   /* long name if present, else 8.3 name */
+    char name[VFS_MAX_NAME + 1];   /* long name if present, else 8.3 name (UTF-8) */
     char short_name[13];           /* 8.3 name "README.TXT" */
     u64 size;
     u8  attr;                      /* VFS_ATTR_* */

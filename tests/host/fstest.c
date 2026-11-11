@@ -16,6 +16,7 @@
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
+#include "core/unicode.h"
 #include "fs/block.h"
 #include "fs/vfs.h"
 #include "fuzz_fs.h"
@@ -2032,6 +2033,116 @@ static void s_fat12(void) {
     t_illegal("fat12 illegal", &im, 512);
 }
 
+/* Unicode long names: UTF-8 in the VFS, UTF-16 on disk. mtools (run in a
+ * UTF-8 locale) is the cross-check; it cannot handle characters outside the
+ * Basic Multilingual Plane, so those are checked through the driver only. */
+static void t_unicode(const char *tag, img_t *im, u32 ss) {
+    printf("  %s\n", tag);
+    u8 *d1 = pat_alloc(3000, 41), *d2 = pat_alloc(70000, 42), *d3 = pat_alloc(10, 43);
+    /* written by mtools, read by the driver */
+    mt_put(im, "Café.txt", d1, 3000);
+    sh("mmd -i %s %s", mt(im), mp("Ünïcödé Dir"));
+    mt_put(im, "Ünïcödé Dir/Привет мир.txt", d2, 70000);
+    mt_put(im, "日本語のファイル.txt", d3, 10);
+    hdisk_t *h = disk_attach(im, ss);
+    char L = letter_of(h);
+    CHECK(L, "not mounted");
+    if (!L) { disk_detach(h); return; }
+    CHECK(v_listed(P(L, ""), "Café.txt", NULL), "Café.txt not listed");
+    CHECK(v_listed(P(L, ""), "Ünïcödé Dir", NULL), "Ünïcödé Dir not listed");
+    CHECK(v_listed(P(L, ""), "日本語のファイル.txt", NULL), "CJK name not listed");
+    v_cmp(P(L, "Café.txt"), d1, 3000);
+    v_cmp(P(L, "CAFÉ.TXT"), d1, 3000);                         /* case-insensitive, Latin-1 */
+    v_cmp(P(L, "ünïcödé dir/ПРИВЕТ МИР.txt"), d2, 70000);       /* ... and Cyrillic */
+    v_cmp(P(L, "日本語のファイル.txt"), d3, 10);
+
+    /* written by the driver, read by mtools */
+    v_put(P(L, "Ελληνικά.txt"), d1, 3000);
+    OK(vfs_mkdir(P(L, "Ñandú")));
+    v_put(P(L, "Ñandú/niño.txt"), d3, 10);
+    v_put(P(L, "😀 smile.txt"), d3, 10);                         /* surrogate pair on disk */
+    v_put(P(L, "中文文件名称很长很长很长很长很长很长.dat"), d2, 70000); /* several LFN slots */
+    EXPECT(vfs_open(P(L, "café.TXT"), VFS_O_WRITE | VFS_O_CREATE | VFS_O_EXCL, &(vfs_file_t *){0}), E_EXIST);
+    EXPECT(vfs_write_file(P(L, "bad\xFFname.txt"), d3, 10), E_INVAL);   /* not UTF-8 */
+    EXPECT(vfs_write_file(P(L, "bad\xC3.txt"), d3, 10), E_INVAL);
+    /* 255 UTF-16 units are fine (and 255 bytes of UTF-8 here), 256 are not */
+    char nm[300];
+    memset(nm, 'u', 255); nm[255] = 0;
+    char path[400];
+    snprintf(path, sizeof path, "%s", P(L, nm));
+    OK(vfs_write_file(path, d3, 10));
+    char nm2[300] = "é";                                        /* 2 bytes, 1 unit */
+    memset(nm2 + 2, 'v', 254); nm2[256] = 0;                     /* 255 units, 256 bytes */
+    snprintf(path, sizeof path, "%c:/%s", L, nm2);
+    CHECK(vfs_write_file(path, d3, 10) < 0, "a 256-byte name was accepted");
+    OK(vfs_rename(P(L, "Café.txt"), P(L, "Crème brûlée.txt")));
+    OK(vfs_rename(P(L, "Crème brûlée.txt"), P(L, "CRÈME BRÛLÉE.TXT")));  /* case only */
+    CHECK(v_listed(P(L, ""), "CRÈME BRÛLÉE.TXT", NULL), "Unicode case rename not visible");
+    CHECK(v_listed(P(L, ""), "😀 smile.txt", NULL), "emoji name not listed");
+    v_cmp(P(L, "😀 SMILE.txt"), d3, 10);
+    vfs_sync_all();
+    disk_detach(h);
+    fsck(im, tag);
+    CHECK(mt_listed(im, "", "Ελληνικά.txt"), "mtools: Greek name missing");
+    CHECK(mt_listed(im, "Ñandú", "niño.txt"), "mtools: Spanish names missing");
+    CHECK(mt_listed(im, "", "CRÈME BRÛLÉE.TXT"), "mtools: renamed file missing");
+    mt_cmp(im, "Ελληνικά.txt", d1, 3000);
+    mt_cmp(im, "Ñandú/niño.txt", d3, 10);
+    mt_cmp(im, "中文文件名称很长很长很长很长很长很长.dat", d2, 70000);
+    mt_cmp(im, "CRÈME BRÛLÉE.TXT", d1, 3000);
+    /* the emoji file: its short name is plain ASCII */
+    h = disk_attach(im, ss);
+    L = letter_of(h);
+    vfs_dirent_t de;
+    CHECK(L && v_listed(P(L, ""), "😀 smile.txt", &de), "emoji name lost after remount");
+    if (L) CHECK(de.short_name[0] && (u8)de.short_name[0] < 0x80, "short name of the emoji file: '%s'", de.short_name);
+    disk_detach(h);
+    free(d1); free(d2); free(d3);
+}
+
+static void t_utf8(void) {
+    printf("  utf8 helpers\n");
+    const char *s = "aé日😀";                       /* 1 + 2 + 3 + 4 bytes */
+    const char *p = s;
+    u32 c[5];
+    for (int i = 0; i < 5; i++) c[i] = utf8_next(&p);
+    CHECK(c[0] == 'a' && c[1] == 0xE9 && c[2] == 0x65E5 && c[3] == 0x1F600 && c[4] == 0, "decode %x %x %x %x", c[0], c[1], c[2], c[3]);
+    EXPECT(utf8_count(s, 100), 4);
+    EXPECT(utf8_count(s, 3), 2);
+    EXPECT(utf8_offset(s, 3), 6);
+    EXPECT(utf8_prev(s, 10), 6);
+    EXPECT(utf8_prev(s, 6), 3);
+    EXPECT(utf8_after(s, 10, 3), 6);
+    const char *latin1 = "caf\xE9!";                   /* not UTF-8: Latin-1 fallback */
+    p = latin1;
+    for (int i = 0; i < 5; i++) c[i] = utf8_next(&p);
+    CHECK(c[3] == 0xE9 && c[4] == '!', "latin-1 fallback %x %x", c[3], c[4]);
+    EXPECT(utf8_prev(latin1, 4), 3);
+    CHECK(!utf8_valid(latin1) && utf8_valid(s), "utf8_valid");
+    CHECK(!utf8_valid("\xC0\xAF") && !utf8_valid("\xED\xA0\x80") && !utf8_valid("\xF4\x90\x80\x80"), "overlong / surrogate / > 10FFFF accepted");
+    CHECK(!utf8_casecmp("ÄÖÜ straße ΣΟΦΊΑ привет", "äöü STRAßE σοφία ПРИВЕТ"), "casecmp");
+    CHECK(utf8_casecmp("a", "b") < 0 && utf8_casecmp("é", "f") > 0, "casecmp order");
+    u16 u[8];
+    EXPECT(utf8_to_utf16("😀x", u, 8), 3);
+    CHECK(u[0] == 0xD83D && u[1] == 0xDE00 && u[2] == 'x', "utf16 encode");
+    char o[16];
+    EXPECT(utf16_to_utf8(u, 3, o, sizeof o), 5);
+    CHECK(!strcmp(o, "😀x"), "utf16 round trip");
+    u16 lone[2] = { 0xDC00, 'a' };
+    EXPECT(utf16_to_utf8(lone, 2, o, sizeof o), -1);
+    EXPECT(utf16_to_utf8(u, 3, o, 5), -1);               /* does not fit */
+    CHECK(cp437_to_uc(0x82) == 0xE9 && cp437_to_uc(0xE1) == 0xDF, "cp437");
+}
+
+static void s_unicode(void) {
+    img_t im;
+    t_utf8();
+    img_mbr(&im, "unicode16.img", 16, 32, "UNI16", 0xCAFE0116);
+    t_unicode("fat16 unicode", &im, 512);
+    img_mbr(&im, "unicode32.img", 32, 64, "UNI32", 0xCAFE0132);
+    t_unicode("fat32 unicode", &im, 512);
+}
+
 static void s_fat16(void) {
     img_t im;
     img_mbr(&im, "fat16_read.img", 16, 32, "DATA16", 0xCAFE0016);
@@ -2105,7 +2216,7 @@ static void s_misc(void) {
 static const scen_t scenarios[] = {
     { "paths", s_paths }, { "fat12", s_fat12 }, { "fat16", s_fat16 }, { "fat32", s_fat32 },
     { "gpt", s_gpt }, { "4k", s_4k }, { "misc", s_misc }, { "random", s_random }, { "testdisks", s_testdisks },
-    { "hostile", s_hostile },
+    { "hostile", s_hostile }, { "unicode", s_unicode },
 };
 
 int main(int argc, char **argv) {
@@ -2115,6 +2226,7 @@ int main(int argc, char **argv) {
     }
     W = argv[1];
     setenv("MTOOLS_SKIP_CHECK", "1", 1);
+    setenv("LC_ALL", "C.UTF-8", 1);      /* mtools converts long names with the locale */
     setenv("MTOOLS_NO_VFAT", "", 1);
     unsetenv("MTOOLS_NO_VFAT");
     int first = 2;

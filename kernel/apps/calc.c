@@ -30,11 +30,11 @@ static const cbtn_t buttons[] = {
     { "MC", A_MC, 0, 0, 1, 1, K_MEM }, { "MR", A_MR, 1, 0, 1, 1, K_MEM }, { "MS", A_MS, 2, 0, 1, 1, K_MEM },
     { "M+", A_MPLUS, 3, 0, 1, 1, K_MEM }, { "M-", A_MMINUS, 4, 0, 1, 1, K_MEM },
     { "", A_BACK, 0, 1, 1, 1, K_CLEAR }, { "CE", A_CE, 1, 1, 1, 1, K_CLEAR }, { "C", A_C, 2, 1, 1, 1, K_CLEAR },
-    { "\xB1", A_NEG, 3, 1, 1, 1, K_FUNC }, { "", A_SQRT, 4, 1, 1, 1, K_FUNC },
+    { "±", A_NEG, 3, 1, 1, 1, K_FUNC }, { "", A_SQRT, 4, 1, 1, 1, K_FUNC },
     { "7", '7', 0, 2, 1, 1, K_DIGIT }, { "8", '8', 1, 2, 1, 1, K_DIGIT }, { "9", '9', 2, 2, 1, 1, K_DIGIT },
-    { "\xF7", '/', 3, 2, 1, 1, K_OP }, { "%", A_PCT, 4, 2, 1, 1, K_FUNC },
+    { "÷", '/', 3, 2, 1, 1, K_OP }, { "%", A_PCT, 4, 2, 1, 1, K_FUNC },
     { "4", '4', 0, 3, 1, 1, K_DIGIT }, { "5", '5', 1, 3, 1, 1, K_DIGIT }, { "6", '6', 2, 3, 1, 1, K_DIGIT },
-    { "\xD7", '*', 3, 3, 1, 1, K_OP }, { "1/x", A_RECIP, 4, 3, 1, 1, K_FUNC },
+    { "×", '*', 3, 3, 1, 1, K_OP }, { "1/x", A_RECIP, 4, 3, 1, 1, K_FUNC },
     { "1", '1', 0, 4, 1, 1, K_DIGIT }, { "2", '2', 1, 4, 1, 1, K_DIGIT }, { "3", '3', 2, 4, 1, 1, K_DIGIT },
     { "-", '-', 3, 4, 1, 1, K_OP }, { "=", '=', 4, 4, 1, 2, K_EQUALS },
     { "0", '0', 0, 5, 2, 1, K_DIGIT }, { ".", '.', 2, 5, 1, 1, K_DIGIT }, { "+", '+', 3, 5, 1, 1, K_OP },
@@ -144,7 +144,7 @@ static void set_result(calc_t *c, double v) {
 }
 
 static const char *op_text(int op) {
-    switch (op) { case '+': return "+"; case '-': return "-"; case '*': return "\xD7"; case '/': return "\xF7"; }
+    switch (op) { case '+': return "+"; case '-': return "-"; case '*': return "×"; case '/': return "÷"; }
     return "";
 }
 

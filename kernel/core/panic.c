@@ -1,6 +1,7 @@
 /* Halcyon OS - fatal error screen, drawn straight to the framebuffer */
 #include "kernel.h"
 #include "lib.h"
+#include "unicode.h"
 #include "fonts.h"
 
 static void fb_put(u32 x, u32 y, u32 rgb) {
@@ -22,11 +23,12 @@ static u32 mix(u32 a, u32 b, u32 t) {
 
 static int draw_text(const font_t *f, int x, int y, const char *s, u32 fg, u32 bg) {
     int x0 = x;
-    for (; *s; s++) {
-        if (*s == '\n') { x = x0; y += f->height + 2; continue; }
-        int c = (u8)*s;
-        if (c < f->first || c > f->last) c = '?';
-        const glyph_t *g = &f->glyphs[c - f->first];
+    while (*s) {
+        u32 c = utf8_next(&s);
+        if (c == '\n') { x = x0; y += f->height + 2; continue; }
+        const glyph_t *g = &f->glyphs['?' - 0x20];
+        for (int r = 0; r < f->nranges; r++)
+            if (c >= f->ranges[r].first && c <= f->ranges[r].last) { g = &f->glyphs[f->ranges[r].index + c - f->ranges[r].first]; break; }
         const u8 *bm = f->bitmap + g->off;
         for (int j = 0; j < g->h; j++)
             for (int i = 0; i < g->w; i++) {

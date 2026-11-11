@@ -54,7 +54,7 @@ static void console_start(void) {
     gc_t g = gc_for(g_screen);
     gfx_fill(&g, mkrect(0, 0, screen_w(), screen_h()), HEX(0x000000));
     screen_present(mkrect(0, 0, screen_w(), screen_h()));
-    con_cw = font_mono.glyphs['M' - font_mono.first].adv;
+    con_cw = gfx_char_width(&font_mono, 'M');
     con_lh = font_mono.height;
     con_cols = (screen_w() - 8) / con_cw;
     con_rows = (screen_h() - CON_TOP - 4) / con_lh;

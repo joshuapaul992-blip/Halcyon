@@ -19,7 +19,7 @@
 # clang with the libFuzzer runtime (libclang-rt-18-dev) for fuzz / fuzz-run.
 ROOT    := ../..
 OUT     ?= $(ROOT)/build/hosttest
-KSRCS   := $(ROOT)/kernel/fs/block.c $(ROOT)/kernel/fs/vfs.c $(ROOT)/kernel/fs/fat.c shim.c
+KSRCS   := $(ROOT)/kernel/fs/block.c $(ROOT)/kernel/fs/vfs.c $(ROOT)/kernel/fs/fat.c $(ROOT)/kernel/core/unicode.c shim.c
 SRCS    := $(KSRCS) fstest.c fuzz_fs.c
 HDRS    := $(wildcard $(ROOT)/kernel/fs/*.h) $(wildcard $(ROOT)/kernel/core/*.h) fuzz_fs.h
 WARN    := -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \

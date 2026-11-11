@@ -21,6 +21,7 @@
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
+#include "core/unicode.h"
 #include "fs/block.h"
 #include "fs/vfs.h"
 #include "fs/fat.h"
@@ -547,22 +548,24 @@ static const u8 lfn_pos[13] = { 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
  * than one path component (or name a drive) */
 static int name_char_bad(u32 c) { return c < 0x20 || c == '/' || c == '\\' || c == ':'; }
 
+/* one short-name byte: sname gets it as stored ('_' for OEM characters, so
+ * it stays ASCII), the display name gets it as UTF-8 (code page 437) */
+static void short_char_out(u8 c, int lower, char *sname, int *n, char *disp, int *m) {
+    if (name_char_bad(c)) c = '_';
+    sname[(*n)++] = c >= 0x80 ? '_' : (char)c;
+    if (c >= 0x80) *m += utf8_put(cp437_to_uc(c), disp + *m);
+    else disp[(*m)++] = (char)(lower ? tolower(c) : c);
+}
+
 static void short_display(const u8 *de, char *sname, char *disp) {
     int n = 0, m = 0;
     u8 nt = de[12];
-    for (int i = 0; i < 8 && de[i] != ' '; i++) {
-        char c = (char)(i == 0 && de[0] == 0x05 ? 0xE5 : name_char_bad(de[i]) ? '_' : de[i]);
-        sname[n++] = c;
-        disp[m++] = (char)((nt & 0x08) ? tolower(c) : c);
-    }
+    for (int i = 0; i < 8 && de[i] != ' '; i++)
+        short_char_out(i == 0 && de[0] == 0x05 ? 0xE5 : de[i], nt & 0x08, sname, &n, disp, &m);
     if (!n) { sname[n++] = '_'; disp[m++] = '_'; }     /* corrupt: blank base name */
     if (de[8] != ' ') {
         sname[n++] = '.'; disp[m++] = '.';
-        for (int i = 8; i < 11 && de[i] != ' '; i++) {
-            char c = (char)(name_char_bad(de[i]) ? '_' : de[i]);
-            sname[n++] = c;
-            disp[m++] = (char)((nt & 0x10) ? tolower(c) : c);
-        }
+        for (int i = 8; i < 11 && de[i] != ' '; i++) short_char_out(de[i], nt & 0x10, sname, &n, disp, &m);
     }
     sname[n] = 0;
     disp[m] = 0;
@@ -618,15 +621,19 @@ static int dir_scan(fat_t *f, u32 dir, scan_cb cb, void *ctx, fent_t *e) {
             short_display(p, e->sname, e->name);
             e->has_lfn = 0;
             if (lfn_ok && lfn_expect == 1 && lfn_checksum(p) == lfn_chk && !e->is_dot) {
+                /* UTF-16 -> UTF-8; names that do not convert (unpaired
+                 * surrogates, control characters, > 255 bytes) or that hold
+                 * path characters fall back to the short name */
                 char tmp[VFS_MAX_NAME + 1];
-                int n = 0, bad = 0, dots = 0;
-                for (int i = 0; i < LFN_MAX_SLOTS * 13 && lfn[i] && lfn[i] != 0xFFFF; i++) {
-                    if (lfn[i] >= 0x80 || n >= VFS_MAX_NAME || name_char_bad(lfn[i])) { bad = 1; break; }
-                    dots += lfn[i] == '.';
-                    tmp[n++] = (char)lfn[i];
+                int units = 0, bad = 0, dots = 0;
+                while (units < LFN_MAX_SLOTS * 13 && lfn[units] && lfn[units] != 0xFFFF) units++;
+                int n = utf16_to_utf8(lfn, units, tmp, sizeof tmp);
+                if (n < 0) { bad = 1; n = 0; }
+                for (int i = 0; i < n; i++) {
+                    if (name_char_bad((u8)tmp[i])) bad = 1;
+                    dots += tmp[i] == '.';
                 }
                 if (dots == n) bad = 1;          /* "", ".", "..": not a usable name */
-                tmp[n] = 0;
                 if (!bad && n) {
                     memcpy(e->name, tmp, n + 1);
                     e->has_lfn = 1;
@@ -656,7 +663,7 @@ static int dir_scan(fat_t *f, u32 dir, scan_cb cb, void *ctx, fent_t *e) {
 static int lookup_cb(fat_t *f, fent_t *e, void *ctx) {
     const char *name = ctx;
     if (e->is_dot) return 0;
-    return !strcasecmp(e->name, name) || !strcasecmp(e->sname, name);
+    return !utf8_casecmp(e->name, name) || !strcasecmp(e->sname, name);
 }
 
 /* find name in dir: 0 = found (in *e), E_NOENT, or error */
@@ -685,8 +692,12 @@ static int name_valid(const char *n) {
     if (len > VFS_MAX_NAME) return E_NAMETOOLONG;
     for (size_t i = 0; i < len; i++) {
         u8 c = (u8)n[i];
-        if (c < 0x20 || c >= 0x7F || strchr("\"*/:<>?\\|", c)) return E_INVAL;
+        if (c < 0x20 || c == 0x7F || (c < 0x80 && strchr("\"*/:<>?\\|", c))) return E_INVAL;
     }
+    /* UTF-8, at most 255 UTF-16 units in the long name */
+    u16 tmp[VFS_MAX_NAME + 1];
+    if (!utf8_valid(n)) return E_INVAL;
+    if (utf8_to_utf16(n, tmp, VFS_MAX_NAME) < 0) return E_NAMETOOLONG;
     return 0;
 }
 
@@ -723,15 +734,18 @@ static int basis_name(const char *n, u8 *out, int *blen) {
     const char *s = n;
     while (*s == '.' || *s == ' ') { s++; lossy = 1; }
     const char *dot = strrchr(s, '.');
-    for (const char *p = s; *p && p != dot; p++) {
-        int c = toupper((u8)*p);
+    /* one '_' per non-ASCII character (no OEM code page conversion) */
+    for (const char *p = s; *p && p != dot;) {
+        u32 u = utf8_next(&p);
+        int c = u < 0x80 ? toupper((int)u) : '_';
         if (c == ' ' || c == '.') { lossy = 1; continue; }
         if (!short_char(c)) { c = '_'; lossy = 1; }
         if (bi < 8) out[bi++] = (u8)c; else lossy = 1;
     }
     if (dot) {
-        for (const char *p = dot + 1; *p; p++) {
-            int c = toupper((u8)*p);
+        for (const char *p = dot + 1; *p;) {
+            u32 u = utf8_next(&p);
+            int c = u < 0x80 ? toupper((int)u) : '_';
             if (c == ' ') { lossy = 1; continue; }
             if (!short_char(c)) { c = '_'; lossy = 1; }
             if (ei < 3) out[8 + ei++] = (u8)c; else lossy = 1;
@@ -877,7 +891,9 @@ static int dir_add(fat_t *f, u32 dir, const char *name, const u8 *tmpl, u32 *ose
     int need_lfn;
     int r = make_short(f, dir, name, sn, &need_lfn);
     if (r) return r;
-    int len = (int)strlen(name);
+    u16 uname[VFS_MAX_NAME + 1];
+    int len = utf8_to_utf16(name, uname, VFS_MAX_NAME);
+    if (len < 0) return E_NAMETOOLONG;
     int nlfn = need_lfn ? (len + 12) / 13 : 0;
     int need = nlfn + 1;
     u32 ssec[LFN_MAX_SLOTS + 1];
@@ -930,7 +946,7 @@ static int dir_add(fat_t *f, u32 dir, const char *name, const u8 *tmpl, u32 *ose
         p[13] = chk;
         for (int i = 0; i < 13; i++) {
             int ci = (ord - 1) * 13 + i;
-            u16 ch = ci < len ? (u8)name[ci] : ci == len ? 0 : 0xFFFF;
+            u16 ch = ci < len ? uname[ci] : ci == len ? 0 : 0xFFFF;
             wr16(p + lfn_pos[i], ch);
         }
         c->dirty = 1;

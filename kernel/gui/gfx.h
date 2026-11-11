@@ -67,10 +67,11 @@ void gfx_icon_alpha(gc_t *g, int x, int y, const icon_t *ic, int alpha);
 
 /* text */
 int  gfx_text(gc_t *g, const font_t *f, int x, int y, const char *s, color_t c);       /* returns end x */
-int  gfx_text_n(gc_t *g, const font_t *f, int x, int y, const char *s, int n, color_t c);
+int  gfx_text_n(gc_t *g, const font_t *f, int x, int y, const char *s, int n, color_t c);   /* text is UTF-8, n in bytes */
 int  gfx_text_width(const font_t *f, const char *s);
 int  gfx_text_width_n(const font_t *f, const char *s, int n);
-int  gfx_char_width(const font_t *f, char c);
+int  gfx_char_width(const font_t *f, u32 codepoint);
+int  gfx_text_fit(const font_t *f, const char *s, int width);   /* bytes (whole UTF-8 characters) that fit */
 /* draw text in a box: align 0 left, 1 center, 2 right; vertically centered;
  * truncated with "..." when it doesn't fit */
 void gfx_text_box(gc_t *g, const font_t *f, rect_t r, const char *s, color_t c, int align);

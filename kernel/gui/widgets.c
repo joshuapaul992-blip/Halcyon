@@ -1,6 +1,7 @@
 /* Halcyon OS - widgets: buttons, labels, text boxes, check boxes, list boxes */
 #include "wm.h"
 #include "core/lib.h"
+#include "core/unicode.h"
 #include "core/mm.h"
 
 #define LIST_ROW 18
@@ -266,20 +267,28 @@ static int textbox_key(window_t *w, widget_t *wd, input_event_t *k) {
     int shift = k->mods & MOD_SHIFT;
     int ro = wd->style & WS_READONLY;
     switch (k->key) {
-    case KEY_LEFT: if (wd->cursor > 0) wd->cursor--; if (!shift) wd->sel_anchor = wd->cursor; break;
-    case KEY_RIGHT: if (wd->cursor < len) wd->cursor++; if (!shift) wd->sel_anchor = wd->cursor; break;
+    /* the text is UTF-8: move and delete whole characters */
+    case KEY_LEFT: if (wd->cursor > 0) wd->cursor = utf8_prev(wd->text, wd->cursor); if (!shift) wd->sel_anchor = wd->cursor; break;
+    case KEY_RIGHT: if (wd->cursor < len) wd->cursor = utf8_after(wd->text, len, wd->cursor); if (!shift) wd->sel_anchor = wd->cursor; break;
     case KEY_HOME: wd->cursor = 0; if (!shift) wd->sel_anchor = 0; break;
     case KEY_END: wd->cursor = len; if (!shift) wd->sel_anchor = len; break;
     case KEY_BACKSPACE:
         if (ro) break;
         if (wd->cursor != wd->sel_anchor) textbox_delete_sel(wd);
-        else if (wd->cursor > 0) { memmove(wd->text + wd->cursor - 1, wd->text + wd->cursor, len - wd->cursor + 1); wd->cursor--; wd->sel_anchor = wd->cursor; }
+        else if (wd->cursor > 0) {
+            int p = utf8_prev(wd->text, wd->cursor);
+            memmove(wd->text + p, wd->text + wd->cursor, len - wd->cursor + 1);
+            wd->cursor = wd->sel_anchor = p;
+        }
         if (wd->on_change) wd->on_change(w, wd);
         break;
     case KEY_DELETE:
         if (ro) break;
         if (wd->cursor != wd->sel_anchor) textbox_delete_sel(wd);
-        else if (wd->cursor < len) memmove(wd->text + wd->cursor, wd->text + wd->cursor + 1, len - wd->cursor);
+        else if (wd->cursor < len) {
+            int nx = utf8_after(wd->text, len, wd->cursor);
+            memmove(wd->text + wd->cursor, wd->text + nx, len - nx + 1);
+        }
         if (wd->on_change) wd->on_change(w, wd);
         break;
     default:
@@ -323,10 +332,13 @@ static int textbox_key(window_t *w, widget_t *wd, input_event_t *k) {
 static int textbox_pos(widget_t *wd, int x) {
     int rel = x - wd->r.x - 3 + wd->scroll;
     int n = (int)strlen(wd->text), acc = 0;
-    for (int i = 0; i < n; i++) {
-        int cw = gfx_char_width(&font_ui, (wd->style & WS_PASSWORD) ? '*' : wd->text[i]);
+    for (int i = 0; i < n;) {
+        int i2 = i;
+        u32 cp = utf8_get(wd->text, n, &i2);
+        int cw = gfx_char_width(&font_ui, (wd->style & WS_PASSWORD) ? '*' : cp);
         if (rel < acc + cw / 2) return i;
         acc += cw;
+        i = i2;
     }
     return n;
 }

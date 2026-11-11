@@ -23,6 +23,7 @@ dd if=$BUILD/boot/stage2.bin of="$IMG.tmp" bs=512 seek=1 conv=notrunc 2>/dev/nul
 dd if=/dev/zero of="$PART" bs=512 count=0 seek=$PART_SECTORS 2>/dev/null
 mkfs.fat -F 32 -s 1 -h $PART_START -n HALCYON "$PART" >/dev/null
 export MTOOLS_SKIP_CHECK=1
+export LC_ALL=C.UTF-8   # long names in rootfs/ are UTF-8
 mmd -i "$PART" ::/HALCYON ::/EFI ::/EFI/BOOT
 mcopy -i "$PART" $BUILD/KERNEL.BIN ::/HALCYON/KERNEL.BIN
 if [ -f $BUILD/efi/BOOTX64.EFI ]; then

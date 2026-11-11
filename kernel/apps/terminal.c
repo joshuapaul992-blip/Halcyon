@@ -1,6 +1,7 @@
 /* Halcyon OS - Command Prompt: terminal window + DOS-style shell */
 #include "gui/wm.h"
 #include "core/lib.h"
+#include "core/unicode.h"
 #include "core/irq.h"
 #include "core/mm.h"
 #include "core/kernel.h"
@@ -39,7 +40,7 @@ static const u32 palette[16] = {
     0x808080, 0x0000FF, 0x00FF00, 0x00FFFF, 0xFF0000, 0xFF00FF, 0xFFFF00, 0xFFFFFF,
 };
 
-static int cw(void) { return font_mono.glyphs['M' - font_mono.first].adv; }
+static int cw(void) { return gfx_char_width(&font_mono, 'M'); }
 static int chh(void) { return font_mono.height + 1; }
 
 /* ---------------- output ---------------- */
@@ -69,7 +70,10 @@ static void tputc(term_t *t, char c) {
     if (c == '\n') { push_line(t); return; }
     if (c == '\r') return;
     if (c == '\t') { do tputc(t, ' '); while (t->curlen % 8); return; }
-    if (t->curlen >= MAX(10, t->cols) || t->curlen >= LINE_MAX - 1) push_line(t);
+    /* wrap by characters (UTF-8): only before the first byte of one */
+    int lead = ((u8)c & 0xC0) != 0x80;
+    if (t->curlen >= LINE_MAX - 1 ||
+        (lead && t->curlen >= MAX(10, t->cols) && utf8_count(t->cur, t->curlen) >= MAX(10, t->cols))) push_line(t);
     t->cur[t->curlen++] = c;
 }
 static void tputs(term_t *t, const char *s) { while (*s) tputc(t, *s++); }
@@ -185,9 +189,14 @@ static void cmd_dir(term_t *t, int argc, char **argv) {
         if (!wild_match(pat, e->name) && !wild_match(pat, e->short_name)) continue;
         if (e->is_dir) dirs++; else { files++; bytes += e->size; }
         if (wide) {
-            char nm[40];
+            /* 18 columns: truncate and pad by characters, not bytes */
+            char nm[VFS_MAX_NAME + 3], cell[96];
             snprintf(nm, sizeof nm, e->is_dir ? "[%s]" : "%s", e->name);
-            tprintf(t, "%-18.18s", nm);
+            int nb = utf8_offset(nm, 18), nc = utf8_count(nm, nb);
+            memcpy(cell, nm, nb);
+            while (nc < 18) { cell[nb++] = ' '; nc++; }
+            cell[nb] = 0;
+            tputs(t, cell);
             if (++col == MAX(1, (t->cols - 1) / 18)) { tputc(t, '\n'); col = 0; }
             continue;
         }
@@ -580,8 +589,8 @@ static void term_layout(term_t *t) {
 static int total_rows(term_t *t) {
     char p[VFS_MAX_PATH + 4];
     prompt_str(t, p, sizeof p);
-    int ilen = (int)strlen(p) + t->inlen + 1;
-    return t->nlines + MAX(1, (t->curlen + ilen + t->cols - 1) / t->cols);
+    int ilen = utf8_count(p, 1 << 30) + utf8_count(t->input, t->inlen) + 1;
+    return t->nlines + MAX(1, (utf8_count(t->cur, t->curlen) + ilen + t->cols - 1) / t->cols);
 }
 
 static void term_paint(window_t *w, gc_t *g) {
@@ -596,7 +605,8 @@ static void term_paint(window_t *w, gc_t *g) {
     char tail[LINE_MAX * 3];
     snprintf(tail, sizeof tail, "%.*s%s%.*s", t->curlen, t->cur, p, t->inlen, t->input);
     int tail_len = (int)strlen(tail);
-    int tail_rows = MAX(1, (tail_len + 1 + t->cols - 1) / t->cols);
+    int tail_chars = utf8_count(tail, tail_len);
+    int tail_rows = MAX(1, (tail_chars + 1 + t->cols - 1) / t->cols);
     int total = t->nlines + tail_rows;
     int first = MAX(0, total - t->rows - t->scroll);
     gc_t sub = gc_sub(g, mkrect(4, 3, area.w - 4, area.h - 3));
@@ -606,10 +616,10 @@ static void term_paint(window_t *w, gc_t *g) {
         if (idx < t->nlines) gfx_text(&sub, &font_mono, 0, y, t->lines[idx], fg);
         else if (idx < total) {
             int tr = idx - t->nlines;
-            int off = tr * t->cols;
-            if (off < tail_len) gfx_text_n(&sub, &font_mono, 0, y, tail + off, t->cols, fg);
-            /* caret */
-            int cpos = t->curlen + (int)strlen(p) + t->incur;
+            int off = utf8_offset(tail, tr * t->cols);
+            if (off < tail_len) gfx_text_n(&sub, &font_mono, 0, y, tail + off, utf8_offset(tail + off, t->cols), fg);
+            /* caret (in characters) */
+            int cpos = utf8_count(t->cur, t->curlen) + utf8_count(p, 1 << 30) + utf8_count(t->input, t->incur);
             if (cpos / t->cols == tr && t->caret_on && wm_active() == w && !t->scroll)
                 gfx_fill(&sub, mkrect((cpos % t->cols) * cw(), y + chh() - 3, cw(), 2), fg);
         }
@@ -727,13 +737,21 @@ static void term_event(window_t *w, gui_event_t *e) {
     switch (k->key) {
     case KEY_ENTER: case KEY_KP_ENTER: term_submit(t); break;
     case KEY_BACKSPACE:
-        if (t->incur > 0) { memmove(t->input + t->incur - 1, t->input + t->incur, t->inlen - t->incur); t->incur--; t->inlen--; }
+        if (t->incur > 0) {
+            int pv = utf8_prev(t->input, t->incur);
+            memmove(t->input + pv, t->input + t->incur, t->inlen - t->incur);
+            t->inlen -= t->incur - pv; t->incur = pv;
+        }
         break;
     case KEY_DELETE:
-        if (t->incur < t->inlen) { memmove(t->input + t->incur, t->input + t->incur + 1, t->inlen - t->incur - 1); t->inlen--; }
+        if (t->incur < t->inlen) {
+            int nx = utf8_after(t->input, t->inlen, t->incur);
+            memmove(t->input + t->incur, t->input + nx, t->inlen - nx);
+            t->inlen -= nx - t->incur;
+        }
         break;
-    case KEY_LEFT: if (t->incur > 0) t->incur--; break;
-    case KEY_RIGHT: if (t->incur < t->inlen) t->incur++; break;
+    case KEY_LEFT: if (t->incur > 0) t->incur = utf8_prev(t->input, t->incur); break;
+    case KEY_RIGHT: if (t->incur < t->inlen) t->incur = utf8_after(t->input, t->inlen, t->incur); break;
     case KEY_HOME: t->incur = 0; break;
     case KEY_END: t->incur = t->inlen; break;
     case KEY_ESC: t->inlen = t->incur = 0; break;

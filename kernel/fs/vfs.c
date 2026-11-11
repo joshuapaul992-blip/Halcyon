@@ -1,6 +1,7 @@
 /* Halcyon OS - virtual file system: drive letters, paths, file handles */
 #include "core/types.h"
 #include "core/lib.h"
+#include "core/unicode.h"
 #include "core/mm.h"
 #include "core/kernel.h"
 #include "fs/block.h"
@@ -381,7 +382,7 @@ int vfs_copy(const char *from, const char *to) {
     if (isdir) return E_ISDIR;
     char nf[VFS_MAX_PATH + 1], nt[VFS_MAX_PATH + 1];
     if (vfs_normalize(from, nf, sizeof nf) || vfs_normalize(to, nt, sizeof nt)) return E_INVAL;
-    if (!strcasecmp(nf, nt)) return E_EXIST;
+    if (!utf8_casecmp(nf, nt)) return E_EXIST;
     vfs_file_t *in = NULL, *out = NULL;
     u8 *buf = kmalloc(COPY_BUF);
     if (!buf) return E_NOMEM;
