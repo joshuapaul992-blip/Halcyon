@@ -11,6 +11,7 @@
 #include "fs/vfs.h"
 #include "fs/block.h"
 #include "gui/wm.h"
+#include "apps/fileops.h"
 
 struct sysframe {
     u64 r15, r14, r13, r12, rbp, rbx, r9, r8, r10, rdx, rsi, rdi, rax, rip, rflags, rsp;
@@ -262,6 +263,24 @@ static long sys_eject(u64 letter) {
     return ahci_cd_eject(v->bd);
 }
 
+static long sys_volume_info(u64 letter, u64 uinfo) {
+    volume_t *v = vfs_volume_by_letter((char)toupper((int)(letter & 0x7F)));
+    if (!v) return E_NOENT;
+    hal_volinfo_t vi;
+    memset(&vi, 0, sizeof vi);
+    vi.letter = v->letter;
+    int ic = drive_icon(v);
+    vi.kind = ic == ICON_USBDRIVE ? VOL_REMOVABLE : ic == ICON_CDROM ? VOL_CDROM : ic == ICON_FLOPPY ? VOL_FLOPPY : VOL_HDD;
+    vi.is_boot = (char)v->is_boot;
+    vi.readonly = (char)(v->bd && v->bd->readonly);
+    strlcpy(vi.label, v->label, sizeof vi.label);
+    strlcpy(vi.fs, v->fs_name, sizeof vi.fs);
+    if (v->bd) strlcpy(vi.device, v->bd->name, sizeof vi.device);
+    u64 total = 0, freeb = 0;
+    if (!vfs_statfs(v->letter, &total, &freeb)) { vi.total = total; vi.free_bytes = freeb; }
+    return copyout(uinfo, &vi, sizeof vi) ? E_INVAL : 0;
+}
+
 static long sys_volumes(u64 ubuf, int max) {
     /* "C:FAT32:HALCYON\n..." */
     char buf[1024];
@@ -335,6 +354,15 @@ void syscall_dispatch(struct sysframe *f) {
     case SYS_SHELL_OPEN: r = sys_shell_open(p, a1); break;
     case SYS_SHELL_FORMAT: r = sys_shell_format(a1); break;
     case SYS_EJECT: r = sys_eject(a1); break;
+    case SYS_DATETIME: {
+        struct rtc_time tm;
+        rtc_read(&tm);
+        hal_datetime_t d = { tm.year, tm.month, tm.day, tm.hour, tm.minute, tm.second, tm.weekday };
+        r = copyout(a1, &d, sizeof d) ? E_INVAL : 0;
+        break;
+    }
+    case SYS_VOLUME_INFO: r = sys_volume_info(a1, a2); break;
+    case SYS_VFS_GENERATION: r = vfs_generation(); break;
     case SYS_PROCLIST: r = sys_proclist(a1, (int)MIN(a2, 256)); break;
     case SYS_SYSINFO: r = sys_sysinfo(a1); break;
 

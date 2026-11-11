@@ -91,6 +91,12 @@ static inline int shm_open(const char *name, size_t size, int flags) { return (i
 void *shm_map(int h, size_t *size);                  /* NULL on error; close() the handle when done */
 static inline int shm_unmap(void *p) { return (int)SC1(SYS_SHM_UNMAP, p); }
 
+/* ---- clock and volumes ---- */
+static inline int datetime(hal_datetime_t *d) { return (int)SC1(SYS_DATETIME, d); }
+static inline int volume_info(char drive, hal_volinfo_t *vi) { return (int)SC2(SYS_VOLUME_INFO, drive, vi); }
+/* changes whenever a volume is mounted or removed (poll it to refresh drive lists) */
+static inline unsigned vfs_generation(void) { return (unsigned)SC0(SYS_VFS_GENERATION); }
+
 /* ---- the shell ---- */
 static inline int shell_open(const char *path) { return (int)SC1(SYS_SHELL_OPEN, path); }   /* like a double click */
 static inline int shell_format(char drive) { return (int)SC1(SYS_SHELL_FORMAT, drive); }    /* the user decides in it */

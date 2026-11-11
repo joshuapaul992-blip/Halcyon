@@ -194,6 +194,13 @@ int main(int argc, char **argv) {
     }
     CHECK(shm_open("selftest.none", 0, 0) == E_NOENT, "missing shared memory");
 
+    hal_datetime_t dt;
+    CHECK(datetime(&dt) == 0 && dt.year >= 2000 && dt.month >= 1 && dt.month <= 12, "date %d-%d-%d", dt.year, dt.month, dt.day);
+    hal_volinfo_t vi;
+    CHECK(volume_info('C', &vi) == 0 && vi.letter == 'C' && vi.is_boot && vi.total > vi.free_bytes && vi.free_bytes > 0,
+          "volume info C: %s %llu/%llu", vi.fs, vi.free_bytes, vi.total);
+    CHECK(volume_info('Q', &vi) == E_NOENT, "missing volume");
+
     hal_procinfo_t pl[32];
     int np = proclist(pl, 32);
     int me = 0;

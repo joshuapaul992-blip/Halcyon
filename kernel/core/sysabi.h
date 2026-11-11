@@ -45,6 +45,7 @@ enum {
      *   100-139 sockets and poll (net/)
      *   160     SYS_WIN_CANVAS: the window's pixels mapped into the program */
     SYS_WIN_CANVAS = 160,
+    SYS_DATETIME = 161, SYS_VOLUME_INFO, SYS_VFS_GENERATION,
     SYS_COUNT = 170
 };
 
@@ -58,6 +59,21 @@ typedef struct hal_canvas {
     unsigned int *pixels;
     int w, h, stride;
 } hal_canvas_t;
+
+/* SYS_DATETIME: local time from the real-time clock */
+typedef struct hal_datetime {
+    int year, month, day, hour, minute, second, weekday;   /* weekday 0 = Sunday */
+} hal_datetime_t;
+
+/* SYS_VOLUME_INFO */
+enum { VOL_HDD = 0, VOL_REMOVABLE, VOL_CDROM, VOL_FLOPPY };
+typedef struct hal_volinfo {
+    char letter, kind, is_boot, readonly;
+    char label[16];
+    char fs[8];               /* "FAT32", "exFAT", "ISO9660" */
+    char device[16];          /* "sata0p1", "usb0", "cd0" */
+    unsigned long long total, free_bytes;
+} hal_volinfo_t;
 
 /* SYS_OPEN flags */
 #define O_READ   0x01
