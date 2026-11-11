@@ -34,7 +34,6 @@
 #define ICON_CALC 16         /* the kernel's ICON_CALC (build/gen/icons.h) */
 
 /* key codes (USB HID usages, kernel/drivers/input.h) */
-#define KEY_A 0x04
 #define KEY_ENTER 0x28
 #define KEY_ESC 0x29
 #define KEY_BACKSPACE 0x2A
@@ -43,6 +42,7 @@
 #define KEY_DELETE 0x4C
 #define KEY_KP_ENTER 0x58
 #define MOD_CTRL 0x01
+#define MOD_ALT 0x04
 #define MOUSE_LEFT 0x01
 
 /* ================= drawing into a private pixel buffer ================= */
@@ -680,15 +680,16 @@ static int handle(hal_event_t *e) {
     case EVT_KEY: {
         if (!e->pressed) return 0;
         int a = 0;
-        if (e->mods & MOD_CTRL) {
-            switch (e->id) {
-            case KEY_A + 2: calc_copy(); return 0;        /* ^C */
-            case KEY_A + 21: calc_paste(); return 1;      /* ^V */
-            case KEY_A + 11: a = A_MC; break;             /* ^L */
-            case KEY_A + 17: a = A_MR; break;             /* ^R */
-            case KEY_A + 12: a = A_MS; break;             /* ^M */
-            case KEY_A + 15: a = A_MPLUS; break;          /* ^P */
-            case KEY_A + 16: a = A_MMINUS; break;         /* ^Q */
+        if ((e->mods & (MOD_CTRL | MOD_ALT)) == MOD_CTRL) {
+            /* shortcuts by the key's letter on the keyboard layout (e->vk) */
+            switch (e->vk) {
+            case 'C': calc_copy(); return 0;
+            case 'V': calc_paste(); return 1;
+            case 'L': a = A_MC; break;
+            case 'R': a = A_MR; break;
+            case 'M': a = A_MS; break;
+            case 'P': a = A_MPLUS; break;
+            case 'Q': a = A_MMINUS; break;
             default: return 0;
             }
         } else if (e->id == KEY_ENTER || e->id == KEY_KP_ENTER) a = '=';

@@ -419,19 +419,20 @@ static void np_event(window_t *w, gui_event_t *e) {
     }
     input_event_t *k = &e->key;
     if (!k->pressed) return;
-    int shift = k->mods & MOD_SHIFT, ctrl = k->mods & MOD_CTRL;
+    /* Ctrl+Alt is AltGr when the key types a character */
+    int shift = k->mods & MOD_SHIFT, ctrl = (k->mods & MOD_CTRL) && !key_is_text(k);
     int l = line_of(n, n->cur);
     int moved = 1, keep_pref = 0;
     if (ctrl) {
+        if (key_shortcut(k, 'N')) { np_menu(w, NP_NEW); return; }
+        if (key_shortcut(k, 'O')) { np_menu(w, NP_OPEN); return; }
+        if (key_shortcut(k, 'S')) { np_menu(w, NP_SAVE); return; }
+        if (key_shortcut(k, 'F')) { np_menu(w, NP_FIND); return; }
+        if (key_shortcut(k, 'A')) { np_menu(w, NP_SELALL); return; }
+        if (key_shortcut(k, 'C')) { np_menu(w, NP_COPY); return; }
+        if (key_shortcut(k, 'X')) { np_menu(w, NP_CUT); return; }
+        if (key_shortcut(k, 'V')) { np_menu(w, NP_PASTE); return; }
         switch (k->key) {
-        case KEY_A + 13: np_menu(w, NP_NEW); return;          /* ^N */
-        case KEY_A + 14: np_menu(w, NP_OPEN); return;         /* ^O */
-        case KEY_A + 18: np_menu(w, NP_SAVE); return;         /* ^S */
-        case KEY_A + 5: np_menu(w, NP_FIND); return;          /* ^F */
-        case KEY_A: np_menu(w, NP_SELALL); return;
-        case KEY_A + 2: np_menu(w, NP_COPY); return;
-        case KEY_A + 23: np_menu(w, NP_CUT); return;
-        case KEY_A + 21: np_menu(w, NP_PASTE); return;
         case KEY_HOME: n->cur = 0; break;
         case KEY_END: n->cur = n->len; break;
         case KEY_LEFT:
@@ -481,7 +482,7 @@ static void np_event(window_t *w, gui_event_t *e) {
         case KEY_F5: np_menu(w, NP_TIME); return;
         case KEY_ESC: return;
         default:
-            if ((u8)k->ch >= 32 && k->ch != 127) { insert(n, &k->ch, 1); moved = 0; }
+            if (key_is_text(k)) { char u[4]; insert(n, u, utf8_put(k->ch, u)); moved = 0; }
             else return;
         }
     }

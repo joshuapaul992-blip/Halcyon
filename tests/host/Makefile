@@ -2,9 +2,11 @@
 # host compiler against a small libc shim, run against real FAT and exFAT
 # images (exFAT results are cross-checked with exfat_tool.py, an independent
 # Python implementation, and fsck.exfat) and ISO 9660 images (isotest.c,
-# built with xorriso).
+# built with xorriso). Also the keyboard layouts (kbdtest.c: kernel/drivers/
+# keymap.c and keylayouts.c).
 #
-#   tests/host/run.sh            (== make -C tests/host test)
+#   tests/host/run.sh            (== make -C tests/host kbd test)
+#   make -C tests/host kbd       keyboard layouts only
 #                                includes the "hostile" scenario: corrupted
 #                                partition tables / FAT / exFAT volumes and the
 #                                minimized fuzzer crash inputs (fuzz_regress/)
@@ -39,7 +41,16 @@ FUZZ_ARGS ?=
 CORPUS  := $(OUT)/fuzz_corpus
 SEEDS   := $(OUT)/fuzz_seeds
 
-all: $(OUT)/fstest $(OUT)/fuzz_replay
+KBD_SRCS := kbdtest.c $(ROOT)/kernel/drivers/keymap.c $(ROOT)/kernel/drivers/keylayouts.c $(ROOT)/kernel/core/unicode.c
+
+all: $(OUT)/fstest $(OUT)/fuzz_replay $(OUT)/kbdtest
+
+$(OUT)/kbdtest: $(KBD_SRCS) $(ROOT)/kernel/drivers/keymap.h $(ROOT)/kernel/drivers/input.h Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) $(KBD_SRCS) -o $@
+
+kbd: $(OUT)/kbdtest
+	$(OUT)/kbdtest
 
 $(OUT)/fstest: $(SRCS) isotest.c $(HDRS) Makefile
 	@mkdir -p $(OUT)
@@ -87,4 +98,4 @@ fuzz-run: $(OUT)/fuzz_fs seeds
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all test seeds fuzz fuzz-run fuzz-regress clean
+.PHONY: all kbd test seeds fuzz fuzz-run fuzz-regress clean

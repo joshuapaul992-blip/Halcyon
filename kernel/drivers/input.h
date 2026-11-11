@@ -14,6 +14,11 @@ enum {
     KEY_RIGHT = 0x4F, KEY_LEFT = 0x50, KEY_DOWN = 0x51, KEY_UP = 0x52, KEY_NUMLOCK = 0x53,
     KEY_KP_SLASH = 0x54, KEY_KP_STAR = 0x55, KEY_KP_MINUS = 0x56, KEY_KP_PLUS = 0x57, KEY_KP_ENTER = 0x58,
     KEY_KP_1 = 0x59, KEY_KP_0 = 0x62, KEY_KP_DOT = 0x63, KEY_NONUS_BSLASH = 0x64, KEY_MENU = 0x65,
+    KEY_NONUS_HASH = 0x32,          /* ISO key left of Enter (PS/2: the same scancode as \|) */
+    KEY_KP_EQUAL = 0x67,
+    KEY_KP_COMMA = 0x85,            /* Brazilian ABNT2 keypad "." (PS/2 set 1: 0x7E) */
+    KEY_INTL1 = 0x87,               /* ABNT2 "/?" left of right Shift, JIS "\_" (PS/2: 0x73) */
+    KEY_INTL2 = 0x88, KEY_INTL3 = 0x89, KEY_INTL4 = 0x8A, KEY_INTL5 = 0x8B,   /* JIS kana, yen, henkan, muhenkan */
     KEY_LCTRL = 0xE0, KEY_LSHIFT = 0xE1, KEY_LALT = 0xE2, KEY_LGUI = 0xE3,
     KEY_RCTRL = 0xE4, KEY_RSHIFT = 0xE5, KEY_RALT = 0xE6, KEY_RGUI = 0xE7,
 };
@@ -39,13 +44,24 @@ typedef struct input_event {
     u8 key;          /* KEY_* / HID usage */
     u8 pressed;      /* 1 = down (or auto-repeat), 0 = up */
     u8 mods;         /* MOD_* at the time of the event */
-    char ch;         /* translated ASCII/Latin-1 character or 0 */
+    u8 vk;           /* the key's letter 'A'..'Z' or digit '0'..'9' on the active layout, for
+                        shortcuts (US letters on Russian and Greek, as Windows), or 0 */
+    u32 ch;          /* the character typed (Unicode code point) or 0; key 0 = the accent of a
+                        dead key that did not compose, sent just before the key's own event */
     /* EV_MOUSE */
     u8 buttons;      /* MOUSE_* currently held */
     u8 absolute;     /* x/y are absolute (0..32767 over the screen) */
     i32 dx, dy, dz;  /* relative motion / wheel (dz > 0 = wheel up) */
     i32 x, y;        /* absolute position when absolute */
 } input_event_t;
+
+/* Ctrl+letter shortcut by the letter on the active layout (Ctrl+A is the key
+ * labelled A on AZERTY too); not with Alt, which makes Ctrl+Alt AltGr */
+static inline int key_shortcut(const input_event_t *k, char letter) {
+    return (k->mods & (MOD_CTRL | MOD_ALT)) == MOD_CTRL && k->vk == (u8)letter;
+}
+/* the event types a printable character (AltGr and dead keys included) */
+static inline int key_is_text(const input_event_t *k) { return k->ch >= 32 && k->ch != 127; }
 
 /* producers (drivers) */
 void input_key(u8 key, int pressed);
@@ -60,6 +76,19 @@ u8   input_mods(void);
 u8   input_leds(void);                  /* LED_* lock state */
 u32  input_led_generation(void);        /* changes when lock state changes */
 int  input_key_down(u8 key);
+
+/* keyboard layouts (drivers/keymap.h): indexes into kl_layouts[]. Several
+ * can be installed; Left Alt+Shift cycles through them. */
+#define INPUT_MAX_LAYOUTS 32
+int  input_layout(void);                         /* the active one */
+void input_layout_select(int idx);               /* activate an installed layout */
+void input_layout_next(void);
+int  input_layouts(int *idx, int max);           /* installed, in order; returns the count */
+int  input_layout_default(void);
+/* install these (US if none is valid); the active layout stays if it is
+ * still installed, else the default becomes active */
+void input_layouts_set(const int *idx, int n, int deflt);
+u32  input_layout_generation(void);              /* changes with the active layout or the list */
 
 /* PS/2 */
 void ps2_init(void);

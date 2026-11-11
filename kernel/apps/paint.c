@@ -922,12 +922,10 @@ static void paint_event(window_t *w, gui_event_t *e) {
         if (!k->pressed) break;
         if (k->key == KEY_ESC) { cancel_draw(w); break; }
         if (!(k->mods & MOD_CTRL) || p->drawing) break;
-        switch (k->key) {
-        case KEY_A + 13: cmd_new(w); break;       /* ^N */
-        case KEY_A + 14: cmd_open(w); break;      /* ^O */
-        case KEY_A + 18: save(w); break;          /* ^S */
-        case KEY_A + 25: cmd_undo(w); break;      /* ^Z */
-        }
+        if (key_shortcut(k, 'N')) cmd_new(w);
+        else if (key_shortcut(k, 'O')) cmd_open(w);
+        else if (key_shortcut(k, 'S')) save(w);
+        else if (key_shortcut(k, 'Z')) cmd_undo(w);
         break;
     }
     case GE_BLUR:

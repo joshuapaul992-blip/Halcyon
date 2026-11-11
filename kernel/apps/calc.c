@@ -450,23 +450,22 @@ static void calc_event(window_t *w, gui_event_t *e) {
         input_event_t *k = &e->key;
         if (!k->pressed) break;
         int a = 0;
-        if (k->mods & MOD_CTRL) {
-            switch (k->key) {
-            case KEY_A + 2: calc_copy(w); return;        /* ^C */
-            case KEY_A + 21: calc_paste(w); return;      /* ^V */
-            case KEY_A + 11: a = A_MC; break;            /* ^L */
-            case KEY_A + 17: a = A_MR; break;            /* ^R */
-            case KEY_A + 12: a = A_MS; break;            /* ^M */
-            case KEY_A + 15: a = A_MPLUS; break;         /* ^P */
-            case KEY_A + 16: a = A_MMINUS; break;        /* ^Q */
-            default: return;
-            }
+        if ((k->mods & MOD_CTRL) && !key_is_text(k)) {
+            /* shortcuts by the letter on the keyboard layout */
+            if (key_shortcut(k, 'C')) { calc_copy(w); return; }
+            if (key_shortcut(k, 'V')) { calc_paste(w); return; }
+            if (key_shortcut(k, 'L')) a = A_MC;
+            else if (key_shortcut(k, 'R')) a = A_MR;
+            else if (key_shortcut(k, 'M')) a = A_MS;
+            else if (key_shortcut(k, 'P')) a = A_MPLUS;
+            else if (key_shortcut(k, 'Q')) a = A_MMINUS;
+            else return;
         } else if (k->key == KEY_ENTER || k->key == KEY_KP_ENTER) a = '=';
         else if (k->key == KEY_ESC) a = A_C;
         else if (k->key == KEY_DELETE) a = A_CE;
         else if (k->key == KEY_BACKSPACE) a = A_BACK;
         else if (k->key == KEY_F9) a = A_NEG;
-        else a = char_action(k->ch);
+        else a = k->ch < 128 ? char_action((char)k->ch) : 0;
         if (a) { flash_action(w, a); do_action(w, a); }
         break;
     }

@@ -10,6 +10,7 @@
 #include "fs/vfs.h"
 #include "core/settings.h"
 #include "usb/usb.h"
+#include "drivers/keymap.h"
 
 static surface_t *wallpaper;
 static int wp_style;
@@ -309,10 +310,15 @@ static int usb_disks_present(void) {
     return 0;
 }
 
+#define LANG_W 28          /* keyboard layout indicator */
 static rect_t tray_rect(void) {
-    int w = TRAY_MIN_W + (usb_disks_present() ? 22 : 0);
+    int w = TRAY_MIN_W + LANG_W + (usb_disks_present() ? 22 : 0);
     rect_t t = taskbar_rect();
     return mkrect(t.w - w, t.y, w, t.h);
+}
+static rect_t lang_rect(void) {
+    rect_t tr = tray_rect();
+    return mkrect(tr.x + 6 + (usb_disks_present() ? 22 : 0), tr.y + 6, LANG_W - 4, tr.h - 11);
 }
 
 static int task_list(window_t **out, int max) {
@@ -378,6 +384,11 @@ void taskbar_paint(gc_t *g, rect_t clip) {
         gfx_icon_tinted(g, x, tr.y + 7, &icons16[ICON_USB], HEX(0xFFFFFF), 255);
         x += 22;
     }
+    rect_t lr = lang_rect();             /* keyboard layout: "EN", "DE"... */
+    gfx_rounded(g, lr, 2, 15, HEX(0x3A78D8), HEX(0x1C4FA8));
+    gfx_rounded_outline(g, lr, 2, 15, HEX(0x123A80));
+    gfx_text_box(g, &font_small, lr, kl_layouts[input_layout()].abbr, HEX(0xFFFFFF), 1);
+    x += LANG_W;
     struct rtc_time tm;
     rtc_read(&tm);
     char clock[16];
@@ -420,6 +431,7 @@ int taskbar_event(gui_event_t *e) {
         for (int i = 0; i < n; i++)
             if (rect_contains(task_rect(i, n), e->x, e->y)) { task_pressed = i; return 1; }
         rect_t tr = tray_rect();
+        if (rect_contains(lang_rect(), e->x, e->y)) { keyboard_menu(lang_rect().x, t.y); return 1; }
         if (usb_disks_present() && rect_contains(mkrect(tr.x + 4, tr.y, 22, tr.h), e->x, e->y)) {
             if (!tray_dummy) tray_dummy = kzalloc(sizeof(window_t));
             tray_dummy->on_menu = tray_cmd;
@@ -623,6 +635,8 @@ void shell_tick(void) {
     }
     if (balloon && time_ms() > balloon_until) wm_destroy(balloon);
     if (usb_generation() != last_ugen) { last_ugen = usb_generation(); taskbar_invalidate(); }
+    static u32 last_kgen;
+    if (input_layout_generation() != last_kgen) { last_kgen = input_layout_generation(); taskbar_invalidate(); }
     if (vfs_generation() != last_vgen) {
         last_vgen = vfs_generation();
         int now[26] = { 0 };

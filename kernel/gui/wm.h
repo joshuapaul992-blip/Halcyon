@@ -229,6 +229,8 @@ void app_display(void);
 void app_about(void);
 void app_imageview(const char *path);
 void app_mines(void);
+void app_keyboard(void);               /* Keyboard settings (apps/keyboard.c) */
+void keyboard_menu(int x, int y);      /* the taskbar layout indicator's menu */
 void shutdown_dialog(void);
 /* open a file with the right application, by extension */
 void shell_open(const char *path);

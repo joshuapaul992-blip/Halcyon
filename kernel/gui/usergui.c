@@ -102,7 +102,8 @@ static void uw_event(window_t *w, gui_event_t *e) {
         ev.id = e->key.key;
         ev.pressed = e->key.pressed;
         ev.mods = e->key.mods;
-        ev.ch = (u8)e->key.ch;
+        ev.ch = e->key.ch;
+        ev.vk = e->key.vk;
         break;
     default: return;
     }

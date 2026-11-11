@@ -19,10 +19,11 @@ its own drivers for USB, SATA and FAT file systems.
 | Storage | AHCI SATA (LBA48, multiple controllers). NVMe SSDs (MSI-X, MSI, INTx or polled; every active namespace with 512- or 4096-byte blocks becomes a disk, `nvme0`, `nvme1`, ...; flushed when the drive has a volatile cache, shutdown notification on Turn Off/Restart). CD/DVD drives on SATA (ATAPI): read-only drive letters, discs detected when inserted, ejected or swapped, Eject in the drive's right-click menu. Block layer with MBR (including extended partitions), GPT and superfloppy detection. |
 | File systems | FAT12, FAT16 and FAT32, read and write: long file names, create, delete, rename and move, mkdir and rmdir, truncate, FSInfo. exFAT, read and write (USB sticks and SD cards over 32 GB): fragmented and contiguous files, ValidDataLength, the volume's up-case table for case-insensitive names, VolumeDirty handling. DOS drive letters; the boot drive is `C:`. Quick format (FAT12/16/32 and exFAT) from Explorer (right-click a drive) or the `FORMAT` command, with Windows' default cluster sizes. |
 | CD/DVD | ISO 9660 with Joliet (long Unicode names) and Rock Ridge names, multi-sector directories and multi-extent files, hardened against corrupt discs. Hybrid ISO images written to USB sticks or disks mount too. |
+| Keyboard | 20 layouts that follow Windows': US, US-International, UK, German, Swiss German, French, Belgian (AZERTY), Spanish, Italian, Portuguese, Brazilian (ABNT2), Swedish/Finnish, Norwegian, Danish, Dutch, Polish (Programmers), Czech, Turkish Q, Russian and Greek. AltGr (Right Alt, or Ctrl+Alt), dead keys (a dead key followed by a key it does not compose with gives the accent, then the key), Caps Lock per key, the ISO key next to left Shift and the ABNT2 keys. Ctrl shortcuts go by the letter on the key (Ctrl+A is the AZERTY "A"; US letters on Russian and Greek). Several layouts can be installed: Left Alt+Shift or the indicator on the taskbar switches; Keyboard settings in the Control Panel or the `KEYBOARD` command. Characters reach programs as Unicode code points. |
 | Unicode | File names and text are UTF-8 throughout; FAT long names are stored as UTF-16 (including characters outside the BMP), with Unicode case-insensitive lookup. The fonts cover Latin, Greek, Cyrillic and common symbols; other characters are kept and drawn as a replacement box. |
 | GUI | Compositing window manager (move, resize, minimize, maximize), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Theme and wallpaper are kept across restarts (`C:\HALCYON\SETTINGS.INI`). |
 | Display | The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; the QEMU/Bochs/VirtualBox adapter switches at once, with Windows' "keep these settings?" 15-second revert. The frame buffer is write-combining (PAT). |
-| Apps | Explorer (My Computer, file management), Notepad, Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Sonar (a mine-hunting puzzle), Control Panel, About. |
+| Apps | Explorer (My Computer, file management), Notepad, Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Sonar (a mine-hunting puzzle), Control Panel, Display Properties, Keyboard settings, About. |
 
 ## Building
 
@@ -91,6 +92,9 @@ tools/ci.sh
 This runs the following checks; `.github/workflows/ci.yml` runs the same script:
 
 - a warning-free build
+- the host keyboard layout test (`tests/host/kbdtest.c`): keys at every level,
+  Caps Lock, AltGr, dead keys and shortcut letters of each layout, written from
+  the Windows layouts independently of the tables, plus checks on every table
 - the host storage test suite (`tests/host/run.sh`, about 110,000 checks): the
   FAT, exFAT and ISO 9660 drivers, Unicode names and formatting, compiled for the
   host with ASan/UBSan and run against images made by mkfs.fat, mkfs.exfat and
@@ -147,7 +151,7 @@ kernel/gui   graphics, window manager, widgets, menus, dialogs, desktop, splash
 kernel/apps  applications built into the kernel
 userland/    user-mode runtime (crt0, C library subset, GUI calls) and programs
 tools/       image builder, font and icon generators, QEMU test harness
-tests/host   host-side storage tests and fuzzer
+tests/host   host-side storage and keyboard layout tests, fuzzer
 ```
 
 ## Limitations
@@ -170,8 +174,9 @@ tests/host   host-side storage tests and fuzzer
   reports no EDID, so the UEFI loader's choice was only tested with a saved
   setting; real UEFI firmware usually provides it.
 - No networking, audio or isochronous USB.
-- Keyboard layout is US only, so non-ASCII characters can be displayed and kept in
-  names but not typed.
+- The keyboard layout is one for the whole system (Windows keeps one per
+  program). No input methods (IME), so no Chinese, Japanese or Korean input, and
+  no Japanese or Korean layouts.
 - No CJK glyphs: Chinese, Japanese and Korean text shows as replacement boxes.
 - Some code paths are written to spec but can't be exercised in QEMU:
   - EHCI split transactions
