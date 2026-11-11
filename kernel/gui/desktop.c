@@ -636,8 +636,10 @@ static void final_screen(const char *msg) {
     screen_present(s);
 }
 
+int bootlog_save(const char *reason);
 static void restart_now(void) {
     final_screen("Halcyon is restarting...");
+    bootlog_save("restart");
     vfs_sync_all();
     mdelay(400);
     reboot();
@@ -689,6 +691,7 @@ void shutdown_dialog(void) {
     if (sd_choice == 1) restart_now();
     if (sd_choice == 2) {
         final_screen("Halcyon is shutting down...");
+        bootlog_save("shutdown");
         vfs_sync_all();
         mdelay(500);
         shutdown();

@@ -29,6 +29,16 @@
 
 #define BOOTINFO_MAX_MMAP 256
 
+/* boot_flags: set by the loaders' F8 "Advanced Startup Options" menu */
+#define BOOTF_VERBOSE   0x0001   /* show the kernel log on screen while booting */
+#define BOOTF_NO_XHCI   0x0002   /* don't start USB 3.x controllers */
+#define BOOTF_NO_EHCI   0x0004   /* don't start USB 2.0 controllers */
+#define BOOTF_NO_USB11  0x0008   /* don't start UHCI/OHCI controllers */
+#define BOOTF_NO_AHCI   0x0010   /* don't start SATA controllers */
+#define BOOTF_SAFE_VIDEO 0x0020  /* loader picked a conservative 800x600 mode */
+#define BOOTF_NO_ACPI   0x0040   /* don't parse ACPI tables */
+#define BOOTF_SAFE_MODE (BOOTF_VERBOSE | BOOTF_NO_XHCI | BOOTF_NO_EHCI | BOOTF_NO_USB11 | BOOTF_NO_AHCI | BOOTF_NO_ACPI)
+
 struct kernel_header {
     uint32_t magic;       /* KERNEL_MAGIC */
     uint32_t version;     /* 1 */
@@ -65,7 +75,7 @@ struct bootinfo {
     uint32_t boot_part_lba;    /* first LBA of the boot partition (0 if unknown) */
 
     uint32_t mmap_count;
-    uint32_t pad2;
+    uint32_t boot_flags;       /* BOOTF_* chosen in the F8 Advanced Startup Options menu */
     struct bootinfo_mmap mmap[BOOTINFO_MAX_MMAP];
 } __attribute__((packed));
 

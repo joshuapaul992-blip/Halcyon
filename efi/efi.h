@@ -93,10 +93,23 @@ struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
     void *SetMode;
     EFI_STATUS (EFIAPI *SetAttribute)(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *, UINTN);
     EFI_STATUS (EFIAPI *ClearScreen)(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *);
-    void *SetCursorPosition;
-    void *EnableCursor;
+    EFI_STATUS (EFIAPI *SetCursorPosition)(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *, UINTN, UINTN);
+    EFI_STATUS (EFIAPI *EnableCursor)(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *, BOOLEAN);
     void *Mode;
 };
+
+/* ---- text input ---- */
+typedef struct { UINT16 ScanCode; CHAR16 UnicodeChar; } EFI_INPUT_KEY;
+typedef struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
+struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
+    EFI_STATUS (EFIAPI *Reset)(EFI_SIMPLE_TEXT_INPUT_PROTOCOL *, BOOLEAN);
+    EFI_STATUS (EFIAPI *ReadKeyStroke)(EFI_SIMPLE_TEXT_INPUT_PROTOCOL *, EFI_INPUT_KEY *);
+    void *WaitForKey;
+};
+#define EFI_SCAN_UP   0x01
+#define EFI_SCAN_DOWN 0x02
+#define EFI_SCAN_F8   0x12
+#define EFI_SCAN_ESC  0x17
 
 /* ---- boot services ---- */
 typedef struct {
@@ -157,7 +170,7 @@ typedef struct {
     CHAR16 *FirmwareVendor;
     UINT32 FirmwareRevision;
     EFI_HANDLE ConsoleInHandle;
-    void *ConIn;
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL *ConIn;
     EFI_HANDLE ConsoleOutHandle;
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *ConOut;
     EFI_HANDLE StandardErrorHandle;

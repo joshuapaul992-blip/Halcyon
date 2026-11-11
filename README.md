@@ -60,6 +60,34 @@ sudo dd if=build/halcyon.img of=/dev/sdX bs=4M conv=fsync status=progress
 On Windows, use a raw image writer such as Rufus (in "DD image" mode) or balenaEtcher.
 Then boot from the stick. On UEFI machines, turn off Secure Boot: the loader is not signed.
 
+## Troubleshooting and testing on real PCs
+
+- Press **F8** at the "Press F8 for Advanced Startup Options" prompt to open the
+  advanced startup menu. It has verbose boot (the kernel log on screen), Safe Mode,
+  switches that disable individual drivers (xHCI, EHCI, UHCI/OHCI, AHCI, ACPI), and
+  an 800×600 safe video mode.
+- The kernel log is saved to `\HALCYON\BOOT.LOG` on the stick when the desktop
+  starts, on shutdown or restart, and after a crash. The previous boot's log is kept
+  as `BOOTPREV.LOG`.
+- See [docs/HARDWARE.md](docs/HARDWARE.md) for the test checklist and the
+  compatibility list.
+
+## Tests
+
+```bash
+tools/ci.sh
+```
+
+This runs the following checks; `.github/workflows/ci.yml` runs the same script:
+
+- a warning-free build
+- the host FAT test suite (`tests/host/run.sh`)
+- a QEMU boot matrix (`tools/boottest.py`) covering UHCI, OHCI, EHCI, EHCI with
+  companions, and xHCI, under BIOS and UEFI
+
+Each boot must reach the desktop, mount the boot stick and a SATA disk, and write
+`BOOT.LOG`.
+
 ## Layout
 
 ```

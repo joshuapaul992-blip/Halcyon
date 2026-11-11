@@ -38,6 +38,8 @@ void kvprintf(const char *fmt, va_list ap);
 /* copy of the log ring buffer (oldest first); returns length */
 size_t klog_read(char *buf, size_t size);
 size_t klog_size(void);
+/* optional observer of every kprintf (verbose boot console) */
+extern void (*klog_hook)(const char *s, int n);
 
 NORETURN void panic(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 #define ASSERT(c) do { if (!(c)) panic("assertion failed: %s (%s:%d)", #c, __FILE__, __LINE__); } while (0)

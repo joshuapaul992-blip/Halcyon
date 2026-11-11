@@ -262,6 +262,7 @@ static void set_video(struct bootinfo *bi) {
         if (vmode.w < 800 || vmode.h < 600 || vmode.w > 1920 || vmode.h > 1200) continue;
         long score = (long)vmode.w * vmode.h / 64 + (vmode.bpp == 32 ? 1 : 0);
         if (vmode.w == 1024 && vmode.h == 768) score += 1000000;   /* classic resolution */
+        if ((bi->boot_flags & BOOTF_SAFE_VIDEO) && vmode.w == 800 && vmode.h == 600) score += 4000000;
         if (score > best_score) { best_score = score; best = modes[i]; }
     }
     if (best < 0) die("no usable 24/32-bit VESA mode");
@@ -305,6 +306,100 @@ static void build_page_tables(void) {
     }
 }
 
+
+/* ---------------- F8 Advanced Startup Options ---------------- */
+static u16 ticks(void) { return *LAUNDER((volatile u16 *)0x46C); }
+
+static int key_ready(void) {
+    clear_regs();
+    bregs.eax = 0x0100;
+    bios_int(0x16);
+    return !(bregs.eflags & 0x40);    /* ZF clear: key waiting */
+}
+static u16 key_read(void) {
+    clear_regs();
+    bios_int(0x16);                   /* AH=0: wait for key */
+    return (u16)bregs.eax;            /* AH scancode, AL ascii */
+}
+
+static void vga_put(int x, int y, const char *str, u8 attr) {
+    volatile u16 *vga = LAUNDER((volatile u16 *)0xB8000);
+    for (; *str && x < 80; str++, x++) vga[y * 80 + x] = (u16)((attr << 8) | (u8)*str);
+}
+static void vga_fill(int y, u8 attr) {
+    volatile u16 *vga = LAUNDER((volatile u16 *)0xB8000);
+    for (int x = 0; x < 80; x++) vga[y * 80 + x] = (u16)((attr << 8) | ' ');
+}
+
+struct opt { const char *label; u32 flag; };
+static const struct opt opts[] = {
+    { "Start Halcyon normally", 0 },
+    { "Safe Mode (no USB or SATA drivers, verbose)", 0 },
+    { "Start with the options below", 0 },
+    { "Verbose boot: show kernel messages on screen", BOOTF_VERBOSE },
+    { "Disable USB 3.x controllers (xHCI)", BOOTF_NO_XHCI },
+    { "Disable USB 2.0 controllers (EHCI)", BOOTF_NO_EHCI },
+    { "Disable USB 1.1 controllers (UHCI/OHCI)", BOOTF_NO_USB11 },
+    { "Disable SATA controllers (AHCI)", BOOTF_NO_AHCI },
+    { "Disable ACPI", BOOTF_NO_ACPI },
+    { "Safe video mode (800 x 600)", BOOTF_SAFE_VIDEO },
+};
+#define NOPTS ((int)(sizeof opts / sizeof opts[0]))
+
+static u32 boot_menu(void) {
+    u32 flags = 0;
+    int sel = 0;
+    clear_regs(); bregs.eax = 0x0003; bios_int(0x10);   /* 80x25 text, clears screen */
+    clear_regs(); bregs.eax = 0x0100; bregs.ecx = 0x2000; bios_int(0x10);   /* hide cursor */
+    for (;;) {
+        for (int y = 0; y < 25; y++) vga_fill(y, 0x07);
+        vga_put(18, 2, "Halcyon Advanced Startup Options", 0x0F);
+        vga_put(4, 4, "Use the arrow keys to highlight an item, Enter to choose or toggle it.", 0x07);
+        for (int i = 0; i < NOPTS; i++) {
+            int y = 7 + i + (i >= 3 ? 1 : 0);
+            u8 a = i == sel ? 0x70 : 0x07;
+            char line[64];
+            int n = 0;
+            if (opts[i].flag) {
+                line[n++] = '['; line[n++] = (flags & opts[i].flag) ? 'X' : ' '; line[n++] = ']'; line[n++] = ' ';
+            }
+            for (const char *c = opts[i].label; *c && n < 62; c++) line[n++] = *c;
+            line[n] = 0;
+            vga_fill(y, 0x07);
+            for (int x = 6; x < 74; x++) LAUNDER((volatile u16 *)0xB8000)[y * 80 + x] = (u16)((a << 8) | ' ');
+            vga_put(8, y, line, a);
+        }
+        vga_put(4, 20, "The kernel log is saved to \\HALCYON\\BOOT.LOG on the boot drive", 0x08);
+        vga_put(4, 21, "once Halcyon reaches the desktop.", 0x08);
+        u16 k = key_read();
+        u8 sc = k >> 8, ch = (u8)k;
+        if (sc == 0x48) sel = (sel + NOPTS - 1) % NOPTS;
+        else if (sc == 0x50) sel = (sel + 1) % NOPTS;
+        else if (ch == 13 || ch == ' ') {
+            if (sel == 0) return 0;
+            if (sel == 1) return BOOTF_SAFE_MODE;
+            if (sel == 2) return flags;
+            flags ^= opts[sel].flag;
+        } else if (ch == 27) return 0;
+    }
+}
+
+static u32 check_f8(void) {
+    puts("Press F8 for Advanced Startup Options");
+    u16 start = ticks();
+    u32 flags = 0;
+    int dots = 0;
+    while ((u16)(ticks() - start) < 18) {          /* ~1 second */
+        if (key_ready()) {
+            u16 k = key_read();
+            if ((k >> 8) == 0x42) { flags = boot_menu() | 0x80000000u; break; }
+        }
+        if ((u16)(ticks() - start) / 4 > dots) { putc('.'); dots++; }
+    }
+    puts("\n");
+    return flags;
+}
+
 void stage2_main(u32 boot_drive) {
     drive = boot_drive;
     puts("\r\nHalcyon loader\n");
@@ -323,6 +418,8 @@ void stage2_main(u32 boot_drive) {
     bi->boot_disk_sig = disk_sig;
     bi->boot_part_lba = part_lba;
     bi->rsdp = find_rsdp();
+    u32 bf = check_f8();
+    bi->boot_flags = bf & ~0x80000000u;
     get_mmap(bi);
     build_page_tables();
     (void)puthex;

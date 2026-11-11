@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential nasm clang lld python3-pil fonts-dejavu-core \
+            qemu-system-x86 ovmf mtools dosfstools fdisk zip
+
+      - name: Build, host tests, QEMU boot matrix
+        run: sh tools/ci.sh
+
+      - name: Package the disk image
+        if: success()
+        run: cd build && zip -9 ../halcyon-img.zip halcyon.img
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: halcyon-img
+          path: halcyon-img.zip
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: serial-log
+          path: build/serial.log

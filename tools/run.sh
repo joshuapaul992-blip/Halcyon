@@ -7,7 +7,7 @@
 BUILD=${BUILD:-build}
 HC=${1:-xhci}
 FW=${2:-bios}
-IMG=$BUILD/halcyon.img
+IMG=${IMG_OVERRIDE:-$BUILD/halcyon.img}
 
 case $HC in
   uhci) CTRL="-device piix3-usb-uhci,id=usb" ; BUS=usb.0 ;;

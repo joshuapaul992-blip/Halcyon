@@ -72,10 +72,16 @@ void uhci_init(void) WEAK;
 void usb_init(void) {
     /* Order matters: xHCI first (Intel port switching moves ports away from
      * EHCI), then EHCI before its UHCI/OHCI companions. */
-    if (xhci_init) xhci_init();
-    if (ehci_init) ehci_init();
-    if (ohci_init) ohci_init();
-    if (uhci_init) uhci_init();
+    u32 bf = g_bootinfo.boot_flags;
+    if (xhci_init && !(bf & BOOTF_NO_XHCI)) xhci_init();
+    if (ehci_init && !(bf & BOOTF_NO_EHCI)) ehci_init();
+    if (!(bf & BOOTF_NO_USB11)) {
+        if (ohci_init) ohci_init();
+        if (uhci_init) uhci_init();
+    }
+    if (bf & (BOOTF_NO_XHCI | BOOTF_NO_EHCI | BOOTF_NO_USB11))
+        kprintf("usb: controllers disabled by boot option:%s%s%s\n", (bf & BOOTF_NO_XHCI) ? " xHCI" : "",
+                (bf & BOOTF_NO_EHCI) ? " EHCI" : "", (bf & BOOTF_NO_USB11) ? " UHCI/OHCI" : "");
     /* initial root hub scan so devices present at boot are enumerated now */
     for (int pass = 0; pass < 3; pass++) {
         for (usb_hc_t *hc = hcs; hc; hc = hc->next) hc->ops->poll(hc);

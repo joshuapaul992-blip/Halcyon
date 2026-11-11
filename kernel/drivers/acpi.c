@@ -11,6 +11,15 @@ static int acpi_ok;
 static u32 pm1a_cnt, pm1b_cnt, smi_cmd;
 static u8 acpi_enable_val;
 static u16 slp_typa, slp_typb;
+static u16 pm_tmr_port;
+static int pm_tmr_32;
+
+/* ACPI power-management timer (3.579545 MHz), used to calibrate the TSC */
+int acpi_pm_timer(u16 *port, int *bits32) {
+    if (!pm_tmr_port) return 0;
+    *port = pm_tmr_port; *bits32 = pm_tmr_32;
+    return 1;
+}
 
 static int checksum(const void *p, u32 n) {
     u8 s = 0;
@@ -67,12 +76,17 @@ void acpi_init(void) {
         acpi_enable_val = f[52];
         pm1a_cnt = *(u32 *)(f + 64);
         pm1b_cnt = *(u32 *)(f + 68);
+        u32 tmr = t->len >= 80 ? *(u32 *)(f + 76) : 0;
+        if (!tmr && t->len >= 220 && f[208] == 1) tmr = (u32)*(u64 *)(f + 212);   /* X_PM_TMR_BLK in I/O space */
+        if (tmr && tmr < 0x10000) pm_tmr_port = (u16)tmr;
+        if (t->len >= 116) pm_tmr_32 = (*(u32 *)(f + 112) >> 8) & 1;
         u64 dsdt = *(u32 *)(f + 40);
         if (t->len >= 148 && *(u64 *)(f + 140)) dsdt = *(u64 *)(f + 140);
         struct sdt *d = table(dsdt);
         if (d) parse_s5(d);
     }
-    kprintf("acpi: %s (PM1a_CNT %#x, SLP_TYP %u/%u)\n", acpi_ok ? "S5 available" : "no S5 info", pm1a_cnt, slp_typa, slp_typb);
+    kprintf("acpi: %s (PM1a_CNT %#x, SLP_TYP %u/%u), PM timer %#x (%d-bit)\n", acpi_ok ? "S5 available" : "no S5 info",
+            pm1a_cnt, slp_typa, slp_typb, pm_tmr_port, pm_tmr_32 ? 32 : 24);
 }
 
 int acpi_poweroff(void) {

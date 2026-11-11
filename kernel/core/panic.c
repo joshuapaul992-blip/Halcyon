@@ -38,8 +38,18 @@ static int draw_text(const font_t *f, int x, int y, const char *s, u32 fg, u32 b
     return y;
 }
 
+int bootlog_save(const char *reason) __attribute__((weak));
+extern void (*klog_hook)(const char *s, int n);
+
 void panic_screen(const char *title, const char *detail) {
+    static int depth;
     struct bootinfo *b = &g_bootinfo;
+    klog_hook = NULL;          /* the verbose console draws through the GUI layer */
+    if (++depth > 1) {
+        /* a fault while handling a fault (e.g. while saving the log): stop here */
+        kprintf("panic: nested fault, halting\n");
+        for (;;) __asm__ volatile("cli; hlt");
+    }
     if (!b->fb_addr) return;
     const u32 bg = 0x1C2A4A;
     for (u32 y = 0; y < b->fb_height; y++)
@@ -51,7 +61,12 @@ void panic_screen(const char *title, const char *detail) {
     y += 30;
     y = draw_text(&font_mono, x, y, detail, 0xFFFFFF, bg);
     y += 40;
-    draw_text(&font_ui, x, y,
+    y = draw_text(&font_ui, x, y,
               "If this is the first time you have seen this screen, restart your computer.\n"
               "The kernel log has been written to the serial port (COM1).", 0xC8D4F0, bg);
+    y += 30;
+    draw_text(&font_ui, x, y, "Saving the kernel log to \\HALCYON\\BOOT.LOG on the boot drive...", 0xC8D4F0, bg);
+    int r = bootlog_save ? bootlog_save("crash") : -1;
+    draw_text(&font_ui_bold, x + 420, y, r == 0 ? "done. Please include this file in bug reports." : "not possible.",
+              r == 0 ? 0x9CFF7A : 0xFFB0A0, bg);
 }

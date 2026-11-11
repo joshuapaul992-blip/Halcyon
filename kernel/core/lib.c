@@ -279,10 +279,13 @@ size_t klog_read(char *buf, size_t size) {
     return n;
 }
 
+void (*klog_hook)(const char *s, int n);
+
 void kvprintf(const char *fmt, va_list ap) {
     char buf[1024];
     int n = vsnprintf(buf, sizeof buf, fmt, ap);
     if (n > (int)sizeof buf - 1) n = sizeof buf - 1;
+    if (klog_hook) klog_hook(buf, n);
     for (int i = 0; i < n; i++) {
         if (buf[i] == '\n') serial_putc('\r');
         serial_putc(buf[i]);

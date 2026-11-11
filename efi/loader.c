@@ -249,7 +249,7 @@ static void setup_gop(struct bootinfo *bi) {
     if (!gop->Mode) fail("GOP has no mode information", 0);
 
     u32 cur = gop->Mode->Mode, max = gop->Mode->MaxMode;
-    int m1024 = -1, mbig = -1, cur_ok = 0, blt_only = 0;
+    int m1024 = -1, m800 = -1, mbig = -1, cur_ok = 0, blt_only = 0;
     u64 big_area = 0;
     for (u32 m = 0; m < max; m++) {
         if (EFI_ERROR(gop->QueryMode(gop, m, &isz, &info))) continue;
@@ -257,11 +257,13 @@ static void setup_gop(struct bootinfo *bi) {
         int ok = fmt_usable(info);
         if (info->PixelFormat == PixelBltOnly) blt_only = 1;
         if (ok && w == 1024 && h == 768 && m1024 < 0) m1024 = (int)m;
+        if (ok && w == 800 && h == 600 && m800 < 0) m800 = (int)m;
         if (ok && w <= 1920 && h <= 1200 && (u64)w * h > big_area) { big_area = (u64)w * h; mbig = (int)m; }
         if (m == cur) cur_ok = ok && w >= 800 && h >= 600;
         BS->FreePool(info);
     }
     int pick = m1024 >= 0 ? m1024 : cur_ok ? (int)cur : mbig;
+    if ((bi->boot_flags & BOOTF_SAFE_VIDEO) && m800 >= 0) pick = m800;
     if (pick < 0) {
         if (blt_only) fail("graphics adapter only offers PixelBltOnly modes (no linear framebuffer)", 0);
         fail("no usable 32-bit graphics mode", 0);
@@ -476,6 +478,88 @@ __asm__(
 extern const u8 halcyon_tramp_start[], halcyon_tramp_end[];
 
 /* ---------------- main ---------------- */
+
+/* ---------------- F8 Advanced Startup Options ---------------- */
+struct opt { const char *label; u32 flag; };
+static const struct opt opts[] = {
+    { "Start Halcyon normally", 0 },
+    { "Safe Mode (no USB or SATA drivers, verbose)", 0 },
+    { "Start with the options below", 0 },
+    { "Verbose boot: show kernel messages on screen", BOOTF_VERBOSE },
+    { "Disable USB 3.x controllers (xHCI)", BOOTF_NO_XHCI },
+    { "Disable USB 2.0 controllers (EHCI)", BOOTF_NO_EHCI },
+    { "Disable USB 1.1 controllers (UHCI/OHCI)", BOOTF_NO_USB11 },
+    { "Disable SATA controllers (AHCI)", BOOTF_NO_AHCI },
+    { "Disable ACPI", BOOTF_NO_ACPI },
+    { "Safe video mode (800 x 600)", BOOTF_SAFE_VIDEO },
+};
+#define NOPTS ((int)(sizeof opts / sizeof opts[0]))
+
+static int read_key(EFI_INPUT_KEY *k) {
+    if (!ST->ConIn) return 0;
+    return !EFI_ERROR(ST->ConIn->ReadKeyStroke(ST->ConIn, k));
+}
+
+static void at(int x, int y, const char *s, UINTN attr) {
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *o = ST->ConOut;
+    o->SetCursorPosition(o, (UINTN)x, (UINTN)y);
+    o->SetAttribute(o, attr);
+    con_puts(s);
+}
+
+static u32 boot_menu(void) {
+    EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *o = ST->ConOut;
+    u32 flags = 0;
+    int sel = 0;
+    o->EnableCursor(o, 0);
+    for (;;) {
+        o->SetAttribute(o, 0x07);
+        o->ClearScreen(o);
+        at(18, 1, "Halcyon Advanced Startup Options", 0x0F);
+        at(4, 3, "Use the arrow keys to highlight an item, Enter to choose or toggle it.", 0x07);
+        for (int i = 0; i < NOPTS; i++) {
+            char line[72];
+            int n = 0;
+            for (int k = 0; k < 2; k++) line[n++] = ' ';
+            if (opts[i].flag) { line[n++] = '['; line[n++] = (flags & opts[i].flag) ? 'X' : ' '; line[n++] = ']'; line[n++] = ' '; }
+            for (const char *c = opts[i].label; *c && n < 64; c++) line[n++] = *c;
+            while (n < 66) line[n++] = ' ';
+            line[n] = 0;
+            at(6, 6 + i + (i >= 3 ? 1 : 0), line, i == sel ? 0x70 : 0x07);
+        }
+        at(4, 19, "The kernel log is saved to \\HALCYON\\BOOT.LOG on the boot drive", 0x08);
+        at(4, 20, "once Halcyon reaches the desktop.", 0x08);
+        o->SetAttribute(o, 0x07);
+        EFI_INPUT_KEY k;
+        while (!read_key(&k)) BS->Stall(10000);
+        if (k.ScanCode == EFI_SCAN_UP) sel = (sel + NOPTS - 1) % NOPTS;
+        else if (k.ScanCode == EFI_SCAN_DOWN) sel = (sel + 1) % NOPTS;
+        else if (k.ScanCode == EFI_SCAN_ESC) { flags = 0; break; }
+        else if (k.UnicodeChar == '\r' || k.UnicodeChar == ' ') {
+            if (sel == 0) { flags = 0; break; }
+            if (sel == 1) { flags = BOOTF_SAFE_MODE; break; }
+            if (sel == 2) break;
+            flags ^= opts[sel].flag;
+        }
+    }
+    o->SetAttribute(o, 0x07);
+    o->ClearScreen(o);
+    return flags;
+}
+
+static u32 check_f8(void) {
+    con_puts("Press F8 for Advanced Startup Options");
+    if (ST->ConIn) ST->ConIn->Reset(ST->ConIn, 0);
+    for (int i = 0; i < 100; i++) {                 /* ~1 second */
+        EFI_INPUT_KEY k;
+        if (read_key(&k) && k.ScanCode == EFI_SCAN_F8) { con_puts("\n"); return boot_menu(); }
+        if (i % 25 == 24) con_puts(".");
+        BS->Stall(10000);
+    }
+    con_puts("\n");
+    return 0;
+}
+
 EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab) {
     ST = systab;
     BS = systab->BootServices;
@@ -502,6 +586,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab) {
 
     bi->magic = BOOTINFO_MAGIC;
     bi->boot_type = BOOT_TYPE_UEFI;
+    bi->boot_flags = check_f8();
     bi->bios_drive = 0;
     find_boot_partition(li, bi);
     bi->rsdp = find_rsdp();

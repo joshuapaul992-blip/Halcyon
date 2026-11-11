@@ -130,8 +130,10 @@ void cpu_init(void) {
 static u64 tsc_per_ms = 2000000, tsc_base;
 u64 tsc_khz(void) { return tsc_per_ms; }
 
-void time_init(void) {
-    /* PIT channel 2, mode 0, ~50 ms */
+int acpi_pm_timer(u16 *port, int *bits32) __attribute__((weak));
+
+/* TSC ticks per ms measured against PIT channel 2 (0 on failure) */
+static u64 cal_pit(void) {
     const u32 ms = 50;
     u32 count = 1193182 * ms / 1000;
     u8 p61 = inb(0x61);
@@ -144,13 +146,61 @@ void time_init(void) {
     for (;;) {
         t1 = rdtsc();
         if (inb(0x61) & 0x20) { ok = 1; break; }
-        if (t1 - t0 > 20000000000ull) break;
+        if (t1 - t0 > 20000000000ull) break;     /* ~5+ s at any sane clock: PIT gated off */
     }
     outb(0x61, p61);
-    if (ok && t1 > t0) tsc_per_ms = (t1 - t0) / ms;
-    if (tsc_per_ms < 100000) tsc_per_ms = 2000000;
+    return ok && t1 > t0 ? (t1 - t0) / ms : 0;
+}
+
+/* TSC ticks per ms measured against the ACPI PM timer (0 if unavailable) */
+static u64 cal_pmtimer(void) {
+    u16 port; int b32;
+    if (!acpi_pm_timer || !acpi_pm_timer(&port, &b32)) return 0;
+    u32 mask = b32 ? 0xFFFFFFFFu : 0x00FFFFFFu;
+    const u32 want = 3579545 / 20;              /* 50 ms */
+    u32 start = inl(port) & mask, last = start;
+    u64 t0 = rdtsc(), elapsed = 0;
+    for (u64 spins = 0; elapsed < want; spins++) {
+        u32 now = inl(port) & mask;
+        elapsed += (now - last) & mask;
+        last = now;
+        if (spins > 50000000) return 0;         /* timer not counting */
+    }
+    u64 t1 = rdtsc();
+    return (t1 - t0) * 3579545 / (elapsed * 1000);
+}
+
+/* TSC frequency reported by CPUID (Intel leaf 0x15, else 0x16 base MHz) */
+static u64 cal_cpuid(void) {
+    u32 a, b, c, d;
+    cpuid(0, 0, &a, &b, &c, &d);
+    u32 max = a;
+    if (max >= 0x15) {
+        cpuid(0x15, 0, &a, &b, &c, &d);
+        if (a && b && c) return (u64)c * b / a / 1000;
+    }
+    if (max >= 0x16) {
+        cpuid(0x16, 0, &a, &b, &c, &d);
+        if (a & 0xFFFF) return (u64)(a & 0xFFFF) * 1000;
+    }
+    return 0;
+}
+
+static int plausible(u64 khz) { return khz >= 100000 && khz <= 10000000; }
+
+void time_init(void) {
+    u64 pit = cal_pit(), pm = cal_pmtimer(), cid = cal_cpuid();
+    const char *src;
+    if (plausible(pit)) {
+        tsc_per_ms = pit; src = "PIT";
+        /* a PIT that is emulated or clock-gated can be off: trust the PM timer if they disagree by >2% */
+        if (plausible(pm) && (pit > pm ? pit - pm : pm - pit) * 50 > pm) { tsc_per_ms = pm; src = "ACPI PM timer (PIT disagreed)"; }
+    } else if (plausible(pm)) { tsc_per_ms = pm; src = "ACPI PM timer"; }
+    else if (plausible(cid)) { tsc_per_ms = cid; src = "CPUID"; }
+    else { tsc_per_ms = 2000000; src = "guess"; }
     tsc_base = rdtsc();
-    kprintf("time: TSC %lu.%03lu MHz%s\n", tsc_per_ms / 1000, tsc_per_ms % 1000, ok ? "" : " (PIT calibration failed, guessing)");
+    kprintf("time: TSC %lu.%03lu MHz from %s (PIT %lu, PM %lu, CPUID %lu kHz)\n", tsc_per_ms / 1000, tsc_per_ms % 1000,
+            src, pit, pm, cid);
 }
 
 u64 time_ms(void) { return (rdtsc() - tsc_base) / tsc_per_ms; }

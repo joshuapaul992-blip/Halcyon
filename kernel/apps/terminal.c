@@ -353,6 +353,7 @@ static void cmd_help(term_t *t) {
         "  DATE / TIME / VER     system information      COLOR xy    set colours (e.g. 0A)\n"
         "  START file            open with its program   NOTEPAD [f] EXPLORER [d] PAINT CALC\n"
         "  SYNC                  flush disks             REBOOT / SHUTDOWN / EXIT\n"
+        "  BOOTLOG               save \\HALCYON\\BOOT.LOG   CRASHTEST   test the crash screen\n"
         "\nAny command's output can be redirected with > file or >> file.\n");
 }
 
@@ -468,6 +469,16 @@ static void execute(term_t *t, int argc, char **argv, const char *rest) {
         int b = (int)strtol((char[]){ argv[1][0], 0 }, NULL, 16), f = (int)strtol((char[]){ argv[1][1], 0 }, NULL, 16);
         if (b == f) { tputs(t, "Foreground and background must differ.\n"); return; }
         t->bg = (u8)b; t->fg = (u8)f;
+    }
+    else if (!strcasecmp(c, "crashtest")) {
+        /* diagnostic: verify the crash screen and BOOT.LOG crash logging */
+        kprintf("terminal: CRASHTEST requested\n");
+        __asm__ volatile("ud2");
+    }
+    else if (!strcasecmp(c, "bootlog")) {
+        int bootlog_save(const char *reason);
+        int r = bootlog_save("user request");
+        tprintf(t, r == 0 ? "Kernel log saved to \\HALCYON\\BOOT.LOG on the boot drive.\n" : "Could not save the log: %s\n", strerror(r));
     }
     else if (!strcasecmp(c, "sync")) { vfs_sync_all(); tputs(t, "All volumes flushed.\n"); }
     else if (!strcasecmp(c, "notepad") || !strcasecmp(c, "edit")) {
