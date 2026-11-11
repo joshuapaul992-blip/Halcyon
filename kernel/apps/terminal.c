@@ -421,6 +421,7 @@ static void cmd_help(term_t *t) {
         "  BOOTLOG               save \\HALCYON\\BOOT.LOG   CRASHTEST   test the crash screen\n"
         "  IRQ                   interrupts, timer and CPU usage\n"
         "  FORMAT [x: | device]  format a disk (FAT, FAT32, exFAT)\n"
+        "  DISPLAY               screen resolution (Display Properties)\n"
         "  TASKLIST / TASKKILL   running programs / end one   NAME [args]  run C:\\PROGRAMS\\NAME.EXE\n"
         "\nAny command's output can be redirected with > file or >> file.\n");
 }
@@ -690,6 +691,7 @@ static void execute(term_t *t, int argc, char **argv, const char *rest) {
     else if (!strcasecmp(c, "calc") && !calc_program()) app_calc();     /* else CALC.EXE below */
     else if (!strcasecmp(c, "sysinfo") || !strcasecmp(c, "msinfo")) app_sysinfo();
     else if (!strcasecmp(c, "control")) app_control();
+    else if (!strcasecmp(c, "display") || !strcasecmp(c, "desk.cpl")) app_display();
     else if (!strcasecmp(c, "exit")) wm_close(t->win);
     else if (!strcasecmp(c, "reboot")) { vfs_sync_all(); reboot(); }
     else if (!strcasecmp(c, "shutdown")) shutdown_dialog();

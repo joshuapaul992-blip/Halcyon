@@ -22,6 +22,11 @@ interrupts on, get a working interrupt:
   user    run C:\\PROGRAMS\\SELFTEST.EXE after boot (QEMU fw_cfg autorun): user-mode
           system calls, crashing / looping child programs, windows; it must
           report "selftest: all N checks passed"
+  res     a saved resolution (display.width/height = 1280 x 1024 in
+          \\HALCYON\\SETTINGS.INI): the loader must choose it and the desktop use it
+  fwvideo no display adapter driver (boot flag): the firmware frame buffer only
+  switch  switch the display mode to 1600 x 900 once the desktop is up (QEMU
+          fw_cfg test hook; needs the live QEMU/Bochs display driver)
   cd      also an AHCI CD-ROM drive with an ISO 9660 + Joliet test disc
           (built with xorriso): the disc must mount, and after the desktop is
           up the disc is ejected and another one inserted through the QEMU
@@ -38,8 +43,10 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "uhci:uefi", "ehci:uefi", "ich9:uefi", "xhci:uefi",
           "xhci:bios:nomsi", "uhci:bios:pic", "xhci:uefi:pic", "ehci:bios:noirq",
           "xhci:bios:nvme", "xhci:uefi:nvme4k", "xhci:bios:nvme+nomsi", "xhci:uefi:nvme+noirq",
-          "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user"]
-VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0}
+          "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user",
+          "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch"]
+VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0,
+            "fwvideo": 0x800, "res": 0, "switch": 0}
 NVME_ERRORS = ["failed", "timed out", "fatal", "offline", "not responding", "no interrupt seen"]
 IDLE_MAX_CPU = 40      # % of one host CPU used by QEMU at the idle desktop
 TIMEOUT = {"uhci": 90, "ohci": 60}
@@ -146,6 +153,14 @@ def run(cfg):
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
     if "user" in opts:
         extra += " -fw_cfg name=opt/halcyon/autorun,string=C:/PROGRAMS/SELFTEST.EXE"
+    if "switch" in opts:
+        extra += " -fw_cfg name=opt/halcyon/setmode,string=1600x900"
+        checks.append(("live mode switch", "test mode switch to 1600x900: ok (desktop 1600x900)"))
+    if "res" in opts:
+        checks.append(("saved resolution", "chosen by saved setting"))
+        checks.append(("desktop at 1280x1024", "desktop ready (1280x1024)"))
+    if "fwvideo" in opts:
+        checks.append(("firmware frame buffer only", "changes apply at the next start"))
     isos = None
     if "cd" in opts:
         isos = make_cd_isos()
@@ -154,6 +169,11 @@ def run(cfg):
     # boot from a scratch copy so tests never modify the release image
     img = os.path.join(BUILD, "ci_boot.img")
     subprocess.run(["cp", os.path.join(BUILD, "halcyon.img"), img], check=True)
+    if "res" in opts:
+        ini = os.path.join(BUILD, "ci_settings.ini")
+        with open(ini, "w") as f:
+            f.write("display.width=1280\r\ndisplay.height=1024\r\n")
+        subprocess.run(["mcopy", "-o", "-i", img + "@@1M", ini, "::/HALCYON/SETTINGS.INI"], check=True)
     env["IMG_OVERRIDE"] = img
     errlog = os.path.join(BUILD, "qemu.err")
     p = subprocess.Popen(["sh", "tools/run.sh", hc, fw], env=env,

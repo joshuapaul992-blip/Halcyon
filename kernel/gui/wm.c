@@ -1,5 +1,6 @@
 /* Halcyon OS - window manager: compositor, input routing, main loop */
 #include "wm.h"
+#include "drivers/display.h"
 #include "core/irq.h"
 #include "core/thread.h"
 #include "fs/block.h"
@@ -965,15 +966,61 @@ void gui_run_until(volatile int *flag) {
     while (!*flag) gui_step();
 }
 
+/* the display mode changed (Display settings): back buffer, wallpaper and
+ * windows follow the new size */
+static int screen_changed(void) {
+    int r = screen_resize();
+    if (!r) r = desktop_screen_changed();
+    if (r) return r;
+    int sw = screen_w(), sh = screen_h(), work = sh - TASKBAR_H;
+    menu_close_all();
+    for (window_t *w = windows; w; w = w->next) {
+        if (w->flags & WF_POPUP) continue;
+        if (w->state == WS_MAXIMIZED) {
+            set_frame(w, mkrect(-BORDER, -0, sw + 2 * BORDER, work + BORDER));
+            continue;
+        }
+        if (w->state == WS_MINIMIZED && w->restore.w) {
+            /* restored later: keep its normal place on screen */
+            rect_t *f = &w->restore;
+            f->x = CLAMP(f->x, 60 - f->w, sw - 60);
+            f->y = CLAMP(f->y, 0, MAX(0, work - TITLE_H));
+        }
+        rect_t f = w->frame;
+        if (f.x + f.w > sw || f.y + f.h > work) {
+            /* keep it on screen: move it, never resize it */
+            f.x = CLAMP(f.x, 0, MAX(0, sw - f.w));
+            f.y = CLAMP(f.y, 0, MAX(0, work - f.h));
+        }
+        if (f.x != w->frame.x || f.y != w->frame.y) set_frame(w, f);
+    }
+    mx = CLAMP(mx, 0, sw - 1);
+    my = CLAMP(my, 0, sh - 1);
+    taskbar_invalidate();
+    gui_full_redraw();
+    return 0;
+}
+
 void usergui_init(void);
 void gui_main(void) {
     gui_thread = thread_current();
     usergui_init();
+    display_apply_saved();
     screen_init();
+    display_changed_hook = screen_changed;
     mx = screen_w() / 2; my = screen_h() / 2;
     desktop_init();
     gui_full_redraw();
     kprintf("gui: desktop ready (%dx%d)\n", screen_w(), screen_h());
+    /* test hook: QEMU fw_cfg "opt/halcyon/setmode" = "WIDTHxHEIGHT" switches the
+     * display mode once the desktop is up (live adapters) */
+    char setmode[32];
+    if (qemu_fw_file("opt/halcyon/setmode", setmode, sizeof setmode) && setmode[0]) {
+        char *x = strchr(setmode, 'x');
+        int sw = (int)strtol(setmode, NULL, 10), sh = x ? (int)strtol(x + 1, NULL, 10) : 0;
+        int r = display_set_mode(sw, sh);
+        kprintf("gui: test mode switch to %dx%d: %s (desktop %dx%d)\n", sw, sh, r ? strerror(r) : "ok", screen_w(), screen_h());
+    }
     /* test hook: QEMU fw_cfg "opt/halcyon/autorun" = "C:/PROGRAMS/X.EXE args" */
     char autorun[256];
     if (qemu_fw_file("opt/halcyon/autorun", autorun, sizeof autorun) && autorun[0]) {

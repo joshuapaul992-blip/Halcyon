@@ -67,6 +67,39 @@ void *mm_map_mmio(u64 phys, u64 size) {
     return (void *)(uptr)phys;
 }
 
+/* Write-combining for a frame buffer: PAT entry 1 (PWT=1, PCD=0) becomes WC,
+ * and the 2 MiB pages of [phys, phys+size) select it. Writes to the screen
+ * then go out in bursts instead of one uncached access at a time (reads
+ * stay slow; the GUI never reads the frame buffer). Returns 1 if applied. */
+int mm_set_write_combining(u64 phys, u64 size) {
+    u32 a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    if (!(d & (1u << 16))) return 0;                       /* no PAT */
+    static int pat_done;
+    if (!pat_done) {
+        u32 lo, hi;
+        __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x277));
+        lo = (lo & ~0xFF00u) | (0x01u << 8);               /* PA1 = WC */
+        __asm__ volatile("wbinvd; wrmsr; wbinvd" :: "a"(lo), "d"(hi), "c"(0x277) : "memory");
+        pat_done = 1;
+    }
+    u64 start = phys & ~0x1FFFFFull, end = (phys + size + 0x1FFFFF) & ~0x1FFFFFull;
+    int n = 0;
+    for (u64 va = start; va < end; va += 0x200000) {
+        u64 i4 = (va >> 39) & 511, i3 = (va >> 30) & 511, i2 = (va >> 21) & 511;
+        if (!(pml4[i4] & PTE_P)) continue;
+        u64 *p3 = (u64 *)(uptr)(pml4[i4] & PTE_ADDR);
+        if (!(p3[i3] & PTE_P) || (p3[i3] & PTE_PS)) continue;
+        u64 *p2 = (u64 *)(uptr)(p3[i3] & PTE_ADDR);
+        if (!(p2[i2] & PTE_P) || !(p2[i2] & PTE_PS)) continue;
+        p2[i2] = (p2[i2] & ~(PTE_PCD | (1ull << 12))) | PTE_PWT;
+        __asm__ volatile("invlpg (%0)" :: "r"(va) : "memory");
+        n++;
+    }
+    __asm__ volatile("wbinvd" ::: "memory");
+    return n > 0;
+}
+
 /* ---------------- heap ---------------- */
 #define HEAP_MAGIC 0x48454150u
 typedef struct hdr {

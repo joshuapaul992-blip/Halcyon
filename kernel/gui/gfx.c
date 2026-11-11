@@ -423,6 +423,18 @@ void screen_init(void) {
     fb_native = g_bootinfo.fb_bpp == 32 && g_bootinfo.fb_red_pos == 16 && g_bootinfo.fb_green_pos == 8 && g_bootinfo.fb_blue_pos == 0;
 }
 
+/* the mode changed (g_bootinfo.fb_*): a new back buffer of the new size */
+int screen_resize(void) {
+    int w = (int)g_bootinfo.fb_width, h = (int)g_bootinfo.fb_height;
+    if (g_screen && g_screen->w == w && g_screen->h == h) return 0;
+    surface_t *n = surface_new(w, h);
+    if (!n) return E_NOMEM;
+    surface_free(g_screen);
+    g_screen = n;
+    fb_native = g_bootinfo.fb_bpp == 32 && g_bootinfo.fb_red_pos == 16 && g_bootinfo.fb_green_pos == 8 && g_bootinfo.fb_blue_pos == 0;
+    return 0;
+}
+
 void screen_present(rect_t r) {
     r = rect_intersect(r, mkrect(0, 0, g_screen->w, g_screen->h));
     if (rect_empty(r)) return;

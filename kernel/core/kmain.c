@@ -7,6 +7,7 @@
 #include "proc.h"
 #include "fs/block.h"
 #include "drivers/pci.h"
+#include "drivers/display.h"
 
 /* Subsystems are linked in as they are written; weak references let the
  * kernel build while a subsystem is missing. */
@@ -58,6 +59,7 @@ void kmain(struct bootinfo *bi) {
     if (splash_init) splash_init();
     PROGRESS(10, "Scanning PCI devices...");
     pci_init();
+    display_init();
     if (blockdev_init) blockdev_init();
     if (vfs_init) vfs_init();
     PROGRESS(20, "Starting keyboard and mouse...");

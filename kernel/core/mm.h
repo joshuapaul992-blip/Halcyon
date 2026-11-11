@@ -34,5 +34,6 @@ struct mm_stats {
 };
 void mm_get_stats(struct mm_stats *st);
 u64  mm_heap_free(void);          /* bytes not allocated (may be fragmented) */
+int  mm_set_write_combining(u64 phys, u64 size);   /* frame buffers; 1 if applied */
 
 #endif

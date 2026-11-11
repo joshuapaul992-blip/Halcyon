@@ -210,6 +210,8 @@ rect_t taskbar_rect(void);
 void taskbar_invalidate(void);
 void desktop_wallpaper_set(int style);
 int  desktop_wallpaper_style(void);
+int  desktop_screen_changed(void);
+void desktop_restart(void);              /* save the log, sync, reboot */
 void desktop_wallpaper_render(int style, surface_t *s);   /* draw a wallpaper style into any surface (previews) */
 void start_menu_toggle(void);
 void shell_tick(void);
@@ -223,6 +225,7 @@ void app_paint(const char *path);
 void app_calc(void);
 void app_sysinfo(void);
 void app_control(void);
+void app_display(void);
 void app_about(void);
 void app_imageview(const char *path);
 void app_mines(void);

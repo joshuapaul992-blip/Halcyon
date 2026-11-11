@@ -83,6 +83,7 @@ int  gfx_text_wrap_height(const font_t *f, int width, const char *s);
 extern surface_t *g_screen;      /* back buffer */
 void screen_init(void);
 void screen_present(rect_t r);   /* copy part of the back buffer to the framebuffer */
+int  screen_resize(void);         /* after a mode change: back buffer of the new size */
 int  screen_w(void);
 int  screen_h(void);
 

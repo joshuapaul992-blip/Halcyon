@@ -164,6 +164,17 @@ void desktop_wallpaper_set(int style) {
 }
 int desktop_wallpaper_style(void) { return wp_style; }
 
+/* the screen size changed: wallpaper of the new size */
+int desktop_screen_changed(void) {
+    if (wallpaper && wallpaper->w == screen_w() && wallpaper->h == screen_h()) return 0;
+    surface_t *n = surface_new(screen_w(), screen_h());
+    if (!n) return E_NOMEM;
+    surface_free(wallpaper);
+    wallpaper = n;
+    desktop_wallpaper_render(wp_style, wallpaper);
+    return 0;
+}
+
 /* ---------------- desktop icons ---------------- */
 typedef struct dicon { const char *label; int icon; void (*launch)(void); } dicon_t;
 
@@ -245,7 +256,7 @@ static window_t *desk_dummy;   /* owner for desktop context menus */
 static void desk_menu_cmd(window_t *w, int id) {
     if (id == 1) gui_full_redraw();
     else if (id == 2) app_terminal();
-    else if (id == 3) app_control();
+    else if (id == 3) app_display();
 }
 
 int desktop_event(gui_event_t *e) {
@@ -654,6 +665,8 @@ static void restart_now(void) {
     mdelay(400);
     reboot();
 }
+
+void desktop_restart(void) { restart_now(); }
 
 static volatile int sd_done;
 static int sd_choice;
