@@ -123,7 +123,12 @@ static int hub_probe(usb_device_t *dev, const usb_interface_desc_t *intf, usb_bi
     dev->is_hub = 1;
     dev->hub_nports = (u8)h->nports;
     dev->hub_ttt = (chars >> 5) & 3;
-    dev->hub_multi_tt = dev->desc.bDeviceProtocol == 2;
+    /* a multi-TT hub runs single-TT until alternate setting 1 is selected */
+    dev->hub_multi_tt = 0;
+    if (dev->speed == USB_SPEED_HIGH && dev->desc.bDeviceProtocol == 2 &&
+        usb_control(dev, USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE, USB_REQ_SET_INTERFACE,
+                    1, intf->bInterfaceNumber, NULL, 0) >= 0)
+        dev->hub_multi_tt = 1;
     if (dev->hc->ops->hub_init && dev->hc->ops->hub_init(dev->hc, dev) < 0)
         kprintf("usb-hub: HC hub_init failed\n");
     if (h->ss)
