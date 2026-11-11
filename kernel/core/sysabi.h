@@ -43,9 +43,11 @@ enum {
      *           menu calls (gui/usergui.c; 48 and 49 are SYS_WIN_RESIZE and
      *           SYS_WIN_SET_ICON)
      *   100-139 sockets and poll (net/)
-     *   160     SYS_WIN_CANVAS: the window's pixels mapped into the program */
+     *   160     SYS_WIN_CANVAS: the window's pixels mapped into the program
+     *   168-169 Explorer: built-in shell tools, file details (core/syscall.c) */
     SYS_WIN_CANVAS = 160,
     SYS_DATETIME = 161, SYS_VOLUME_INFO, SYS_VFS_GENERATION,
+    SYS_SHELL_APP = 168, SYS_STAT_EX,
     SYS_COUNT = 170
 };
 
@@ -75,6 +77,13 @@ typedef struct hal_volinfo {
     unsigned long long total, free_bytes;
 } hal_volinfo_t;
 
+/* SYS_SHELL_APP: open one of the shell's built-in tools (does not wait) */
+enum { SHELL_APP_TERMINAL = 1,   /* Command Prompt; arg: its folder, or NULL */
+       SHELL_APP_SYSINFO,        /* System Information */
+       SHELL_APP_CONTROL,        /* Control Panel */
+       SHELL_APP_ABOUT,          /* About Halcyon */
+       SHELL_APP_NOTEPAD };      /* Notepad; arg: a file to open, or NULL */
+
 /* SYS_OPEN flags */
 #define O_READ   0x01
 #define O_WRITE  0x02
@@ -90,6 +99,14 @@ typedef struct hal_dirent {
     unsigned char is_dir, attr, pad[6];
     unsigned short year; unsigned char month, day, hour, minute, second, pad2;
 } hal_dirent_t;
+
+/* SYS_STAT_EX: SYS_STAT's entry and the details a Properties dialog shows */
+typedef struct hal_statx {
+    hal_dirent_t d;                       /* as SYS_STAT */
+    unsigned short cyear; unsigned char cmonth, cday, chour, cminute, csecond, pad;   /* created (year 0: unknown) */
+    char short_name[16];                  /* 8.3 name ("README.TXT"); "" if the file system has none */
+    char model[48];                       /* the device holding the file ("QEMU HARDDISK"), or "" */
+} hal_statx_t;
 
 /* SYS_PROCLIST entry */
 typedef struct hal_procinfo {

@@ -1044,7 +1044,10 @@ static void term_destroy(window_t *w) {
     kfree(t);
 }
 
-void app_terminal(void) {
+void app_terminal(void) { app_terminal_in(NULL); }
+
+/* a Command Prompt in folder dir (NULL: the root of C:) */
+void app_terminal_in(const char *dir) {
     int c = cw(), h = chh();
     window_t *w = wm_create("Command Prompt", ICON_TERMINAL, -1, -1, 80 * c + SB_W + 8, 25 * h + 6, WF_RESIZABLE);
     term_t *t = kzalloc(sizeof *t);
@@ -1054,6 +1057,7 @@ void app_terminal(void) {
     if (!v && vfs_volume_count()) v = vfs_volume(0);
     if (v) snprintf(t->cwd, sizeof t->cwd, "%c:/", v->letter);
     else strlcpy(t->cwd, "C:/", sizeof t->cwd);
+    if (dir && dir[0]) strlcpy(t->cwd, dir, sizeof t->cwd);
     w->data = t;
     w->cursor = CURSOR_IBEAM;
     w->on_paint = term_paint;

@@ -1,0 +1,1649 @@
+/* EXPLORER.EXE - My Computer and the folder browser / file manager.
+ *
+ * The user-mode port of the kernel's Explorer (kernel/apps/explorer.c, with
+ * the parts of fileops.c and progress.c it uses): My Computer with the
+ * drives, folder views (icons, details), the task pane, Back / Up and the
+ * address bar, selection, keyboard navigation and type-to-select, context
+ * menus, rename, new folder / text document, delete, cut / copy / paste,
+ * Properties, Format and Eject for drives, and a refresh when drives come
+ * and go. Copies, moves and deletes run in a worker thread behind a
+ * progress window with Cancel, so this window keeps painting meanwhile.
+ *
+ * Usage: EXPLORER.EXE ["C:/folder"]   (no argument or "" = My Computer)
+ *
+ * The Explorer clipboard (Cut / Copy of an item) is shared memory, so every
+ * Explorer window sees it, as with the built-in version. */
+#include "hal.h"
+
+#define MAX_PATH 520
+#define MAX_NAME 255
+#define N(a) ((int)(sizeof(a) / sizeof((a)[0])))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define CLAMP(v, lo, hi) ((v) < (lo) ? (lo) : (v) > (hi) ? (hi) : (v))
+#define E_NODEV -15
+#define ATTR_READONLY 0x01
+#define ATTR_HIDDEN   0x02
+#define ATTR_SYSTEM   0x04
+#define ATTR_VOLUME   0x08
+#define ATTR_ARCHIVE  0x20
+#define ICON16(i) ((i) | (1 << 16))
+#define ICON48(i) ((i) | (2 << 16))
+
+/* layout (canvas coordinates: the menu bar is above the canvas) */
+#define TOOLBAR_H 38
+#define ADDR_H 28
+#define STATUS_H 22
+#define PANE_W 196
+#define CELL_W 92
+#define CELL_H 76
+#define TILE_W 250
+#define TILE_H 60
+#define ROW_H 19
+#define SB_W 17
+#define TOP_Y (TOOLBAR_H + ADDR_H)
+
+typedef struct item {
+    char name[MAX_NAME + 1];
+    int is_dir, icon;
+    unsigned long long size;
+    unsigned short year; unsigned char month, day, hour, minute;
+    /* drives (My Computer) */
+    char letter, kind, is_boot, readonly;
+    char fs[8], device[16];
+    unsigned long long total, free;
+} item_t;
+
+typedef struct link { hal_rect_t r; int id; } link_t;
+#define MAX_LINKS 16
+
+enum { CMD_NEWFOLDER = 1, CMD_NEWTEXT, CMD_RENAME, CMD_DELETE, CMD_COPY, CMD_CUT, CMD_PASTE, CMD_PROPS, CMD_CLOSE,
+       CMD_OPEN, CMD_VIEW_ICONS, CMD_VIEW_DETAILS, CMD_REFRESH, CMD_BACK, CMD_UP, CMD_MYCOMP, CMD_MYDOCS,
+       CMD_TERMINAL, CMD_SYSINFO, CMD_CONTROL, CMD_OPEN_NOTEPAD, CMD_ABOUT, CMD_FORMAT, CMD_EJECT };
+enum { ID_ADDR = 100, ID_GO, ID_VSB };
+
+/* ---------------- state ---------------- */
+static int win, cw = 700, ch = 460;
+static char path[MAX_PATH];                 /* "" = My Computer */
+static item_t *items;
+static int n, sel = -1, hover = -1, scroll, view;    /* view 0 icons, 1 details */
+static char back[16][MAX_PATH];
+static int nback;
+static unsigned vgen;
+static unsigned long long disk_free;        /* of the folder's drive, at load time */
+static link_t links[MAX_LINKS];
+static int nlinks, link_hover = -1, tb_hover = -1, cursor = -1;
+static int quit;                            /* the window was closed while busy */
+static hal_theme_t th;
+static int view_x, view_y, view_w, view_h;
+
+/* the Explorer clipboard, shared by every Explorer window */
+typedef struct clip { volatile int cut; char path[MAX_PATH]; } clip_t;
+static clip_t local_clip, *clip = &local_clip;
+
+static void paint(void);
+static void load(void);
+
+/* ---------------- small helpers ---------------- */
+static unsigned mix(unsigned a, unsigned b, int t) {
+    unsigned ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
+    unsigned br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
+    return (((ar * (255 - t) + br * t) / 255) << 16) | (((ag * (255 - t) + bg * t) / 255) << 8) | ((ab * (255 - t) + bb * t) / 255);
+}
+static unsigned lighten(unsigned c, int amt) { return amt >= 0 ? mix(c, 0xFFFFFF, amt) : mix(c, 0x000000, -amt); }
+static void hline(int x, int y, int w, unsigned c) { if (w > 0) gfx_line(win, x, y, x + w - 1, y, c); }
+static void vline(int x, int y, int h, unsigned c) { if (h > 0) gfx_line(win, x, y, x, y + h - 1, c); }
+static void rounded(int x, int y, int w, int h, int rad, int corners, unsigned top, unsigned bot) {
+    gfx_shade(win, x, y, w, h, top, bot, SHADE_ROUNDED, rad | (corners & 15) << 8);
+}
+static void rounded_outline(int x, int y, int w, int h, int rad, int corners, unsigned c) {
+    gfx_shade(win, x, y, w, h, c, 0, SHADE_ROUNDED_OUTLINE, rad | (corners & 15) << 8);
+}
+static int in_rect(int x, int y, int w, int h, int px, int py) { return px >= x && py >= y && px < x + w && py < y + h; }
+
+static const char *errstr(int e) {
+    switch (e) {
+    case 0: return "Success";
+    case E_IO: return "I/O error";
+    case E_NOMEM: return "Out of memory";
+    case E_NOENT: return "File or directory not found";
+    case E_EXIST: return "Already exists";
+    case E_NOTDIR: return "Not a directory";
+    case E_ISDIR: return "Is a directory";
+    case E_NOSPC: return "Disk is full";
+    case E_INVAL: return "Invalid argument";
+    case E_TIMEOUT: return "Timed out";
+    case -10: return "Device stalled";
+    case E_NOTSUP: return "Not supported";
+    case E_AGAIN: return "Try again";
+    case E_NOTEMPTY: return "Directory is not empty";
+    case E_ROFS: return "Read-only file system";
+    case E_NODEV: return "No such device";
+    case E_BUSY: return "Device busy";
+    case -17: return "Name too long";
+    case E_CANCELED: return "Canceled";
+    case E_PERM: return "Access denied";
+    }
+    return "Unknown error";
+}
+
+/* ---------------- paths (as the kernel's vfs_normalize / join / dirname) ---------------- */
+static int path_normalize(const char *in, char *out, int outsz) {
+    if (!isalpha((unsigned char)in[0]) || in[1] != ':' || outsz < 4) return E_INVAL;
+    int o = 0;
+    out[o++] = (char)toupper((unsigned char)in[0]);
+    out[o++] = ':';
+    const char *s = in + 2;
+    for (;;) {
+        while (*s == '/' || *s == '\\') s++;
+        if (!*s) break;
+        const char *e = s;
+        while (*e && *e != '/' && *e != '\\') e++;
+        int len = (int)(e - s);
+        if (len == 1 && s[0] == '.') {
+        } else if (len == 2 && s[0] == '.' && s[1] == '.') {
+            while (o > 2 && out[o - 1] != '/') o--;
+            if (o > 2) o--;
+        } else {
+            if (len > MAX_NAME || o + 1 + len + 1 > outsz) return E_INVAL;
+            out[o++] = '/';
+            memcpy(out + o, s, (size_t)len);
+            o += len;
+        }
+        s = e;
+    }
+    if (o == 2) out[o++] = '/';
+    out[o] = 0;
+    return 0;
+}
+static void path_join(const char *dir, const char *name, char *out, int outsz) {
+    strlcpy(out, dir, (size_t)outsz);
+    int l = (int)strlen(out);
+    if (l && out[l - 1] != '/') strlcat(out, "/", (size_t)outsz);
+    strlcat(out, name, (size_t)outsz);
+}
+static const char *path_base(const char *p) {
+    const char *s = strrchr(p, '/');
+    return s ? s + 1 : p;
+}
+static void path_dir(const char *p, char *out, int outsz) {
+    strlcpy(out, p, (size_t)outsz);
+    char *s = strrchr(out, '/');
+    if (!s) return;
+    if (s == out + 2) s[1] = 0;            /* "C:/x" -> "C:/" */
+    else *s = 0;
+}
+static int path_is_root(const char *p) { return strlen(p) <= 3; }
+static int prefix_nocase(const char *a, const char *b, size_t len) {
+    for (size_t i = 0; i < len; i++) if (!b[i] || toupper((unsigned char)a[i]) != toupper((unsigned char)b[i])) return 0;
+    return 1;
+}
+
+/* ---------------- Unicode-aware name order ---------------- */
+/* simple uppercase mapping, as the kernel's uc_upper */
+static unsigned uc_upper(unsigned c) {
+    if (c < 0x80) return (c >= 'a' && c <= 'z') ? c - 32 : c;
+    if (c < 0x100) {
+        if (c >= 0xE0 && c <= 0xFE && c != 0xF7) return c - 32;
+        if (c == 0xFF) return 0x178;
+        if (c == 0xB5) return 0x39C;
+        return c;
+    }
+    if (c <= 0x17F) {
+        if ((c >= 0x100 && c <= 0x137) || (c >= 0x14A && c <= 0x177)) return (c & 1) ? c - 1 : c;
+        if ((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E)) return (c & 1) ? c : c - 1;
+        if (c == 0x17F) return 'S';
+        return c;
+    }
+    if (c >= 0x370 && c <= 0x3FF) {
+        if ((c >= 0x3B1 && c <= 0x3C1) || (c >= 0x3C3 && c <= 0x3CB)) return c - 32;
+        if (c == 0x3C2) return 0x3A3;
+        if (c == 0x3AC) return 0x386;
+        if (c >= 0x3AD && c <= 0x3AF) return c - 37;
+        if (c == 0x3CC) return 0x38C;
+        if (c == 0x3CD || c == 0x3CE) return c - 63;
+        return c;
+    }
+    if (c >= 0x400 && c <= 0x4FF) {
+        if (c >= 0x430 && c <= 0x44F) return c - 32;
+        if (c >= 0x450 && c <= 0x45F) return c - 80;
+        if ((c >= 0x460 && c <= 0x481) || (c >= 0x48A && c <= 0x4BF) || (c >= 0x4D0 && c <= 0x4FF)) return (c & 1) ? c - 1 : c;
+        if (c >= 0x4C1 && c <= 0x4CE) return (c & 1) ? c : c - 1;
+        return c;
+    }
+    if (c >= 0x1E00 && c <= 0x1EFF) return (c & 1) ? c - 1 : c;
+    if (c >= 0xFF41 && c <= 0xFF5A) return c - 32;
+    return c;
+}
+
+/* the letter an accented letter sorts with (primary order): "École" next to
+ * "Ecole", not after "Z"; Greek tonos and Cyrillic Ё likewise */
+static unsigned fold(unsigned c) {
+    c = uc_upper(c);
+    if (c >= 0xC0 && c <= 0xDF) {
+        static const char latin1[] = "AAAAAAACEEEEIIIIDNOOOOO\0OUUUUYTS";
+        char b = latin1[c - 0xC0];
+        return b ? (unsigned)b : c;
+    }
+    if (c >= 0x100 && c <= 0x17F) {
+        static const char exta[] =
+            "AAAAAACCCCCCCCDDDDEEEEEEEEEEGGGGGGGGHHHHIIIIIIIIIIIIJJKKKLLLLLLLLLLNNNNNNNNNOOOOOOOORRRRRRSSSSSSSSTTTTTTUUUUUUUUUUUUWWYYYZZZZZZS";
+        return (unsigned)exta[c - 0x100];
+    }
+    switch (c) {
+    case 0x386: return 0x391; case 0x388: return 0x395; case 0x389: return 0x397; case 0x38A: case 0x3AA: return 0x399;
+    case 0x38C: return 0x39F; case 0x38E: case 0x3AB: return 0x3A5; case 0x38F: return 0x3A9;
+    case 0x401: return 0x415;
+    }
+    return c;
+}
+
+/* numbers inside names compare by value, as in Windows XP: "File 9" before "File 10" */
+static int number_cmp(const char *a, int *pa, int la, const char *b, int *pb, int lb) {
+    int ea = *pa, eb = *pb;
+    while (ea < la && isdigit((unsigned char)a[ea])) ea++;
+    while (eb < lb && isdigit((unsigned char)b[eb])) eb++;
+    int sa = *pa, sb = *pb;
+    while (sa < ea - 1 && a[sa] == '0') sa++;
+    while (sb < eb - 1 && b[sb] == '0') sb++;
+    int r = (ea - sa) - (eb - sb);
+    if (!r) r = memcmp(a + sa, b + sb, (size_t)(ea - sa));
+    *pa = ea; *pb = eb;
+    return r < 0 ? -1 : r > 0;
+}
+
+static int name_cmp(const char *a, const char *b) {
+    int la = (int)strlen(a), lb = (int)strlen(b);
+    for (int pass = 0; pass < 2; pass++) {
+        int pa = 0, pb = 0;
+        for (;;) {
+            if (pass == 0 && pa < la && pb < lb && isdigit((unsigned char)a[pa]) && isdigit((unsigned char)b[pb])) {
+                int r = number_cmp(a, &pa, la, b, &pb, lb);
+                if (r) return r;
+                continue;
+            }
+            unsigned x = utf8_get(a, la, &pa), y = utf8_get(b, lb, &pb);
+            if (pass == 0) { x = fold(x); y = fold(y); } else { x = uc_upper(x); y = uc_upper(y); }
+            if (x != y) return x < y ? -1 : 1;
+            if (!x) break;
+        }
+    }
+    return strcmp(a, b);
+}
+
+static int item_cmp(const item_t *a, const item_t *b) {
+    if (a->is_dir != b->is_dir) return b->is_dir - a->is_dir;
+    return name_cmp(a->name, b->name);
+}
+
+/* merge sort: stable, n log n for big folders */
+static void sort_items(item_t *it, int cnt) {
+    if (cnt < 2) return;
+    item_t *tmp = malloc(sizeof(item_t) * (size_t)cnt);
+    if (!tmp) {
+        for (int i = 1; i < cnt; i++) {
+            item_t t = it[i];
+            int j = i - 1;
+            while (j >= 0 && item_cmp(&it[j], &t) > 0) { it[j + 1] = it[j]; j--; }
+            it[j + 1] = t;
+        }
+        return;
+    }
+    for (int width = 1; width < cnt; width *= 2) {
+        for (int lo = 0; lo < cnt; lo += 2 * width) {
+            int mid = MIN(lo + width, cnt), hi = MIN(lo + 2 * width, cnt), i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) tmp[k++] = item_cmp(&it[j], &it[i]) < 0 ? it[j++] : it[i++];
+            while (i < mid) tmp[k++] = it[i++];
+            while (j < hi) tmp[k++] = it[j++];
+        }
+        memcpy(it, tmp, sizeof(item_t) * (size_t)cnt);
+    }
+    free(tmp);
+}
+
+/* ---------------- file types, sizes, times (as fileops.c) ---------------- */
+static const char *ext_of(const char *name) {
+    const char *d = strrchr(name, '.');
+    return d ? d + 1 : "";
+}
+static int is_text_file(const char *name) {
+    static const char *t[] = { "txt", "log", "ini", "cfg", "c", "h", "md", "bat", "asm", "s", "py", "csv", "json",
+                               "xml", "htm", "html", "inf", "conf", "sh", "nfo", "me" };
+    const char *e = ext_of(name);
+    for (int i = 0; i < N(t); i++) if (!strcasecmp(e, t[i])) return 1;
+    return 0;
+}
+static const char *file_type_name(const char *name, int is_dir) {
+    if (is_dir) return "File Folder";
+    const char *e = ext_of(name);
+    if (is_text_file(name)) return !strcasecmp(e, "ini") || !strcasecmp(e, "cfg") ? "Configuration Settings" : "Text Document";
+    if (!strcasecmp(e, "bmp")) return "Bitmap Image";
+    if (!strcasecmp(e, "efi")) return "EFI Application";
+    if (!strcasecmp(e, "bin") || !strcasecmp(e, "sys")) return "System file";
+    if (!strcasecmp(e, "exe") || !strcasecmp(e, "com")) return "Application";
+    if (!strcasecmp(e, "img") || !strcasecmp(e, "iso")) return "Disk Image";
+    if (!strcasecmp(e, "zip")) return "Compressed Folder";
+    static char buf[24];
+    if (*e && strlen(e) <= 8) {
+        int k = 0;
+        for (const char *p = e; *p; p++) buf[k++] = (char)toupper((unsigned char)*p);
+        strlcpy(buf + k, " File", sizeof buf - (size_t)k);
+        return buf;
+    }
+    return "File";
+}
+static int file_icon(const char *name, int is_dir) {
+    if (is_dir) return HICON_FOLDER;
+    const char *e = ext_of(name);
+    if (is_text_file(name)) return HICON_FILE_TEXT;
+    if (!strcasecmp(e, "bmp")) return HICON_FILE_IMAGE;
+    if (!strcasecmp(e, "efi") || !strcasecmp(e, "exe") || !strcasecmp(e, "com")) return HICON_FILE_APP;
+    if (!strcasecmp(e, "bin") || !strcasecmp(e, "sys")) return HICON_FILE_SYS;
+    return HICON_FILE;
+}
+static void format_size(unsigned long long b, char *out, int sz) {
+    if (b < 1024) snprintf(out, (size_t)sz, "%llu bytes", b);
+    else if (b < 1024 * 1024) snprintf(out, (size_t)sz, "%llu KB", (b + 1023) / 1024);
+    else if (b < 1024ull * 1024 * 1024) snprintf(out, (size_t)sz, "%llu.%llu MB", b >> 20, ((b & 0xFFFFF) * 10) >> 20);
+    else snprintf(out, (size_t)sz, "%llu.%llu GB", b >> 30, ((b & 0x3FFFFFFF) * 10) >> 30);
+}
+static void format_size_exact(unsigned long long b, char *out, int sz) {
+    char digits[32];
+    snprintf(digits, sizeof digits, "%llu", b);
+    int len = (int)strlen(digits), o = 0;
+    for (int i = 0; i < len && o < sz - 8; i++) {
+        out[o++] = digits[i];
+        if ((len - i - 1) % 3 == 0 && i != len - 1) out[o++] = ',';
+    }
+    out[o] = 0;
+    strlcat(out, " bytes", (size_t)sz);
+}
+static void format_time(int year, int month, int day, int hour, int minute, char *out, int sz) {
+    if (!year) { out[0] = 0; return; }
+    int h = hour % 12 == 0 ? 12 : hour % 12;
+    snprintf(out, (size_t)sz, "%d/%d/%d %d:%02d %s", month, day, year, h, minute, hour < 12 ? "AM" : "PM");
+}
+static int drive_icon(int kind) {
+    return kind == VOL_REMOVABLE ? HICON_USBDRIVE : kind == VOL_CDROM ? HICON_CDROM : kind == VOL_FLOPPY ? HICON_FLOPPY : HICON_HDD;
+}
+static const char *drive_kind(int kind) {
+    return kind == VOL_REMOVABLE ? "Removable Disk" : kind == VOL_FLOPPY ? "Floppy Disk" : kind == VOL_CDROM ? "CD Drive" : "Local Disk";
+}
+
+/* "x (2).txt": a name not taken yet in dir */
+static int unique_name(const char *dir, const char *base, char *out, int outsz) {
+    hal_dirent_t st;
+    path_join(dir, base, out, outsz);
+    if (stat(out, &st) < 0) return 0;
+    char nm[MAX_NAME + 1], ext[MAX_NAME + 1] = "";
+    strlcpy(nm, base, sizeof nm);
+    char *dot = strrchr(nm, '.');
+    if (dot && dot != nm) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
+    for (int i = 2; i < 1000; i++) {
+        char cand[MAX_NAME + 16];
+        snprintf(cand, sizeof cand, "%s (%d)%s", nm, i, ext);
+        path_join(dir, cand, out, outsz);
+        if (stat(out, &st) < 0) return 0;
+    }
+    return E_EXIST;
+}
+
+/* a whole directory listing (malloc()ed) */
+static int list_dir(const char *p, hal_dirent_t **out) {
+    *out = NULL;
+    int cnt = readdir(p, NULL, 0);
+    if (cnt < 0) return cnt;
+    int cap = cnt + 16;
+    hal_dirent_t *e = malloc(sizeof(hal_dirent_t) * (size_t)cap);
+    if (!e) return E_NOMEM;
+    cnt = readdir(p, e, cap);
+    if (cnt < 0) { free(e); return cnt; }
+    *out = e;
+    return cnt;
+}
+
+/* ---------------- copy / move / delete in a worker thread (as fileops.c) ---------------- */
+enum { FOP_COPY = 1, FOP_MOVE, FOP_DELETE };
+typedef struct fileop {
+    int kind;
+    char src[MAX_PATH], dst[MAX_PATH];
+    volatile int cancel, done, counting;
+    int result;
+    volatile unsigned long long total_bytes, done_bytes;
+    volatile unsigned total_items, done_items;
+    hal_mutex_t lock;                   /* current */
+    char current[MAX_NAME + 1];
+    uint64_t start_ms;
+} fileop_t;
+
+#define FOP_CHUNK (128 * 1024)
+
+static void fop_set_current(fileop_t *op, const char *p) {
+    mutex_lock(&op->lock);
+    strlcpy(op->current, path_base(p), sizeof op->current);
+    mutex_unlock(&op->lock);
+}
+
+static void fop_count(fileop_t *op, const char *p) {
+    hal_dirent_t st;
+    if (op->cancel || stat(p, &st) < 0) return;
+    op->total_items++;
+    if (!st.is_dir) { op->total_bytes += st.size; return; }
+    hal_dirent_t *ents;
+    int cnt = list_dir(p, &ents);
+    if (cnt <= 0) return;
+    char *child = malloc(MAX_PATH);
+    for (int i = 0; i < cnt && child && !op->cancel; i++) {
+        path_join(p, ents[i].name, child, MAX_PATH);
+        fop_count(op, child);
+    }
+    free(child);
+    free(ents);
+}
+
+static int fop_copy_file(fileop_t *op, const char *src, const char *dst) {
+    char *buf = malloc(FOP_CHUNK);
+    if (!buf) return E_NOMEM;
+    int in = open(src, O_READ), out = -1, r = in < 0 ? in : 0;
+    if (!r) { out = open(dst, O_WRITE | O_CREATE | O_EXCL); if (out < 0) r = out; }
+    while (!r) {
+        if (op->cancel) { r = E_CANCELED; break; }
+        long got = read(in, buf, FOP_CHUNK);
+        if (got <= 0) { r = (int)got; break; }
+        long put = write(out, buf, (size_t)got);
+        if (put != got) { r = put < 0 ? (int)put : E_NOSPC; break; }
+        op->done_bytes += (unsigned long long)got;
+    }
+    if (in >= 0) close(in);
+    if (out >= 0) {
+        int rc = close(out);
+        if (!r && rc < 0) r = rc;
+        if (r) unlink(dst);             /* no half-copied files */
+    }
+    free(buf);
+    return r;
+}
+
+static int fop_copy(fileop_t *op, const char *src, const char *dst) {
+    hal_dirent_t st;
+    int r = stat(src, &st);
+    if (r < 0) return r;
+    fop_set_current(op, src);
+    op->done_items++;
+    if (!st.is_dir) return fop_copy_file(op, src, dst);
+    size_t sl = strlen(src);
+    if (prefix_nocase(src, dst, sl) && (dst[sl] == '/' || dst[sl] == 0)) return E_INVAL;    /* into itself */
+    r = mkdir(dst);
+    if (r < 0 && r != E_EXIST) return r;
+    hal_dirent_t *ents;
+    int cnt = list_dir(src, &ents);
+    if (cnt < 0) return cnt;
+    char *a = malloc(MAX_PATH), *b = malloc(MAX_PATH);
+    r = (a && b) ? 0 : E_NOMEM;
+    for (int i = 0; i < cnt && r >= 0; i++) {
+        if (op->cancel) { r = E_CANCELED; break; }
+        path_join(src, ents[i].name, a, MAX_PATH);
+        path_join(dst, ents[i].name, b, MAX_PATH);
+        r = fop_copy(op, a, b);
+    }
+    free(a); free(b); free(ents);
+    return r < 0 ? r : 0;
+}
+
+static int fop_delete(fileop_t *op, const char *p) {
+    hal_dirent_t st;
+    int r = stat(p, &st);
+    if (r < 0) return r;
+    if (st.is_dir) {
+        hal_dirent_t *ents;
+        int cnt = list_dir(p, &ents);
+        if (cnt < 0) return cnt;
+        char *child = malloc(MAX_PATH);
+        r = child ? 0 : E_NOMEM;
+        for (int i = 0; i < cnt && !r; i++) {
+            if (op->cancel) { r = E_CANCELED; break; }
+            path_join(p, ents[i].name, child, MAX_PATH);
+            r = fop_delete(op, child);
+        }
+        free(child);
+        free(ents);
+        if (r) return r;
+    }
+    fop_set_current(op, p);
+    r = unlink(p);
+    op->done_items++;
+    if (!st.is_dir) op->done_bytes += st.size;
+    return r;
+}
+
+static void fileop_execute(fileop_t *op) {
+    op->start_ms = time_ms();
+    op->counting = 1;
+    fop_count(op, op->src);
+    op->counting = 0;
+    int r;
+    if (op->cancel) r = E_CANCELED;
+    else if (op->kind == FOP_DELETE) r = fop_delete(op, op->src);
+    else if (op->kind == FOP_MOVE && toupper((unsigned char)op->src[0]) == toupper((unsigned char)op->dst[0])) r = rename(op->src, op->dst);
+    else {
+        r = fop_copy(op, op->src, op->dst);
+        /* a move across drives deletes the source only after a full copy */
+        if (!r && op->kind == FOP_MOVE) {
+            op->kind = FOP_DELETE;
+            op->done_bytes = 0;
+            op->done_items = 0;
+            r = fop_delete(op, op->src);
+        }
+    }
+    op->result = r;
+    __sync_synchronize();
+    op->done = 1;
+}
+
+static int fop_worker(void *arg) { fileop_execute(arg); return 0; }
+
+/* events that still matter while a dialog of ours is open: the main window
+ * keeps painting and following its size (it takes no input meanwhile) */
+static void layout(void);
+static void passive_event(const hal_event_t *ev) {
+    if (ev->win != win) return;
+    if (ev->type == EVT_PAINT) paint();
+    else if (ev->type == EVT_RESIZE) { cw = ev->x; ch = ev->y; layout(); }
+    else if (ev->type == EVT_CLOSE) quit = 1;
+}
+
+/* the progress window (as progress.c) */
+enum { ID_WHAT = 400, ID_WHERE, ID_BAR, ID_TIME, ID_CANCEL_OP };
+
+static void short_dir(const char *p, char *out, int sz) {
+    char d[MAX_PATH];
+    path_dir(p, d, sizeof d);
+    const char *b = path_base(d);
+    snprintf(out, (size_t)sz, "%s", *b ? b : d);
+}
+
+/* label text: at most max bytes, cut at a character boundary */
+static void cut_text(char *s, int max) {
+    int len = (int)strlen(s);
+    if (len <= max) return;
+    int pos = 0, last = 0;
+    while (pos < len && pos <= max) { last = pos; utf8_get(s, len, &pos); }
+    if (pos <= max) last = pos;
+    s[last] = 0;
+}
+
+static void progress_update(int pw, fileop_t *op, char *last_what, char *last_time, int *last_val) {
+    char t[MAX_NAME + 64], cur[MAX_NAME + 1];
+    const char *verb = op->kind == FOP_DELETE ? "Deleting" : op->kind == FOP_MOVE ? "Moving" : "Copying";
+    mutex_lock(&op->lock);
+    strlcpy(cur, op->current, sizeof cur);
+    mutex_unlock(&op->lock);
+    if (op->counting) snprintf(t, sizeof t, "Preparing to %s...", op->kind == FOP_DELETE ? "delete" : op->kind == FOP_MOVE ? "move" : "copy");
+    else snprintf(t, sizeof t, "%s '%s'", verb, cur);
+    cut_text(t, 250);
+    if (strcmp(t, last_what)) { strlcpy(last_what, t, 256); ctl_set_text(pw, ID_WHAT, t); }
+    /* progress by bytes; by items for deletes and empty files */
+    int val = 0;
+    unsigned long long tb = op->total_bytes, db = op->done_bytes;
+    unsigned ti = op->total_items, di = op->done_items;
+    if (tb && op->kind != FOP_DELETE) val = (int)(db * 1000 / tb);
+    else if (ti) val = (int)((unsigned long long)di * 1000 / ti);
+    val = MIN(val, 1000);
+    if (val != *last_val) { *last_val = val; ctl_set_value(pw, ID_BAR, val); }
+    unsigned long long el = time_ms() - op->start_ms;
+    if (op->counting || !val || el < 1500) snprintf(t, sizeof t, " ");
+    else {
+        unsigned long long left = el * (1000 - (unsigned long long)val) / (unsigned long long)val / 1000;
+        if (left >= 120) snprintf(t, sizeof t, "%llu minutes remaining", (left + 30) / 60);
+        else snprintf(t, sizeof t, "%llu second%s remaining", left + 1, left ? "s" : "");
+    }
+    if (strcmp(t, last_time)) { strlcpy(last_time, t, 64); ctl_set_text(pw, ID_TIME, t); }
+}
+
+/* run op in a worker thread behind a progress window (modal for ours);
+ * returns op->result */
+static int fileop_run(fileop_t *op) {
+    op->done = 0;
+    op->cancel = 0;
+    int tid = thread_create(fop_worker, op);
+    if (tid < 0) { fileop_execute(op); return op->result; }    /* no thread: do it here */
+    hal_event_t ev;
+    /* quick operations finish without a window */
+    uint64_t show_at = time_ms() + 300;
+    while (!op->done) {
+        uint64_t now = time_ms();
+        if (now >= show_at) break;
+        if (win_get_event(&ev, (int)(show_at - now))) passive_event(&ev);
+    }
+    if (!op->done) {
+        const char *title = op->kind == FOP_DELETE ? "Deleting..." : op->kind == FOP_MOVE ? "Moving..." : "Copying...";
+        int pw = win_create(title, 380, 150, WIN_DIALOG);
+        if (pw >= 0) {
+            win_set_icon(pw, op->kind == FOP_DELETE ? HICON_RECYCLE : HICON_FOLDER);
+            ctl_create(pw, CTL_LABEL, 14, 12, 352, 16, "", ID_WHAT, 0);
+            char a[MAX_NAME + 1], b[MAX_NAME + 1], line[2 * MAX_NAME + 32];
+            short_dir(op->src, a, sizeof a);
+            if (op->kind == FOP_DELETE) snprintf(line, sizeof line, "From '%s'", a);
+            else { short_dir(op->dst, b, sizeof b); snprintf(line, sizeof line, "From '%s' to '%s'", a, b); }
+            cut_text(line, 250);
+            ctl_create(pw, CTL_LABEL, 14, 32, 352, 16, line, ID_WHERE, 0);
+            ctl_create(pw, CTL_PROGRESS, 14, 56, 352, 16, "", ID_BAR, 0);
+            ctl_create(pw, CTL_LABEL, 14, 80, 250, 16, " ", ID_TIME, 0);
+            ctl_create(pw, CTL_BUTTON, 291, 112, 75, 23, "Cancel", ID_CANCEL_OP, CTL_CANCEL);
+            ctl_focus(pw, ID_CANCEL_OP);
+            win_set_owner(pw, win, 1);
+            char last_what[256] = "", last_time[64] = "";
+            int last_val = -1, canceling = 0;
+            progress_update(pw, op, last_what, last_time, &last_val);
+            uint64_t next = time_ms() + 100;
+            while (!op->done) {
+                uint64_t now = time_ms();
+                int wait_ms = now >= next ? 0 : (int)(next - now);
+                if (win_get_event(&ev, wait_ms)) {
+                    if (ev.win == pw) {
+                        int cancel_now = (ev.type == EVT_COMMAND && ev.id == ID_CANCEL_OP) || ev.type == EVT_CLOSE ||
+                                         (ev.type == EVT_KEY && ev.pressed && ev.id == KEY_ESC);
+                        if (cancel_now && !canceling) {
+                            canceling = 1;
+                            op->cancel = 1;
+                            ctl_set_text(pw, ID_CANCEL_OP, "Canceling...");
+                            ctl_set_style(pw, ID_CANCEL_OP, CTL_DISABLED);
+                        }
+                    } else {
+                        if (ev.type == EVT_CLOSE && ev.win == win) op->cancel = 1;
+                        passive_event(&ev);
+                    }
+                }
+                if (time_ms() >= next) { progress_update(pw, op, last_what, last_time, &last_val); next = time_ms() + 100; }
+            }
+            win_destroy(pw);
+        } else {
+            while (!op->done) if (win_get_event(&ev, 100)) passive_event(&ev);
+        }
+    }
+    thread_join(tid);
+    return op->result;
+}
+
+/* ---------------- model ---------------- */
+static void update_menus(void);
+
+static void update_title(void) {
+    char t[MAX_PATH + 16];
+    if (!path[0]) strlcpy(t, "My Computer", sizeof t);
+    else if (path_is_root(path)) {
+        hal_volinfo_t vi;
+        int ok = volume_info(path[0], &vi) == 0 && vi.label[0];
+        snprintf(t, sizeof t, "%s (%c:)", ok ? vi.label : "Local Disk", path[0]);
+    } else strlcpy(t, path_base(path), sizeof t);
+    win_set_title(win, t);
+    win_set_icon(win, !path[0] ? HICON_COMPUTER : HICON_FOLDER_OPEN);
+    ctl_set_text(win, ID_ADDR, path[0] ? path : "My Computer");
+}
+
+static void load(void) {
+    free(items);
+    items = NULL; n = 0;
+    sel = -1; hover = -1; scroll = 0;
+    vgen = vfs_generation();
+    disk_free = 0;
+    if (!path[0]) {
+        items = calloc(26, sizeof(item_t));
+        for (char c = 'A'; c <= 'Z' && items; c++) {
+            hal_volinfo_t vi;
+            if (volume_info(c, &vi) < 0) continue;
+            item_t *it = &items[n++];
+            it->letter = vi.letter;
+            it->kind = vi.kind;
+            it->is_boot = vi.is_boot;
+            it->readonly = vi.readonly;
+            strlcpy(it->fs, vi.fs, sizeof it->fs);
+            strlcpy(it->device, vi.device, sizeof it->device);
+            snprintf(it->name, sizeof it->name, "%s (%c:)", vi.label[0] ? vi.label : drive_kind(vi.kind), vi.letter);
+            it->is_dir = 1;
+            it->icon = drive_icon(vi.kind);
+            it->total = vi.total;
+            it->free = vi.free_bytes;
+        }
+    } else {
+        hal_dirent_t *ents;
+        int cnt = list_dir(path, &ents);
+        if (cnt < 0) {
+            char msg[MAX_PATH + 64];
+            snprintf(msg, sizeof msg, "%s is not accessible.\n\n%s", path, errstr(cnt));
+            path[0] = 0;
+            msgbox(win, "Explorer", msg, MBX_ICON_ERROR, MBX_OK);
+            load();
+            return;
+        }
+        items = calloc((size_t)cnt + 1, sizeof(item_t));
+        for (int i = 0; i < cnt && items; i++) {
+            if (ents[i].attr & (ATTR_HIDDEN | ATTR_VOLUME)) continue;
+            item_t *it = &items[n++];
+            strlcpy(it->name, ents[i].name, sizeof it->name);
+            it->is_dir = ents[i].is_dir;
+            it->size = ents[i].size;
+            it->year = ents[i].year; it->month = ents[i].month; it->day = ents[i].day;
+            it->hour = ents[i].hour; it->minute = ents[i].minute;
+            it->icon = file_icon(it->name, it->is_dir);
+        }
+        free(ents);
+        sort_items(items, n);
+        hal_volinfo_t vi;
+        if (volume_info(path[0], &vi) == 0) disk_free = vi.free_bytes;
+    }
+    update_title();
+    update_menus();
+    paint();
+}
+
+static void navigate(const char *to, int push) {
+    char norm[MAX_PATH] = "";
+    if (to[0] && strcasecmp(to, "My Computer")) {
+        if (path_normalize(to, norm, sizeof norm) < 0) {
+            msgbox(win, "Explorer", "The path is not valid.", MBX_ICON_ERROR, MBX_OK);
+            return;
+        }
+        hal_dirent_t st;
+        if (stat(norm, &st) < 0) {
+            char msg[MAX_PATH + 64];
+            snprintf(msg, sizeof msg, "Cannot find '%s'.", to);
+            msgbox(win, "Explorer", msg, MBX_ICON_ERROR, MBX_OK);
+            return;
+        }
+        if (!st.is_dir) { shell_open(norm); return; }
+    }
+    if (push && strcmp(path, norm)) {
+        if (nback == 16) { memmove(back[0], back[1], sizeof(back[0]) * 15); nback--; }
+        strlcpy(back[nback++], path, MAX_PATH);
+    }
+    strlcpy(path, norm, sizeof path);
+    load();
+}
+
+static void go_up(void) {
+    if (!path[0]) return;
+    if (path_is_root(path)) { navigate("", 1); return; }
+    char p[MAX_PATH];
+    path_dir(path, p, sizeof p);
+    navigate(p, 1);
+}
+
+static void item_path(int i, char *out, int sz) {
+    if (!path[0]) { snprintf(out, (size_t)sz, "%c:/", items[i].letter); return; }
+    path_join(path, items[i].name, out, sz);
+}
+
+static void open_item(int i) {
+    if (i < 0 || i >= n) return;
+    char p[MAX_PATH];
+    item_path(i, p, sizeof p);
+    if (items[i].is_dir) navigate(p, 1);
+    else {
+        int r = shell_open(p);
+        if (r < 0) {
+            char msg[MAX_PATH + 64];
+            snprintf(msg, sizeof msg, "Cannot open '%s'.\n\n%s", items[i].name, errstr(r));
+            msgbox(win, "Explorer", msg, MBX_ICON_ERROR, MBX_OK);
+        }
+    }
+}
+
+static void select_name(const char *nm) {
+    for (int i = 0; i < n; i++) if (!name_cmp(items[i].name, nm) || !strcasecmp(items[i].name, nm)) sel = i;
+}
+
+/* ---------------- layout ---------------- */
+static int pane_w(void) { return cw >= 560 ? PANE_W : 0; }
+
+static void compute_view(void) {
+    view_x = pane_w();
+    view_y = TOP_Y;
+    view_w = cw - view_x;
+    view_h = MAX(0, ch - TOP_Y - STATUS_H);
+}
+
+static int cols(void) {
+    int c = !path[0] && view == 0 ? TILE_W : CELL_W;
+    return MAX(1, (view_w - 20) / c);
+}
+
+static hal_rect_t item_rect(int i) {
+    hal_rect_t r;
+    if (view == 1) { r.x = view_x; r.y = view_y + 22 + i * ROW_H - scroll; r.w = view_w - SB_W; r.h = ROW_H; return r; }
+    int c = cols();
+    if (!path[0]) {
+        r.x = view_x + 10 + (i % c) * TILE_W; r.y = view_y + 34 + (i / c) * (TILE_H + 8) - scroll;
+        r.w = TILE_W - 10; r.h = TILE_H;
+        return r;
+    }
+    r.x = view_x + 6 + (i % c) * CELL_W; r.y = view_y + 8 + (i / c) * CELL_H - scroll;
+    r.w = CELL_W - 4; r.h = CELL_H - 4;
+    return r;
+}
+
+static int content_height(void) {
+    if (view == 1) return 22 + n * ROW_H + 4;
+    int c = cols(), rows = (n + c - 1) / c;
+    if (!path[0]) return 34 + rows * (TILE_H + 8) + 8;
+    return 8 + rows * CELL_H + 8;
+}
+
+static int max_scroll(void) { return MAX(0, content_height() - view_h); }
+
+static void ensure_visible(int i) {
+    if (i < 0) return;
+    hal_rect_t r = item_rect(i);
+    int top = view_y + (view == 1 ? 22 : 0);
+    if (r.y < top) scroll -= top - r.y;
+    if (r.y + r.h > view_y + view_h) scroll += r.y + r.h - (view_y + view_h);
+    scroll = CLAMP(scroll, 0, max_scroll());
+}
+
+static void layout(void) {
+    compute_view();
+    ctl_move(win, ID_ADDR, 62, TOOLBAR_H + 3, MAX(20, cw - 62 - 50), 22);
+    ctl_move(win, ID_GO, cw - 46, TOOLBAR_H + 3, 40, 22);
+    ctl_move(win, ID_VSB, view_x + view_w - SB_W, view_y, SB_W, MAX(SB_W * 2, view_h));
+}
+
+/* ---------------- painting ---------------- */
+static void draw_arrow_btn(int x, int y, int dir, int enabled) {
+    /* round button with an arrow: dir 0 = left, 1 = up */
+    unsigned top = enabled ? 0x8FD883 : 0xD8D8D0, bot = enabled ? 0x2E9A3A : 0xB0B0A8;
+    rounded(x, y, 26, 26, 13, 15, top, bot);
+    rounded_outline(x, y, 26, 26, 13, 15, enabled ? 0x1F6A26 : 0x9A9A90);
+    unsigned c = 0xFFFFFF;
+    int cx = x + 13, cy = y + 13;
+    if (dir == 0) {
+        for (int i = 0; i < 6; i++) vline(cx - 6 + i, cy - i, 2 * i + 1, c);
+        gfx_fill(win, cx, cy - 2, 7, 5, c);
+    } else {
+        for (int i = 0; i < 6; i++) hline(cx - i, cy - 6 + i, 2 * i + 1, c);
+        gfx_fill(win, cx - 2, cy, 5, 7, c);
+    }
+}
+
+static hal_rect_t tb_rect(int i) {
+    static const int xs[] = { 6, 84, 152, 238 };
+    static const int ws[] = { 74, 64, 82, 82 };
+    hal_rect_t r = { xs[i], 2, ws[i], TOOLBAR_H - 4 };
+    return r;
+}
+
+static void paint_toolbar(void) {
+    gfx_gradient(win, 0, 0, cw, TOOLBAR_H, lighten(th.face, 50), th.face);
+    hline(0, TOOLBAR_H - 1, cw, lighten(th.face, -25));
+    static const char *labels[] = { "Back", "Up", "Folders", "Views" };
+    for (int i = 0; i < 4; i++) {
+        hal_rect_t r = tb_rect(i);
+        int en = i == 0 ? nback > 0 : i == 1 ? path[0] != 0 : 1;
+        if (en && tb_hover == i) {
+            rounded(r.x, r.y, r.w, r.h, 3, 15, 0xFFFFFF, lighten(th.face, -15));
+            rounded_outline(r.x, r.y, r.w, r.h, 3, 15, lighten(th.face, -60));
+        }
+        if (i < 2) draw_arrow_btn(r.x + 3, r.y + 4, i, en);
+        else gfx_icon(win, r.x + 6, r.y + 8, ICON16(i == 2 ? HICON_FOLDER_OPEN : (view ? HICON_FILE_TEXT : HICON_FILE)));
+        int tx = r.x + (i < 2 ? 32 : 26);
+        gfx_text_box(win, tx, r.y, r.w - 30, r.h, i == 3 ? (view ? "Details" : "Icons") : labels[i], en ? 0x000000 : 0xA0A0A0, FONT_UI, 0);
+    }
+    /* address bar */
+    int ay = TOOLBAR_H;
+    gfx_fill(win, 0, ay, cw, ADDR_H, th.face);
+    gfx_text_box(win, 8, ay, 50, ADDR_H, "Address", 0x6D6D6D, FONT_UI, 0);
+    hline(0, ay + ADDR_H - 1, cw, lighten(th.face, -25));
+}
+
+static void add_link(int x, int y, int w, int h, int id) {
+    if (nlinks < MAX_LINKS) { link_t *l = &links[nlinks++]; l->r.x = x; l->r.y = y; l->r.w = w; l->r.h = h; l->id = id; }
+}
+
+/* one box of the task pane (pane coordinates: the clip origin is the pane's corner) */
+static int pane_box(int y, int wdt, const char *title, int nlines, const char **lines, const int *icons, const int *ids) {
+    int hx = 12, hw = wdt - 24;
+    rounded(hx, y, hw, 24, 5, 3, 0xFFFFFF, lighten(th.sidebar_top, 120));
+    gfx_text_box(win, hx + 10, y, hw - 12, 24, title, lighten(th.menu_header_bottom, -40), FONT_UI_BOLD, 0);
+    int bh = nlines * 20 + 12, by = y + 24;
+    gfx_fill(win, hx, by, hw, bh, lighten(th.sidebar_top, 165));
+    gfx_rect(win, hx, by, hw, bh, 0xFFFFFF);
+    for (int i = 0; i < nlines; i++) {
+        int lx = hx + 8, ly = by + 6 + i * 20, lw = hw - 12;
+        int hov = ids && link_hover == ids[i];
+        if (icons && icons[i] >= 0) gfx_icon(win, lx, ly + 2, ICON16(icons[i]));
+        int tx = lx + (icons && icons[i] >= 0 ? 22 : 0);
+        unsigned tc = ids ? lighten(th.menu_header_bottom, hov ? 40 : -20) : 0x202020;
+        gfx_text_box(win, tx, ly, lw - (tx - lx), 20, lines[i], tc, FONT_UI, 0);
+        if (hov) hline(tx, ly + 15, MIN(text_width(lines[i], FONT_UI), lw - (tx - lx)), tc);
+        if (ids) add_link(lx, ly + TOP_Y, lw, 20, ids[i]);
+    }
+    return y + 24 + bh + 12;
+}
+
+static void paint_pane(void) {
+    int pw = pane_w();
+    nlinks = 0;
+    if (!pw) return;
+    int ph = ch - TOP_Y - STATUS_H;
+    if (ph <= 0) return;
+    gfx_clip_origin(win, 0, TOP_Y, pw, ph);
+    gfx_gradient(win, 0, 0, pw, ph, th.sidebar_top, th.sidebar_bottom);
+    int y = 12;
+    if (!path[0]) {
+        const char *l[] = { "View system information", "Change a setting", "Open Command Prompt" };
+        const int ic[] = { HICON_SYSINFO, HICON_CONTROL, HICON_TERMINAL };
+        const int id[] = { CMD_SYSINFO, CMD_CONTROL, CMD_TERMINAL };
+        y = pane_box(y, pw, "System Tasks", 3, l, ic, id);
+    } else if (sel >= 0) {
+        const char *l[] = { "Rename this item", "Copy this item", "Delete this item", "Make a new folder" };
+        const int ic[] = { HICON_FILE_TEXT, HICON_DOCUMENTS, HICON_RECYCLE, HICON_FOLDER };
+        const int id[] = { CMD_RENAME, CMD_COPY, CMD_DELETE, CMD_NEWFOLDER };
+        y = pane_box(y, pw, "File and Folder Tasks", 4, l, ic, id);
+    } else {
+        int pc = clip->path[0] != 0;
+        const char *l[] = { "Make a new folder", "New text document", pc ? "Paste here" : "Open Command Prompt" };
+        const int ic[] = { HICON_FOLDER, HICON_FILE_TEXT, pc ? HICON_DOCUMENTS : HICON_TERMINAL };
+        const int id[] = { CMD_NEWFOLDER, CMD_NEWTEXT, pc ? CMD_PASTE : CMD_TERMINAL };
+        y = pane_box(y, pw, "File and Folder Tasks", 3, l, ic, id);
+    }
+    {
+        const char *l[] = { "My Computer", "My Documents", "Control Panel" };
+        const int ic[] = { HICON_COMPUTER, HICON_DOCUMENTS, HICON_CONTROL };
+        const int id[] = { CMD_MYCOMP, CMD_MYDOCS, CMD_CONTROL };
+        y = pane_box(y, pw, "Other Places", 3, l, ic, id);
+    }
+    /* details box */
+    char l1[MAX_NAME + 1], l2[64], l3[64], l4[64];
+    const char *lines[4] = { l1, l2, l3, l4 };
+    int k;
+    if (sel >= 0 && sel < n) {
+        item_t *it = &items[sel];
+        strlcpy(l1, it->name, sizeof l1);
+        if (!path[0]) {
+            snprintf(l2, sizeof l2, "%s, %s", drive_kind(it->kind), it->fs);
+            char a[32], b[32];
+            format_size(it->free, a, sizeof a);
+            format_size(it->total, b, sizeof b);
+            snprintf(l3, sizeof l3, "Free Space: %s", a);
+            snprintf(l4, sizeof l4, "Total Size: %s", b);
+            k = 4;
+        } else {
+            strlcpy(l2, file_type_name(it->name, it->is_dir), sizeof l2);
+            k = 2;
+            if (!it->is_dir) { char s[32]; format_size(it->size, s, sizeof s); snprintf(l3, sizeof l3, "Size: %s", s); k = 3; }
+            char t[48];
+            format_time(it->year, it->month, it->day, it->hour, it->minute, t, sizeof t);
+            if (t[0]) { snprintf(k == 3 ? l4 : l3, 64, "Modified: %s", t); k++; }
+        }
+    } else if (path[0]) {
+        strlcpy(l1, path_is_root(path) ? path : path_base(path), sizeof l1);
+        strlcpy(l2, "File Folder", sizeof l2);
+        k = 2;
+    } else {
+        strlcpy(l1, "My Computer", sizeof l1);
+        strlcpy(l2, "System Folder", sizeof l2);
+        k = 2;
+    }
+    pane_box(y, pw, "Details", k, lines, NULL, NULL);
+    gfx_clip_reset(win);
+}
+
+/* an icon view name: up to two lines, broken at a space when possible */
+static void split_name(const char *nm, int maxw, char *l1, char *l2) {
+    int len = (int)strlen(nm), n1 = len;
+    l2[0] = 0;
+    if (text_width(nm, FONT_UI) > maxw) {
+        int acc = 0, lastsp = -1, pos = 0;
+        while (pos < len) {
+            int q = pos;
+            unsigned cp = utf8_get(nm, len, &q);
+            int w = text_char_width(cp, FONT_UI);
+            if (acc + w > maxw && pos > 0) break;
+            if (cp == ' ') lastsp = pos;
+            acc += w;
+            pos = q;
+        }
+        n1 = pos;
+        if (lastsp > 0 && n1 < len) n1 = lastsp + 1;
+    }
+    memcpy(l1, nm, (size_t)n1);
+    l1[n1] = 0;
+    int k = n1;
+    while (k > 0 && l1[k - 1] == ' ') l1[--k] = 0;
+    if (k < len) strlcpy(l2, nm + k + (nm[k] == ' '), MAX_NAME + 1);
+}
+
+static void paint_view(void) {
+    int vx = view_x, vy = view_y, vw = view_w, vh = view_h;
+    if (vw <= SB_W || vh <= 0) return;
+    gfx_fill(win, vx, vy, vw - SB_W, vh, 0xFFFFFF);
+    gfx_clip(win, vx, vy, vw - SB_W, vh);
+    if (view == 1) {
+        /* details */
+        int cwid = vw - SB_W;
+        int c1 = MAX(160, cwid - 330), c2 = 80, c3 = 120;
+        for (int i = 0; i < n; i++) {
+            hal_rect_t r = item_rect(i);
+            if (r.y + r.h < vy + 22 || r.y > vy + vh) continue;
+            item_t *it = &items[i];
+            int s = i == sel;
+            if (s) gfx_fill(win, r.x + 2, r.y, c1 - 4, r.h, th.select);
+            else if (i == hover) gfx_fill(win, r.x + 2, r.y, c1 - 4, r.h, lighten(th.select, 200));
+            gfx_icon(win, r.x + 6, r.y + 1, ICON16(it->icon));
+            gfx_text_box(win, r.x + 26, r.y, c1 - 30, r.h, it->name, s ? th.select_text : 0x000000, FONT_UI, 0);
+            char buf[64];
+            if (!path[0]) format_size(it->total, buf, sizeof buf);
+            else if (it->is_dir) buf[0] = 0;
+            else format_size(it->size, buf, sizeof buf);
+            gfx_text_box(win, r.x + c1, r.y, c2 - 8, r.h, buf, 0x000000, FONT_UI, 2);
+            gfx_text_box(win, r.x + c1 + c2 + 8, r.y, c3 - 8, r.h, path[0] ? file_type_name(it->name, it->is_dir) : drive_kind(it->kind),
+                         0x000000, FONT_UI, 0);
+            if (!path[0]) format_size(it->free, buf, sizeof buf);
+            else format_time(it->year, it->month, it->day, it->hour, it->minute, buf, sizeof buf);
+            gfx_text_box(win, r.x + c1 + c2 + c3 + 8, r.y, cwid - (c1 + c2 + c3 + 8), r.h, buf, 0x000000, FONT_UI, 0);
+        }
+        /* header */
+        gfx_gradient(win, vx, vy, cwid, 21, 0xFFFFFF, 0xEBEADB);
+        hline(vx, vy + 20, cwid, 0xD6D2C2);
+        const char *hdr[4] = { "Name", "Size", "Type", path[0] ? "Date Modified" : "Free Space" };
+        int xs[5] = { 0, c1, c1 + c2, c1 + c2 + c3, cwid };
+        for (int i = 0; i < 4; i++) {
+            gfx_text_box(win, vx + xs[i] + 8, vy, xs[i + 1] - xs[i] - 12, 21, hdr[i], 0x000000, FONT_UI, i == 1 ? 2 : 0);
+            vline(vx + xs[i + 1] - 1, vy + 3, 15, 0xD6D2C2);
+        }
+    } else if (!path[0]) {
+        /* My Computer tiles */
+        gfx_text(win, vx + 12, vy + 10 - scroll, "Files Stored on This Computer", lighten(th.menu_header_bottom, -40), FONT_UI_BOLD);
+        gfx_shade(win, vx + 12, vy + 26 - scroll, vw - 60, 1, th.sidebar_bottom, 0xFFFFFF, SHADE_GRADIENT_H, 0);
+        for (int i = 0; i < n; i++) {
+            hal_rect_t r = item_rect(i);
+            item_t *it = &items[i];
+            if (i == sel) rounded(r.x, r.y, r.w, r.h, 3, 15, lighten(th.select, 170), lighten(th.select, 140));
+            else if (i == hover) rounded(r.x, r.y, r.w, r.h, 3, 15, lighten(th.select, 215), lighten(th.select, 200));
+            gfx_icon(win, r.x + 6, r.y + 6, ICON48(it->icon));
+            gfx_text_box(win, r.x + 60, r.y + 4, r.w - 64, 16, it->name, 0x000000, FONT_UI_BOLD, 0);
+            char a[32], b[32], line[80];
+            format_size(it->free, a, sizeof a);
+            format_size(it->total, b, sizeof b);
+            snprintf(line, sizeof line, "%s free of %s", a, b);
+            gfx_text_box(win, r.x + 60, r.y + 20, r.w - 64, 16, line, 0x6D6D6D, FONT_UI, 0);
+            int bx = r.x + 60, by = r.y + 40, bw = r.w - 70, bh = 10;
+            gfx_fill(win, bx, by, bw, bh, 0xFFFFFF);
+            gfx_rect(win, bx, by, bw, bh, 0x8C8C8C);
+            int used = it->total ? (int)((it->total - it->free) * (unsigned long long)(bw - 2) / it->total) : 0;
+            if (used > 0) gfx_gradient(win, bx + 1, by + 1, used, bh - 2, 0x74A9F4, 0x2860C8);
+        }
+        if (!n) gfx_text(win, vx + 14, vy + 40, "No drives found.", 0x6D6D6D, FONT_UI);
+    } else {
+        for (int i = 0; i < n; i++) {
+            hal_rect_t r = item_rect(i);
+            if (r.y + r.h < vy || r.y > vy + vh) continue;
+            item_t *it = &items[i];
+            int s = i == sel;
+            int ix = r.x + (r.w - 32) / 2;
+            if (s) gfx_shade(win, ix, r.y + 4, 32, 32, th.select, (unsigned)it->icon, SHADE_ICON_TINTED, 100);
+            else gfx_icon(win, ix, r.y + 4, it->icon);
+            char l1[MAX_NAME + 1], l2[MAX_NAME + 1];
+            int maxw = r.w - 4;
+            split_name(it->name, maxw, l1, l2);
+            int ty = r.y + 40;
+            for (int line = 0; line < 2; line++) {
+                const char *t = line ? l2 : l1;
+                if (!*t) continue;
+                int tw = MIN(text_width(t, FONT_UI), maxw);
+                int tx = r.x + (r.w - tw) / 2, tyy = ty + line * 13;
+                if (s) gfx_fill(win, tx - 2, tyy, tw + 4, 13, th.select);
+                gfx_text_box(win, tx, tyy, tw, 13, t, s ? th.select_text : 0x000000, FONT_UI, 1);
+            }
+        }
+        if (!n) gfx_text(win, vx + 14, vy + 14, "This folder is empty.", 0x6D6D6D, FONT_UI);
+    }
+    gfx_clip_reset(win);
+    ctl_scroll_set(win, ID_VSB, content_height(), vh, scroll, 40);
+}
+
+static void paint_status(void) {
+    int sy = ch - STATUS_H;
+    gfx_fill(win, 0, sy, cw, STATUS_H, th.face);
+    hline(0, sy, cw, lighten(th.face, -30));
+    char st[MAX_NAME + 96];
+    if (!path[0]) snprintf(st, sizeof st, "%d drive%s", n, n == 1 ? "" : "s");
+    else {
+        char f[32];
+        format_size(disk_free, f, sizeof f);
+        if (sel >= 0) {
+            char s[32];
+            format_size(items[sel].size, s, sizeof s);
+            snprintf(st, sizeof st, "Selected: %s%s%s    (Disk free space: %s)", items[sel].name, items[sel].is_dir ? "" : ", ",
+                     items[sel].is_dir ? "" : s, f);
+        } else snprintf(st, sizeof st, "%d object%s    (Disk free space: %s)", n, n == 1 ? "" : "s", f);
+    }
+    gfx_text_box(win, 8, sy + 1, cw - 16, STATUS_H - 1, st, 0x000000, FONT_UI, 0);
+}
+
+static void paint(void) {
+    gfx_theme(&th);
+    compute_view();
+    scroll = CLAMP(scroll, 0, max_scroll());
+    gfx_clip_reset(win);
+    paint_toolbar();
+    paint_pane();
+    paint_view();
+    paint_status();
+    win_invalidate(win);
+}
+
+/* ---------------- menus ---------------- */
+static const hal_menu_item_t bar[] = {
+    { "&File", 0, 0, MENU_TITLE, 0, 0 },
+    { "&Open", "Enter", CMD_OPEN, MENU_BOLD, 0, 0 },
+    { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+    { "New &Folder", 0, CMD_NEWFOLDER, 0, HICON_FOLDER, 0 },
+    { "New &Text Document", 0, CMD_NEWTEXT, 0, HICON_FILE_TEXT, 0 },
+    { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+    { "&Delete", "Del", CMD_DELETE, 0, 0, 0 },
+    { "Rena&me", "F2", CMD_RENAME, 0, 0, 0 },
+    { "P&roperties", 0, CMD_PROPS, 0, 0, 0 },
+    { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+    { "&Close", 0, CMD_CLOSE, 0, 0, 0 },
+    { "&Edit", 0, 0, MENU_TITLE, 0, 0 },
+    { "Cu&t", "Ctrl+X", CMD_CUT, 0, 0, 0 },
+    { "&Copy", "Ctrl+C", CMD_COPY, 0, 0, 0 },
+    { "&Paste", "Ctrl+V", CMD_PASTE, 0, 0, 0 },
+    { "&View", 0, 0, MENU_TITLE, 0, 0 },
+    { "Ico&ns", 0, CMD_VIEW_ICONS, MENU_CHECKED, 0, 0 },
+    { "&Details", 0, CMD_VIEW_DETAILS, 0, 0, 0 },
+    { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+    { "&Refresh", "F5", CMD_REFRESH, 0, 0, 0 },
+    { "&Go", 0, 0, MENU_TITLE, 0, 0 },
+    { "&Back", "Alt+Left", CMD_BACK, 0, 0, 0 },
+    { "&Up One Level", "Backspace", CMD_UP, 0, 0, 0 },
+    { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+    { "My &Computer", 0, CMD_MYCOMP, 0, HICON_COMPUTER, 0 },
+    { "My &Documents", 0, CMD_MYDOCS, 0, HICON_DOCUMENTS, 0 },
+    { "&Help", 0, 0, MENU_TITLE, 0, 0 },
+    { "&About Halcyon", 0, CMD_ABOUT, 0, HICON_HELP, 0 },
+};
+
+static int clip_shown;                      /* whether the pane and menus offer Paste */
+static void update_menus(void) {
+    clip_shown = clip->path[0] != 0;
+    menu_enable(win, CMD_BACK, nback > 0);
+    menu_enable(win, CMD_UP, path[0] != 0);
+    menu_enable(win, CMD_PASTE, path[0] && clip->path[0]);
+    menu_check(win, CMD_VIEW_ICONS, view == 0);
+    menu_check(win, CMD_VIEW_DETAILS, view == 1);
+}
+
+static void context_menu(int i, int x, int y) {
+    if (i >= 0 && !path[0]) {
+        item_t *it = &items[i];
+        int cd = it->kind == VOL_CDROM;
+        hal_menu_item_t m[] = {
+            { "&Open", 0, CMD_OPEN, MENU_BOLD, 0, 0 },
+            { "&Eject", 0, CMD_EJECT, cd ? 0 : MENU_DISABLED, HICON_CDROM, 0 },     /* CD drives only */
+            { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+            { "Form&at...", 0, CMD_FORMAT, (cd || it->is_boot || it->readonly) ? MENU_DISABLED : 0, 0, 0 },
+            { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+            { "P&roperties", 0, CMD_PROPS, 0, 0, 0 },
+        };
+        menu_popup(win, m, N(m), x, y);
+    } else if (i >= 0) {
+        hal_menu_item_t m[] = {
+            { "&Open", 0, CMD_OPEN, MENU_BOLD, 0, 0 },
+            { "Open with &Notepad", 0, CMD_OPEN_NOTEPAD, items[i].is_dir ? MENU_DISABLED : 0, HICON_NOTEPAD, 0 },
+            { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+            { "Cu&t", 0, CMD_CUT, 0, 0, 0 },
+            { "&Copy", 0, CMD_COPY, 0, 0, 0 },
+            { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+            { "&Delete", 0, CMD_DELETE, 0, 0, 0 },
+            { "Rena&me", 0, CMD_RENAME, 0, 0, 0 },
+            { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+            { "P&roperties", 0, CMD_PROPS, 0, 0, 0 },
+        };
+        menu_popup(win, m, N(m), x, y);
+    } else if (path[0]) {
+        hal_menu_item_t m[] = {
+            { "View: &Icons", 0, CMD_VIEW_ICONS, view == 0 ? MENU_CHECKED : 0, 0, 0 },
+            { "View: &Details", 0, CMD_VIEW_DETAILS, view == 1 ? MENU_CHECKED : 0, 0, 0 },
+            { "R&efresh", 0, CMD_REFRESH, 0, 0, 0 },
+            { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+            { "&Paste", 0, CMD_PASTE, clip->path[0] ? 0 : MENU_DISABLED, 0, 0 },
+            { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+            { "New &Folder", 0, CMD_NEWFOLDER, 0, HICON_FOLDER, 0 },
+            { "New &Text Document", 0, CMD_NEWTEXT, 0, HICON_FILE_TEXT, 0 },
+            { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+            { "Command Prompt &Here", 0, CMD_TERMINAL, 0, HICON_TERMINAL, 0 },
+        };
+        menu_popup(win, m, N(m), x, y);
+    }
+}
+
+/* ---------------- dialogs ---------------- */
+/* wrapped text as the kernel's labels draw it: lines of at most width px */
+static int wrap_text(const char *s, int width, int x, int y, int draw) {
+    int y0 = y, lh = text_height(FONT_UI) + 1;
+    int len = (int)strlen(s), p = 0;
+    while (p < len) {
+        int k = 0, w = 0, last_space = -1;
+        while (p + k < len && s[p + k] != '\n') {
+            int q = p + k;
+            int cw2 = text_char_width(utf8_get(s, len, &q), FONT_UI);
+            if (w + cw2 > width && k > 0) break;
+            if (s[p + k] == ' ') last_space = k;
+            w += cw2;
+            k = q - p;
+        }
+        int brk = k;
+        if (p + k < len && s[p + k] != '\n' && last_space > 0) brk = last_space;
+        if (draw) gfx_text_n(win, x, y, s + p, brk, 0x000000, FONT_UI);
+        y += lh;
+        p += brk;
+        if (p < len && (s[p] == ' ' || s[p] == '\n')) p++;
+    }
+    return y - y0;
+}
+
+/* a message box with any icon (Properties shows the item's own icon) */
+static void info_box(const char *title, const char *text, int icon) {
+    int tw = text_width(text, FONT_UI);
+    int textw = CLAMP(tw + 10, 200, 420);
+    int texth = wrap_text(text, textw, 0, 0, 0);
+    int dw = MAX(textw + 76, 82 + 30), dh = MAX(texth, 36) + 72;
+    int d = win_create(title, dw, dh, WIN_DIALOG);
+    if (d < 0) { msgbox(win, title, text, MBX_ICON_INFO, MBX_OK); return; }
+    win_set_icon(d, icon);
+    ctl_create(d, CTL_BUTTON, (dw - 75) / 2, dh - 36, 75, 23, "OK", 1, CTL_DEFAULT | CTL_CANCEL);
+    ctl_focus(d, 1);
+    win_set_owner(d, win, 1);
+    int main_win = win;
+    for (;;) {
+        hal_event_t ev;
+        if (!win_get_event(&ev, -1)) continue;
+        if (ev.win != d) { passive_event(&ev); continue; }
+        if (ev.type == EVT_PAINT) {
+            win = d;            /* the drawing helpers draw into win */
+            gfx_fill(d, 0, 0, dw, dh, th.face);
+            gfx_icon(d, 16, 16, icon);
+            wrap_text(text, textw, 62, 16 + (texth < 32 ? (32 - texth) / 2 : 0), 1);
+            win = main_win;
+            win_invalidate(d);
+        }
+        if (ev.type == EVT_CLOSE || ev.type == EVT_COMMAND ||
+            (ev.type == EVT_KEY && ev.pressed && (ev.id == KEY_ESC || ev.id == KEY_ENTER || ev.id == KEY_KP_ENTER))) break;
+    }
+    win_destroy(d);
+}
+
+/* ---------------- commands ---------------- */
+static void report(const char *what, int err) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "%s\n\n%s", what, errstr(err));
+    msgbox(win, "Error", msg, MBX_ICON_ERROR, MBX_OK);
+}
+
+static void cmd_new(int folder) {
+    if (!path[0]) return;
+    char p[MAX_PATH];
+    unique_name(path, folder ? "New Folder" : "New Text Document.txt", p, sizeof p);
+    char nm[MAX_NAME + 1];
+    strlcpy(nm, path_base(p), sizeof nm);
+    if (!inputbox(win, folder ? "New Folder" : "New Text Document", folder ? "Name of the new folder:" : "Name of the new document:", nm, sizeof nm) || !nm[0]) return;
+    path_join(path, nm, p, sizeof p);
+    int r;
+    if (folder) r = mkdir(p);
+    else {
+        r = open(p, O_WRITE | O_CREATE | O_TRUNC);
+        if (r >= 0) r = close(r);
+    }
+    if (r < 0) { report(folder ? "Cannot create the folder." : "Cannot create the file.", r); return; }
+    load();
+    select_name(nm);
+    ensure_visible(sel);
+    paint();
+}
+
+static void cmd_rename(void) {
+    if (!path[0] || sel < 0) return;
+    char nm[MAX_NAME + 1];
+    strlcpy(nm, items[sel].name, sizeof nm);
+    if (!inputbox(win, "Rename", "New name:", nm, sizeof nm) || !nm[0] || !strcmp(nm, items[sel].name)) return;
+    char from[MAX_PATH], to[MAX_PATH];
+    item_path(sel, from, sizeof from);
+    path_join(path, nm, to, sizeof to);
+    int r = rename(from, to);
+    if (r < 0) { report("Cannot rename the item.", r); return; }
+    load();
+    select_name(nm);
+    ensure_visible(sel);
+    paint();
+}
+
+static fileop_t *new_op(int kind) {
+    fileop_t *op = calloc(1, sizeof *op);
+    if (op) op->kind = kind;
+    return op;
+}
+
+static void cmd_delete(void) {
+    if (!path[0] || sel < 0) return;
+    item_t *it = &items[sel];
+    char msg[MAX_NAME + 96];
+    snprintf(msg, sizeof msg, it->is_dir ? "Are you sure you want to delete the folder '%s' and all of its contents?"
+                                         : "Are you sure you want to delete '%s'?", it->name);
+    if (msgbox(win, it->is_dir ? "Confirm Folder Delete" : "Confirm File Delete", msg, MBX_ICON_WARNING, MBX_YESNO) != IDR_YES) return;
+    fileop_t *op = new_op(FOP_DELETE);
+    if (!op) return;
+    item_path(sel, op->src, sizeof op->src);
+    int r = fileop_run(op);
+    free(op);
+    if (quit) return;
+    if (r < 0 && r != E_CANCELED) report("Cannot delete the item.", r);
+    int keep = sel;
+    load();
+    sel = MIN(keep, n - 1);
+    paint();
+}
+
+static void cmd_copy(int cut) {
+    if (!path[0] || sel < 0) return;
+    char p[MAX_PATH];
+    item_path(sel, p, sizeof p);
+    clip->path[0] = 0;
+    clip->cut = cut;
+    strlcpy(clip->path, p, sizeof clip->path);
+    update_menus();
+}
+
+static void cmd_paste(void) {
+    char src[MAX_PATH];
+    strlcpy(src, clip->path, sizeof src);
+    int cut = clip->cut;
+    if (!path[0] || !src[0]) return;
+    hal_dirent_t st;
+    if (stat(src, &st) < 0) {
+        msgbox(win, "Paste", "The copied item no longer exists.", MBX_ICON_WARNING, MBX_OK);
+        clip->path[0] = 0;
+        update_menus();
+        return;
+    }
+    char dst[MAX_PATH], srcdir[MAX_PATH];
+    const char *base = path_base(src);
+    path_dir(src, srcdir, sizeof srcdir);
+    if (cut && !strcasecmp(srcdir, path)) { clip->path[0] = 0; update_menus(); return; }
+    if (!cut && !strcasecmp(srcdir, path)) {
+        char cand[MAX_NAME + 16];
+        snprintf(cand, sizeof cand, "Copy of %s", base);
+        unique_name(path, cand, dst, sizeof dst);
+    } else {
+        unique_name(path, base, dst, sizeof dst);
+    }
+    fileop_t *op = new_op(cut ? FOP_MOVE : FOP_COPY);
+    if (!op) return;
+    strlcpy(op->src, src, sizeof op->src);
+    strlcpy(op->dst, dst, sizeof op->dst);
+    int r = fileop_run(op);
+    free(op);
+    if (quit) return;
+    if (r < 0 && r != E_CANCELED) report(cut ? "Cannot move the item." : "Cannot copy the item.", r);
+    if (cut && !r && !strcmp(clip->path, src)) clip->path[0] = 0;    /* moved: nothing left to paste */
+    load();
+    select_name(path_base(dst));
+    ensure_visible(sel);
+    paint();
+}
+
+static void cmd_props(void) {
+    char msg[1100], sz[48], szx[48], tm[48], ct[48];
+    if (sel < 0) {
+        if (!path[0]) { shell_app(SHELL_APP_SYSINFO, NULL); return; }
+        snprintf(msg, sizeof msg, "Location: %s\nContains: %d items", path, n);
+        info_box("Properties", msg, HICON_FOLDER);
+        return;
+    }
+    item_t *it = &items[sel];
+    char p[MAX_PATH];
+    item_path(sel, p, sizeof p);
+    hal_statx_t x;
+    memset(&x, 0, sizeof x);
+    int have = stat_ex(p, &x) == 0;
+    if (!path[0]) {
+        hal_volinfo_t vi;
+        if (volume_info(it->letter, &vi) == 0) { it->total = vi.total; it->free = vi.free_bytes; }
+        char used[48], fr[48], tot[48];
+        format_size(it->total - it->free, used, sizeof used);
+        format_size(it->free, fr, sizeof fr);
+        format_size(it->total, tot, sizeof tot);
+        snprintf(msg, sizeof msg, "%s\n\nType: %s\nFile system: %s\nDevice: %s (%s)\n\nUsed space: %s\nFree space: %s\nCapacity: %s",
+                 it->name, drive_kind(it->kind), it->fs[0] ? it->fs : "?", have && x.model[0] ? x.model : "?",
+                 it->device[0] ? it->device : "?", used, fr, tot);
+        info_box("Disk Properties", msg, it->icon);
+        return;
+    }
+    hal_dirent_t *st = &x.d;
+    if (!have && stat(p, st) < 0) memset(st, 0, sizeof *st);
+    format_size(st->size, sz, sizeof sz);
+    format_size_exact(st->size, szx, sizeof szx);
+    format_time(st->year, st->month, st->day, st->hour, st->minute, tm, sizeof tm);
+    format_time(x.cyear, x.cmonth, x.cday, x.chour, x.cminute, ct, sizeof ct);
+    char size_line[128] = "";
+    if (!it->is_dir) snprintf(size_line, sizeof size_line, "Size: %s (%s)", sz, szx);
+    snprintf(msg, sizeof msg, "%s\n\nType: %s\nLocation: %s\n%s\n\nCreated: %s\nModified: %s\nShort name: %s\nAttributes:%s%s%s%s",
+             it->name, file_type_name(it->name, it->is_dir), path, size_line,
+             ct[0] ? ct : "unknown", tm[0] ? tm : "unknown", x.short_name,
+             (st->attr & ATTR_READONLY) ? " Read-only" : "", (st->attr & ATTR_HIDDEN) ? " Hidden" : "",
+             (st->attr & ATTR_SYSTEM) ? " System" : "", (st->attr & ATTR_ARCHIVE) ? " Archive" : "");
+    info_box("Properties", msg, it->icon);
+}
+
+static void cmd_format(void) {
+    if (path[0] || sel < 0 || sel >= n) return;
+    int r = shell_format(items[sel].letter);
+    if (r == E_BUSY) msgbox(win, "Format", "A Format window is already open.", MBX_ICON_WARNING, MBX_OK);
+    else if (r < 0) report("Cannot format the disk.", r);
+    /* the drive list refreshes when the volume comes back (vfs_generation) */
+}
+
+static void cmd_eject(void) {
+    if (path[0] || sel < 0 || sel >= n) return;
+    int r = eject(items[sel].letter);
+    if (r && r != E_NODEV) msgbox(win, "Eject", errstr(r), MBX_ICON_WARNING, MBX_OK);
+    load();
+}
+
+static void tool(int app, const char *arg) {
+    int r = shell_app(app, arg);
+    if (r < 0 && r != E_BUSY) report("Cannot open the program.", r);
+}
+
+static void command(int id) {
+    switch (id) {
+    case CMD_OPEN: open_item(sel); break;
+    case CMD_OPEN_NOTEPAD:
+        if (sel >= 0 && path[0] && !items[sel].is_dir) { char p[MAX_PATH]; item_path(sel, p, sizeof p); tool(SHELL_APP_NOTEPAD, p); }
+        break;
+    case CMD_NEWFOLDER: cmd_new(1); break;
+    case CMD_NEWTEXT: cmd_new(0); break;
+    case CMD_RENAME: cmd_rename(); break;
+    case CMD_DELETE: cmd_delete(); break;
+    case CMD_COPY: cmd_copy(0); break;
+    case CMD_CUT: cmd_copy(1); break;
+    case CMD_PASTE: cmd_paste(); break;
+    case CMD_PROPS: cmd_props(); break;
+    case CMD_FORMAT: cmd_format(); break;
+    case CMD_EJECT: cmd_eject(); break;
+    case CMD_CLOSE: quit = 1; break;
+    case CMD_VIEW_ICONS: view = 0; scroll = 0; update_menus(); paint(); break;
+    case CMD_VIEW_DETAILS: view = 1; scroll = 0; update_menus(); paint(); break;
+    case CMD_REFRESH: { int s = sel; load(); sel = MIN(s, n - 1); paint(); break; }
+    case CMD_BACK: if (nback) { nback--; char p[MAX_PATH]; strlcpy(p, back[nback], sizeof p); navigate(p, 0); } break;
+    case CMD_UP: go_up(); break;
+    case CMD_MYCOMP: navigate("", 1); break;
+    case CMD_MYDOCS: navigate("C:/Documents", 1); break;
+    case CMD_TERMINAL: tool(SHELL_APP_TERMINAL, path[0] ? path : NULL); break;
+    case CMD_SYSINFO: tool(SHELL_APP_SYSINFO, NULL); break;
+    case CMD_CONTROL: tool(SHELL_APP_CONTROL, NULL); break;
+    case CMD_ABOUT: tool(SHELL_APP_ABOUT, NULL); break;
+    }
+}
+
+/* ---------------- events ---------------- */
+static int item_at(int px, int py) {
+    if (!in_rect(view_x, view_y, view_w - SB_W, view_h, px, py)) return -1;
+    if (view == 1 && py < view_y + 22) return -1;
+    for (int i = 0; i < n; i++) {
+        hal_rect_t r = item_rect(i);
+        if (view == 1) r.w = MAX(160, view_w - SB_W - 330);
+        if (in_rect(r.x, r.y, r.w, r.h, px, py)) return i;
+    }
+    return -1;
+}
+
+static void set_cursor(int c) {
+    if (c != cursor) { cursor = c; win_set_cursor(win, c); }
+}
+
+static void mouse_move(int x, int y) {
+    int h = item_at(x, y), lh = -1, tbh = -1;
+    for (int i = 0; i < nlinks; i++) if (in_rect(links[i].r.x, links[i].r.y, links[i].r.w, links[i].r.h, x, y)) lh = links[i].id;
+    for (int i = 0; i < 4; i++) { hal_rect_t r = tb_rect(i); if (in_rect(r.x, r.y, r.w, r.h, x, y)) tbh = i; }
+    set_cursor(lh >= 0 ? CUR_HAND : CUR_ARROW);
+    if (h != hover || lh != link_hover || tbh != tb_hover) {
+        hover = h; link_hover = lh; tb_hover = tbh;
+        paint();
+    }
+}
+
+static void mouse_down(const hal_event_t *ev) {
+    int x = ev->x, y = ev->y;
+    if (y >= TOOLBAR_H && y < TOP_Y) return;    /* the address bar and Go button handle their clicks */
+    ctl_focus(win, 0);                      /* keys to the view, not the address bar */
+    for (int i = 0; i < 4; i++) {
+        hal_rect_t r = tb_rect(i);
+        if (in_rect(r.x, r.y, r.w, r.h, x, y) && ev->button == MOUSE_LEFT) {
+            command(i == 0 ? CMD_BACK : i == 1 ? CMD_UP : i == 2 ? CMD_MYCOMP : view ? CMD_VIEW_ICONS : CMD_VIEW_DETAILS);
+            return;
+        }
+    }
+    for (int i = 0; i < nlinks; i++)
+        if (in_rect(links[i].r.x, links[i].r.y, links[i].r.w, links[i].r.h, x, y) && ev->button == MOUSE_LEFT) { command(links[i].id); return; }
+    if (!in_rect(view_x, view_y, view_w - SB_W, view_h, x, y)) return;
+    int i = item_at(x, y);
+    if (i != sel) { sel = i; paint(); }
+    if (ev->type == EVT_DBLCLICK && ev->button == MOUSE_LEFT && i >= 0) { open_item(i); return; }
+    if (ev->button == MOUSE_RIGHT) context_menu(i, x, y);
+}
+
+static unsigned first_char(const char *s) {
+    int pos = 0;
+    return utf8_get(s, (int)strlen(s), &pos);
+}
+
+static void key(const hal_event_t *ev) {
+    if (ctl_get_focus(win) == ID_ADDR && ev->id != KEY_F5) return;   /* typing in the address bar */
+    int c = view == 1 ? 1 : cols(), ns = sel;
+    int page = view == 1 ? MAX(1, (view_h - 22) / ROW_H) : c * MAX(1, view_h / (path[0] ? CELL_H : TILE_H + 8));
+    switch (ev->id) {
+    case KEY_ENTER: case KEY_KP_ENTER: open_item(sel); return;
+    case KEY_BACKSPACE: go_up(); return;
+    case KEY_DELETE: cmd_delete(); return;
+    case KEY_F2: cmd_rename(); return;
+    case KEY_F5: command(CMD_REFRESH); return;
+    case KEY_MENU: menu_key: {
+        int i = sel;
+        hal_rect_t r = { view_x + 20, view_y + 20, 0, 0 };
+        if (i >= 0) { ensure_visible(i); paint(); r = item_rect(i); }
+        context_menu(i, r.x + MIN(r.w, 40), r.y + MIN(r.h, 12));
+        return;
+    }
+    case KEY_LEFT: if (ev->mods & MOD_ALT) { command(CMD_BACK); return; } ns = view == 1 ? ns : ns - 1; break;
+    case KEY_RIGHT: ns = view == 1 ? ns : ns + 1; break;
+    case KEY_UP: ns -= c; break;
+    case KEY_DOWN: ns = ns < 0 ? 0 : ns + c; break;
+    case KEY_PAGEUP: ns = ns < 0 ? 0 : ns - page; break;
+    case KEY_PAGEDOWN: ns = ns < 0 ? 0 : ns + page; break;
+    case KEY_HOME: ns = 0; break;
+    case KEY_END: ns = n - 1; break;
+    default:
+        if (ev->id == KEY_F10 && (ev->mods & MOD_SHIFT)) goto menu_key;
+        if (ev->mods & (MOD_CTRL | MOD_ALT)) {
+            if (key_shortcut(ev, 'C')) cmd_copy(0);
+            else if (key_shortcut(ev, 'X')) cmd_copy(1);
+            else if (key_shortcut(ev, 'V')) cmd_paste();
+            return;
+        }
+        if (ev->ch > 32 && ev->ch != 127 && n) {
+            /* jump to the next item starting with the typed character */
+            for (int j = 1; j <= n; j++) {
+                int idx = (sel + j + n) % n;
+                if (fold(first_char(items[idx].name)) == fold(ev->ch)) { ns = idx; break; }
+            }
+        }
+        break;
+    }
+    if (n) ns = CLAMP(ns, 0, n - 1); else ns = -1;
+    if (ns != sel) { sel = ns; ensure_visible(ns); paint(); }
+}
+
+static void drives_changed(void) {
+    /* drives came or went: if ours vanished go to My Computer */
+    hal_volinfo_t vi;
+    if (path[0] && volume_info(path[0], &vi) < 0) path[0] = 0;
+    int s = sel;
+    load();
+    sel = MIN(s, n - 1);
+    paint();
+}
+
+int main(int argc, char **argv) {
+    int h = shm_open("halcyon.explorer.clip", sizeof(clip_t), SHM_CREATE);
+    if (h >= 0) {
+        size_t sz = 0;
+        clip_t *c = shm_map(h, &sz);
+        if (c && sz >= sizeof(clip_t)) clip = c;
+    }
+    win = win_create("My Computer", cw, ch, WIN_RESIZABLE);
+    if (win < 0) { printf("explorer: no window (%d)\n", win); return 1; }
+    win_set_icon(win, HICON_COMPUTER);
+    win_set_min_size(win, 352, 200);
+    menu_set(win, bar, N(bar));
+    ctl_create(win, CTL_TEXTBOX, 62, TOOLBAR_H + 3, cw - 62 - 50, 22, "", ID_ADDR, CTL_NOTIFY);
+    ctl_create(win, CTL_BUTTON, cw - 46, TOOLBAR_H + 3, 40, 22, "Go", ID_GO, 0);
+    ctl_create(win, CTL_VSCROLL, 0, 0, SB_W, 40, 0, ID_VSB, 0);
+    ctl_focus(win, 0);
+    win_size(win, &cw, &ch);
+    layout();
+    const char *start = argc > 1 ? argv[1] : "";
+    if (start[0]) navigate(start, 0);
+    if (!items) load();                     /* My Computer (or the start path was a file) */
+    win_set_timer(win, 500);
+
+    while (!quit) {
+        hal_event_t ev;
+        if (!win_get_event(&ev, -1) || ev.win != win) continue;
+        switch (ev.type) {
+        case EVT_PAINT: paint(); break;
+        case EVT_CLOSE: quit = 1; break;
+        case EVT_RESIZE: cw = ev.x; ch = ev.y; layout(); break;
+        case EVT_MOUSE_MOVE: mouse_move(ev.x, ev.y); break;
+        case EVT_MOUSE_LEAVE: mouse_move(-1, -1); break;
+        case EVT_WHEEL: scroll = CLAMP(scroll - ev.dz * 57, 0, max_scroll()); paint(); break;
+        case EVT_MOUSE_DOWN: case EVT_DBLCLICK: mouse_down(&ev); break;
+        case EVT_KEY: if (ev.pressed) key(&ev); break;
+        case EVT_MENU: command(ev.id); break;
+        case EVT_SCROLL: if (ev.id == ID_VSB) { scroll = CLAMP(ev.x, 0, max_scroll()); paint(); } break;
+        case EVT_COMMAND:
+            if ((ev.id == ID_ADDR && ev.button == CMD_ACTIVATE) || ev.id == ID_GO) {
+                char a[MAX_PATH];
+                ctl_get_text(win, ID_ADDR, a, sizeof a);
+                navigate(a, 1);
+            }
+            break;
+        case EVT_TIMER:
+            if (vfs_generation() != vgen) drives_changed();
+            else if ((clip->path[0] != 0) != clip_shown) { update_menus(); paint(); }   /* another Explorer cut or pasted */
+            break;
+        }
+    }
+    win_destroy(win);
+    return 0;
+}

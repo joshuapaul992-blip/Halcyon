@@ -23,7 +23,7 @@ its own drivers for USB, SATA and FAT file systems.
 | Unicode | File names and text are UTF-8 throughout; FAT long names are stored as UTF-16 (including characters outside the BMP), with Unicode case-insensitive lookup. The fonts cover Latin, Greek, Cyrillic and common symbols; other characters are kept and drawn as a replacement box. |
 | GUI | Compositing window manager (move, resize, minimize, maximize), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Theme and wallpaper are kept across restarts (`C:\HALCYON\SETTINGS.INI`). |
 | Display | The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; the QEMU/Bochs/VirtualBox adapter switches at once, with Windows' "keep these settings?" 15-second revert. The frame buffer is write-combining (PAT). |
-| Apps | Explorer (My Computer, file management), Notepad, Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Sonar (a mine-hunting puzzle), Control Panel, Display Properties, Keyboard settings, About. |
+| Apps | Explorer (My Computer, file management; the user program `EXPLORER.EXE`, copies and deletes in a worker thread), Notepad, Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Sonar (a mine-hunting puzzle), Control Panel, Display Properties, Keyboard settings, About. |
 
 ## Building
 
@@ -139,7 +139,10 @@ message boxes and file dialogs. `make` builds each into `build/user/NAME.exe` an
 puts it on the image as `C:\PROGRAMS\NAME.EXE`. Type its name in the Command Prompt
 (console output and input go to that window) or double-click it in Explorer.
 `HELLO.EXE` is a console example; `CRASHME.EXE` (Crash Test) fails in nine
-different ways on purpose; `TASKMGR.EXE` is Task Manager; `CALC.EXE` and
+different ways on purpose; `TASKMGR.EXE` is Task Manager; `EXPLORER.EXE` is
+Explorer (My Computer, folder views, copy / move / delete in a worker thread
+behind a progress window; it opens files with `shell_open`, the shell's own
+tools with `shell_app` and reads Properties details with `stat_ex`); `CALC.EXE` and
 `SONAR.EXE` are full GUI programs (they draw into their own pixel buffer and
 blit it, then add text). `SELFTEST.EXE` checks the system calls (`selftest` in
 the Command Prompt; the QEMU `user` test variant runs it). `GUIDEMO.EXE` (GUI

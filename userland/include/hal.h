@@ -101,6 +101,9 @@ static inline unsigned vfs_generation(void) { return (unsigned)SC0(SYS_VFS_GENER
 static inline int shell_open(const char *path) { return (int)SC1(SYS_SHELL_OPEN, path); }   /* like a double click */
 static inline int shell_format(char drive) { return (int)SC1(SYS_SHELL_FORMAT, drive); }    /* the user decides in it */
 static inline int eject(char drive) { return (int)SC1(SYS_EJECT, drive); }                  /* CD/DVD drives */
+/* open a built-in tool (SHELL_APP_*: Command Prompt in folder arg, Notepad
+ * with file arg, System Information, Control Panel, About); does not wait */
+static inline int shell_app(int app, const char *arg) { return (int)SC2(SYS_SHELL_APP, app, arg); }
 
 /* ---- files (fd 0/1/2: console) ---- */
 static inline int open(const char *p, int flags) { return (int)SC2(SYS_OPEN, p, flags); }
@@ -110,6 +113,8 @@ static inline long write(int fd, const void *b, size_t n) { return SC3(SYS_WRITE
 static inline long seek(int fd, long off, int whence) { return SC3(SYS_SEEK, fd, off, whence); }
 static inline long fsize(int fd) { return SC1(SYS_FSIZE, fd); }
 static inline int stat(const char *p, hal_dirent_t *d) { return (int)SC2(SYS_STAT, p, d); }
+/* stat plus creation time, 8.3 name and the device's model (hal_statx_t) */
+static inline int stat_ex(const char *p, hal_statx_t *x) { return (int)SC2(SYS_STAT_EX, p, x); }
 static inline int readdir(const char *p, hal_dirent_t *buf, int max) { return (int)SC3(SYS_READDIR, p, buf, max); }
 static inline int mkdir(const char *p) { return (int)SC1(SYS_MKDIR, p); }
 static inline int unlink(const char *p) { return (int)SC1(SYS_UNLINK, p); }
