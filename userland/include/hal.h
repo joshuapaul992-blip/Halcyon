@@ -121,11 +121,11 @@ void win_destroy(int win);
 void win_set_title(int win, const char *title);
 void win_invalidate(int win);                                    /* repaint the client area */
 /* next event of any of the program's windows; timeout_ms < 0 waits forever.
- * Returns 1 with *ev filled, 0 on timeout. EV_PAINT arrives when the client
+ * Returns 1 with *ev filled, 0 on timeout. EVT_PAINT arrives when the client
  * area must be drawn (draw it, then return to the event loop). */
 int  win_get_event(hal_event_t *ev, int timeout_ms);
 void win_size(int win, int *w, int *h);
-void win_set_timer(int win, int ms);                             /* EV_TIMER every ms (0 = off) */
+void win_set_timer(int win, int ms);                             /* EVT_TIMER every ms (0 = off) */
 
 void gfx_fill(int win, int x, int y, int w, int h, unsigned color);
 void gfx_rect(int win, int x, int y, int w, int h, unsigned color);

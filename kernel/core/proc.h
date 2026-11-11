@@ -40,6 +40,7 @@ typedef struct proc {
     int nthreads;
     thread_t *main;
     handle_t handles[PROC_HANDLES];
+    void *gui;                      /* window system state (gui/usergui.c) */
     const console_ops_t *con;       /* stdout / stdin (Command Prompt) or NULL */
     void *con_ctx;
     u32 parent;

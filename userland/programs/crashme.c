@@ -52,17 +52,17 @@ static const char *const labels[] = {
 
 int main(int argc, char **argv) {
     if (argc > 1) { fail(argv[1]); return 0; }
-    int w = win_create("Crash Test", 330, 60 + NT * 30, WIN_NO_MAX);
+    int w = win_create("Crash Test", 330, 66 + NT * 30, WIN_NO_MAX);
     if (w < 0) { printf("Crash Test needs the desktop (%d)\n", w); return 1; }
-    ctl_create(w, CTL_LABEL, 12, 10, 306, 32,
+    ctl_create(w, CTL_LABEL, 12, 10, 306, 46,
                "Each button makes this program fail in a different way. Halcyon ends the program; everything else keeps running.",
                0, CTL_WRAP);
-    for (int i = 0; i < NT; i++) ctl_create(w, CTL_BUTTON, 12, 50 + i * 30, 306, 24, labels[i], 100 + i, 0);
+    for (int i = 0; i < NT; i++) ctl_create(w, CTL_BUTTON, 12, 58 + i * 30, 306, 24, labels[i], 100 + i, 0);
     for (;;) {
         hal_event_t ev;
         if (!win_get_event(&ev, -1)) continue;
-        if (ev.type == EV_CLOSE) break;
-        if (ev.type == EV_COMMAND && ev.id >= 100 && ev.id < 100 + NT) fail(tests[ev.id - 100]);
+        if (ev.type == EVT_CLOSE) break;
+        if (ev.type == EVT_COMMAND && ev.id >= 100 && ev.id < 100 + NT) fail(tests[ev.id - 100]);
     }
     return 0;
 }

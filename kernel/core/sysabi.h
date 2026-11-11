@@ -58,16 +58,16 @@ typedef struct hal_sysinfo {
 } hal_sysinfo_t;
 
 /* window events (SYS_WIN_GET_EVENT) */
-enum { EV_NONE = 0, EV_PAINT, EV_CLOSE, EV_KEY, EV_MOUSE_DOWN, EV_MOUSE_UP, EV_MOUSE_MOVE, EV_DBLCLICK,
-       EV_WHEEL, EV_COMMAND, EV_TIMER, EV_RESIZE, EV_FOCUS };
+enum { EVT_NONE = 0, EVT_PAINT, EVT_CLOSE, EVT_KEY, EVT_MOUSE_DOWN, EVT_MOUSE_UP, EVT_MOUSE_MOVE, EVT_DBLCLICK,
+       EVT_WHEEL, EVT_COMMAND, EVT_TIMER, EVT_RESIZE, EVT_FOCUS };
 typedef struct hal_event {
     int type;
     int win;                     /* window handle */
-    int x, y;                    /* mouse: client coordinates; EV_RESIZE: new client size */
+    int x, y;                    /* mouse: client coordinates; EVT_RESIZE: new client size */
     int button, buttons, dz;
-    int id;                      /* EV_COMMAND: control id; EV_KEY: key code (usage) */
-    int pressed, mods;           /* EV_KEY */
-    unsigned int ch;             /* EV_KEY: character (Unicode code point) or 0 */
+    int id;                      /* EVT_COMMAND: control id; EVT_KEY: key code (usage) */
+    int pressed, mods;           /* EVT_KEY */
+    unsigned int ch;             /* EVT_KEY: character (Unicode code point) or 0 */
 } hal_event_t;
 
 /* SYS_WIN_CREATE flags */

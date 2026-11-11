@@ -144,7 +144,11 @@ void wm_set_busy(int busy);            /* hourglass cursor */
 
 /* main loop */
 void gui_main(void);
-void gui_step(void);                   /* one iteration: input, ticks, render */
+void gui_step(void);
+/* run fn on the GUI thread (directly if this is it) and wait for it */
+void gui_call(void (*fn)(void *arg), void *arg);
+/* run fn on the GUI thread later; no waiting */
+void gui_post(void (*fn)(void *arg), void *arg);                   /* one iteration: input, ticks, render */
 void gui_run_until(volatile int *flag);/* nested loop for modal dialogs */
 void gui_full_redraw(void);
 

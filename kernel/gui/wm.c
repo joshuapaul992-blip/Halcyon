@@ -1,6 +1,7 @@
 /* Halcyon OS - window manager: compositor, input routing, main loop */
 #include "wm.h"
 #include "core/irq.h"
+#include "core/thread.h"
 #include "fs/block.h"
 #include "core/lib.h"
 #include "core/mm.h"
@@ -863,6 +864,55 @@ static int render(void) {
     return 1;
 }
 
+/* ---------------- calls from other threads ---------------- */
+/* Window-manager changes requested by other threads (user programs' system
+ * calls) run on the GUI thread, from gui_step, so no thread changes the window
+ * lists while the GUI thread is walking them. */
+typedef struct gjob {
+    void (*fn)(void *arg);
+    void *arg;
+    volatile int done;
+    int async;
+    struct gjob *next;
+} gjob_t;
+static gjob_t *jobs_head;
+static thread_t *gui_thread;
+
+static void job_add(gjob_t *j) {
+    gjob_t **pp = &jobs_head;
+    while (*pp) pp = &(*pp)->next;
+    j->next = NULL;
+    *pp = j;
+}
+static int job_done(void *arg) { return ((gjob_t *)arg)->done; }
+
+void gui_call(void (*fn)(void *arg), void *arg) {
+    if (!gui_thread || thread_current() == gui_thread) { fn(arg); return; }
+    gjob_t j = { fn, arg, 0, 0, NULL };
+    job_add(&j);
+    thread_wait(job_done, &j, ~0ull);
+}
+
+void gui_post(void (*fn)(void *arg), void *arg) {
+    gjob_t *j = kzalloc(sizeof *j);
+    if (!j) return;
+    j->fn = fn; j->arg = arg; j->async = 1;
+    job_add(j);
+}
+
+static int run_jobs(void) {
+    int n = 0;
+    while (jobs_head) {
+        gjob_t *j = jobs_head;
+        jobs_head = j->next;
+        j->fn(j->arg);
+        n++;
+        if (j->async) kfree(j);
+        else j->done = 1;
+    }
+    return n;
+}
+
 /* ---------------- main loop ---------------- */
 static u64 last_tick;
 
@@ -875,6 +925,7 @@ void gui_step(void) {
     irq_service();
     input_poll_devices();
     if (storage_service()) busy = 1;
+    if (run_jobs()) busy = 1;
     busy |= input_pending();
     handle_input();
     u64 now = time_ms();
@@ -905,7 +956,10 @@ void gui_run_until(volatile int *flag) {
     while (!*flag) gui_step();
 }
 
+void usergui_init(void);
 void gui_main(void) {
+    gui_thread = thread_current();
+    usergui_init();
     screen_init();
     mx = screen_w() / 2; my = screen_h() / 2;
     desktop_init();

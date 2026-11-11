@@ -42,8 +42,10 @@ int  msgbox(int win, const char *title, const char *text, int icon, int buttons)
     return (int)SC5(SYS_MSGBOX, win, title, text, icon, buttons);
 }
 int  file_dialog(int win, int save, const char *title, const char *dir, const char *ext, char *out, int n) {
-    /* out and n packed: out pointer, size in the 6th argument */
-    return (int)SC6(SYS_FILE_DIALOG, win, save, title, dir, ext, out) >= 0 ? (out[n - 1] = 0, 1) : 0;
+    char path[520];                       /* the kernel writes a whole path */
+    if (SC6(SYS_FILE_DIALOG, win, save, title, dir, ext, path) != 1) return 0;
+    strlcpy(out, path, (size_t)n);
+    return 1;
 }
 void clipboard_set(const char *t) { SC1(SYS_CLIPBOARD_SET, t); }
 int  clipboard_get(char *buf, int n) { return (int)SC2(SYS_CLIPBOARD_GET, buf, n); }
