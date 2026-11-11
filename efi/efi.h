@@ -150,7 +150,7 @@ typedef struct {
     void *CloseProtocol;
     void *OpenProtocolInformation;
     void *ProtocolsPerHandle;
-    void *LocateHandleBuffer;
+    EFI_STATUS (EFIAPI *LocateHandleBuffer)(UINTN SearchType, EFI_GUID *, void *, UINTN *, EFI_HANDLE **);
     EFI_STATUS (EFIAPI *LocateProtocol)(EFI_GUID *, void *, void **);
     void *InstallMultipleProtocolInterfaces;
     void *UninstallMultipleProtocolInterfaces;
@@ -267,6 +267,12 @@ struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
     { 0x09576e91, 0x6d3f, 0x11d2, { 0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b } }
 #define EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID \
     { 0x9042a9de, 0x23dc, 0x4a38, { 0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a } }
+#define EFI_EDID_ACTIVE_PROTOCOL_GUID \
+    { 0xbd8c1056, 0x9f36, 0x44ec, { 0x92, 0xa8, 0xa6, 0x33, 0x7f, 0x81, 0x79, 0x86 } }
+#define EFI_EDID_DISCOVERED_PROTOCOL_GUID \
+    { 0x1c0c34f6, 0xd380, 0x41fa, { 0xa0, 0x49, 0x8a, 0xd0, 0x6c, 0x1a, 0x66, 0xaa } }
+typedef struct { UINT32 SizeOfEdid; UINT8 *Edid; } EFI_EDID_PROTOCOL;   /* Active and Discovered */
+#define EFI_BY_PROTOCOL 2
 #define EFI_ACPI_20_TABLE_GUID \
     { 0x8868e871, 0xe4f1, 0x11d3, { 0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 } }
 #define EFI_ACPI_10_TABLE_GUID \

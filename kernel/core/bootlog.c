@@ -4,6 +4,7 @@
  * boot drive: once the desktop is up, on shutdown/restart, and (best effort)
  * after a crash. The previous boot's log is kept as BOOTPREV.LOG. */
 #include "kernel.h"
+#include "drivers/edid.h"
 #include "lib.h"
 #include "irq.h"
 #include "mm.h"
@@ -43,6 +44,14 @@ void hwreport_early(void) {
             b->boot_disk_sig, b->boot_part_lba);
     kprintf("hw: video %ux%u %ubpp pitch %u, R%u/%u G%u/%u B%u/%u\n", b->fb_width, b->fb_height, b->fb_bpp, b->fb_pitch,
             b->fb_red_pos, b->fb_red_size, b->fb_green_pos, b->fb_green_size, b->fb_blue_pos, b->fb_blue_size);
+    static const char *why[] = { "loader default", "saved setting", "monitor's native mode", "safe video", "firmware's mode" };
+    kprintf("hw: video modes: %u offered, chosen by %s\n", b->mode_count, b->mode_reason < 5 ? why[b->mode_reason] : "?");
+    edid_info_t ei;
+    if (b->edid_size && edid_parse(b->edid, (int)b->edid_size, &ei))
+        kprintf("hw: monitor %s, %s%04X, native %dx%d@%dHz, %dx%d mm\n", ei.name[0] ? ei.name : "(no name)", ei.vendor,
+                ei.product, ei.native_w, ei.native_h, ei.native_hz, ei.width_mm, ei.height_mm);
+    else
+        kprintf("hw: monitor: the firmware gave no EDID\n");
     kprintf("hw: memory map (%u entries):\n", b->mmap_count);
     for (u32 i = 0; i < b->mmap_count; i++)
         kprintf("  %016lx - %016lx %s\n", b->mmap[i].base, b->mmap[i].base + b->mmap[i].length - 1, mmap_type(b->mmap[i].type));

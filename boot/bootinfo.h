@@ -53,6 +53,19 @@ struct kernel_header {
     uint64_t entry;       /* physical entry point */
 } __attribute__((packed));
 
+#define BOOTINFO_MAX_MODES 64
+struct bootinfo_mode {
+    uint16_t width, height;
+    uint16_t bpp;              /* 32 or 24 */
+    uint16_t id;               /* VBE mode number or GOP mode index */
+} __attribute__((packed));
+
+#define MODE_BY_DEFAULT  0     /* no setting, no EDID: the loader's default */
+#define MODE_BY_SETTING  1     /* display.width / display.height in SETTINGS.INI */
+#define MODE_BY_EDID     2     /* the monitor's native (preferred) mode */
+#define MODE_BY_SAFE     3     /* F8 safe video mode */
+#define MODE_BY_FIRMWARE 4     /* kept the mode the firmware had set */
+
 struct bootinfo_mmap {
     uint64_t base;
     uint64_t length;
@@ -82,6 +95,16 @@ struct bootinfo {
     uint32_t mmap_count;
     uint32_t boot_flags;       /* BOOTF_* chosen in the F8 Advanced Startup Options menu */
     struct bootinfo_mmap mmap[BOOTINFO_MAX_MMAP];
+
+    /* display: every usable mode the firmware offers (VBE / GOP), the monitor's
+     * EDID if the firmware could read it, and why the mode was chosen.
+     * fb_* above always describe the mode in use. */
+    uint32_t mode_count;
+    uint32_t mode_current;     /* index into modes[], or BOOTINFO_MAX_MODES if not listed */
+    struct bootinfo_mode modes[BOOTINFO_MAX_MODES];
+    uint32_t edid_size;        /* 0 = no EDID; else 128 (base block only) */
+    uint8_t  edid[128];
+    uint32_t mode_reason;      /* MODE_BY_* */
 } __attribute__((packed));
 
 #endif

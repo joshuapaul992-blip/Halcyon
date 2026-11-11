@@ -211,7 +211,47 @@ static void load_kernel(EFI_LOADED_IMAGE_PROTOCOL *li, struct kernel_load *kl) {
     con_puts(kl->tmp ? " (staged, moved after ExitBootServices)\n" : "\n");
 }
 
+/* \HALCYON\SETTINGS.INI (first 8 KiB), for the display mode; 0 if absent */
+static char settings_buf[8192];
+static u32 read_settings(EFI_LOADED_IMAGE_PROTOCOL *li) {
+    static CHAR16 spath[] = u"\\HALCYON\\SETTINGS.INI";
+    EFI_GUID fs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = 0;
+    EFI_FILE_PROTOCOL *root = 0, *f = 0;
+    if (EFI_ERROR(BS->HandleProtocol(li->DeviceHandle, &fs_guid, (void **)&fs)) || !fs) return 0;
+    if (EFI_ERROR(fs->OpenVolume(fs, &root))) return 0;
+    u32 got = 0;
+    if (!EFI_ERROR(root->Open(root, &f, spath, EFI_FILE_MODE_READ, 0))) {
+        UINTN n = sizeof settings_buf;
+        if (!EFI_ERROR(f->Read(f, &n, settings_buf))) got = (u32)n;
+        f->Close(f);
+    }
+    root->Close(root);
+    return got;
+}
+
 /* ---------------- graphics ---------------- */
+#include "../boot/modesel.h"
+
+/* the monitor's EDID from any handle with GOP (active EDID first) */
+static void read_edid(struct bootinfo *bi) {
+    EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+    EFI_GUID guids[2] = { EFI_EDID_ACTIVE_PROTOCOL_GUID, EFI_EDID_DISCOVERED_PROTOCOL_GUID };
+    UINTN n = 0;
+    EFI_HANDLE *hs = 0;
+    if (EFI_ERROR(BS->LocateHandleBuffer(EFI_BY_PROTOCOL, &gop_guid, 0, &n, &hs)) || !hs) return;
+    for (int g = 0; g < 2 && !bi->edid_size; g++) {
+        for (UINTN i = 0; i < n && !bi->edid_size; i++) {
+            EFI_EDID_PROTOCOL *e = 0;
+            if (EFI_ERROR(BS->HandleProtocol(hs[i], &guids[g], (void **)&e)) || !e) continue;
+            if (e->SizeOfEdid >= 128 && e->Edid) {
+                memcpy(bi->edid, e->Edid, 128);
+                bi->edid_size = 128;
+            }
+        }
+    }
+    BS->FreePool(hs);
+}
 static int top_bit(u32 m) { return m ? 31 - __builtin_clz(m) : -1; }
 
 static int fmt_usable(const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *i) {
@@ -231,7 +271,7 @@ static void mask_field(u32 m, u8 *pos, u8 *size) {
     *size = (u8)__builtin_popcount(m);
 }
 
-static void setup_gop(struct bootinfo *bi) {
+static void setup_gop(struct bootinfo *bi, const char *settings, u32 slen) {
     EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = 0;
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info;
@@ -260,10 +300,23 @@ static void setup_gop(struct bootinfo *bi) {
         if (ok && w == 800 && h == 600 && m800 < 0) m800 = (int)m;
         if (ok && w <= 1920 && h <= 1200 && (u64)w * h > big_area) { big_area = (u64)w * h; mbig = (int)m; }
         if (m == cur) cur_ok = ok && w >= 800 && h >= 600;
+        /* every usable mode goes into the boot info (the Display settings list them) */
+        if (ok && w >= 640 && h >= 480 && w <= 4096 && h <= 2400 && bi->mode_count < BOOTINFO_MAX_MODES) {
+            int dup = 0;
+            for (u32 j = 0; j < bi->mode_count; j++) if (bi->modes[j].width == w && bi->modes[j].height == h) dup = 1;
+            if (!dup) {
+                struct bootinfo_mode *bm = &bi->modes[bi->mode_count++];
+                bm->width = (uint16_t)w; bm->height = (uint16_t)h; bm->bpp = 32; bm->id = (uint16_t)m;
+            }
+        }
         BS->FreePool(info);
     }
+    read_edid(bi);
+    int sel = modesel_choose(bi, slen ? settings : 0, slen);
     int pick = m1024 >= 0 ? m1024 : cur_ok ? (int)cur : mbig;
-    if ((bi->boot_flags & BOOTF_SAFE_VIDEO) && m800 >= 0) pick = m800;
+    if (sel >= 0) pick = bi->modes[sel].id;
+    else if (bi->mode_reason == MODE_BY_SAFE && m800 >= 0) pick = m800;
+    else if (m1024 < 0 && cur_ok) bi->mode_reason = MODE_BY_FIRMWARE;
     if (pick < 0) {
         if (blt_only) fail("graphics adapter only offers PixelBltOnly modes (no linear framebuffer)", 0);
         fail("no usable 32-bit graphics mode", 0);
@@ -283,6 +336,8 @@ static void setup_gop(struct bootinfo *bi) {
         fail("graphics mode has an unsupported pixel format", 0);
     }
     if (!gop->Mode->FrameBufferBase) fail("graphics mode has no framebuffer address", 0);
+    bi->mode_current = BOOTINFO_MAX_MODES;
+    for (u32 j = 0; j < bi->mode_count; j++) if (bi->modes[j].id == gop->Mode->Mode) bi->mode_current = j;
 
     bi->fb_addr = gop->Mode->FrameBufferBase;
     bi->fb_width = info->HorizontalResolution;
@@ -595,7 +650,8 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab) {
     bi->bios_drive = 0;
     find_boot_partition(li, bi);
     bi->rsdp = find_rsdp();
-    setup_gop(bi);
+    u32 slen = read_settings(li);
+    setup_gop(bi, settings_buf, slen);
     u64 cr3 = build_page_tables(bi);
     if (!bi->rsdp) con_puts("warning: no ACPI RSDP in the configuration table\n");
 

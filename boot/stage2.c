@@ -19,6 +19,7 @@ extern void enter_long(u32 pml4, u32 entry, u32 bootinfo);
 #define DISK_BUF   0x60000u   /* 64 KiB real-mode transfer buffer */
 #define PT_BASE    0x70000u   /* page tables: PML4, PDPT, 4 x PD */
 #define BOOTINFO   0x78000u
+#define SETTINGS_BUF 0x7C000u /* \HALCYON\SETTINGS.INI (first 8 KiB) */
 #define KERNEL_LOAD 0x100000u
 
 static u32 drive;
@@ -142,6 +143,24 @@ static u32 find_entry(u32 dir_clus, const char *name83, u32 *size, int want_dir)
     return 0;
 }
 
+static u32 halcyon_dir;
+
+/* \HALCYON\SETTINGS.INI into SETTINGS_BUF; returns its length (0 if absent) */
+static u32 load_settings(void) {
+    u32 size;
+    u32 c = halcyon_dir ? find_entry(halcyon_dir, "SETTINGSINI", &size, 0) : 0;
+    if (!c || !size) return 0;
+    if (size > 8192) size = 8192;
+    u32 dest = SETTINGS_BUF, left = (size + 511) / 512;
+    while (c >= 2 && c < 0x0FFFFFF8 && left) {
+        u32 secs = spc < left ? spc : left;
+        if (read_to(clus_lba(c), secs, dest)) return 0;
+        dest += secs * 512; left -= secs;
+        c = fat_next(c);
+    }
+    return left ? 0 : size;
+}
+
 static u32 load_kernel(void) {
     if (read_to(0, 1, (u32)sector)) die("cannot read MBR");
     if (sector[510] != 0x55 || sector[511] != 0xAA) die("bad MBR signature");
@@ -170,6 +189,7 @@ static u32 load_kernel(void) {
     data_lba = fat_lba + nfats * fatsz;
 
     u32 dir = find_entry(root_clus, "HALCYON    ", 0, 1);
+    halcyon_dir = dir;
     if (!dir) die("\\HALCYON directory not found");
     u32 size;
     u32 c = find_entry(dir, "KERNEL  BIN", &size, 0);
@@ -241,7 +261,25 @@ static int get_mode(u16 m) {
     return (bregs.eax & 0xFFFF) == 0x004F;
 }
 
-static void set_video(struct bootinfo *bi) {
+#include "modesel.h"
+
+/* the monitor's EDID through VBE/DDC (function 4F15h), if the BIOS has it */
+static void read_edid(struct bootinfo *bi) {
+    static u8 edid[128];
+    clear_regs();
+    bregs.eax = 0x4F15; bregs.ebx = 0;               /* report DDC capabilities */
+    bios_int(0x10);
+    if ((bregs.eax & 0xFFFF) != 0x004F) return;
+    memset(edid, 0, sizeof edid);
+    clear_regs();
+    bregs.eax = 0x4F15; bregs.ebx = 1; bregs.ecx = 0; bregs.edx = 0; bregs.edi = (u32)edid;
+    bios_int(0x10);
+    if ((bregs.eax & 0xFFFF) != 0x004F) return;
+    memcpy(bi->edid, edid, 128);
+    bi->edid_size = 128;
+}
+
+static void set_video(struct bootinfo *bi, const char *settings, u32 slen) {
     memset(&vinfo, 0, sizeof vinfo);
     memcpy(vinfo.sig, "VBE2", 4);
     clear_regs();
@@ -253,20 +291,37 @@ static void set_video(struct bootinfo *bi) {
     u16 modes[256]; int nm = 0;
     for (volatile u16 *p = LAUNDER((volatile u16 *)lst); *p != 0xFFFF && nm < 256; p++) modes[nm++] = *p;
 
-    int best = -1; long best_score = -1;
-    for (int i = 0; i < nm; i++) {
+    /* every usable mode goes into the boot info (the Display settings list them) */
+    int def = -1; long def_score = -1;
+    for (int i = 0; i < nm && bi->mode_count < BOOTINFO_MAX_MODES; i++) {
         if (!get_mode(modes[i])) continue;
         if ((vmode.attr & 0x99) != 0x99) continue;      /* supported, color, graphics, LFB */
         if (vmode.model != 6) continue;                 /* direct color */
         if (vmode.bpp != 32 && vmode.bpp != 24) continue;
+        if (vmode.w < 640 || vmode.h < 480 || vmode.w > 4096 || vmode.h > 2400) continue;
+        int dup = 0;                                    /* same size twice: keep the 32-bit one */
+        for (u32 j = 0; j < bi->mode_count; j++)
+            if (bi->modes[j].width == vmode.w && bi->modes[j].height == vmode.h) {
+                if (vmode.bpp == 32 && bi->modes[j].bpp != 32) { bi->modes[j].bpp = 32; bi->modes[j].id = modes[i]; }
+                dup = 1;
+            }
+        if (!dup) {
+            struct bootinfo_mode *m = &bi->modes[bi->mode_count++];
+            m->width = vmode.w; m->height = vmode.h; m->bpp = vmode.bpp; m->id = modes[i];
+        }
+        /* the default without EDID or a setting: 1024 x 768, else the largest up to 1920 x 1200 */
         if (vmode.w < 800 || vmode.h < 600 || vmode.w > 1920 || vmode.h > 1200) continue;
         long score = (long)vmode.w * vmode.h / 64 + (vmode.bpp == 32 ? 1 : 0);
         if (vmode.w == 1024 && vmode.h == 768) score += 1000000;   /* classic resolution */
-        if ((bi->boot_flags & BOOTF_SAFE_VIDEO) && vmode.w == 800 && vmode.h == 600) score += 4000000;
-        if (score > best_score) { best_score = score; best = modes[i]; }
+        if (score > def_score) { def_score = score; def = modes[i]; }
     }
+    read_edid(bi);
+    int pick = modesel_choose(bi, settings, slen);
+    int best = pick >= 0 ? bi->modes[pick].id : def;
     if (best < 0) die("no usable 24/32-bit VESA mode");
     get_mode((u16)best);
+    bi->mode_current = BOOTINFO_MAX_MODES;
+    for (u32 j = 0; j < bi->mode_count; j++) if (bi->modes[j].id == (u16)best) bi->mode_current = j;
     bi->fb_addr = vmode.fb;
     bi->fb_width = vmode.w;
     bi->fb_height = vmode.h;
@@ -427,6 +482,7 @@ void stage2_main(u32 boot_drive) {
     get_mmap(bi);
     build_page_tables();
     (void)puthex;
-    set_video(bi);
+    u32 slen = load_settings();
+    set_video(bi, slen ? LAUNDER((const char *)SETTINGS_BUF) : 0, slen);
     enter_long(PT_BASE, (u32)kh->entry, BOOTINFO);
 }
