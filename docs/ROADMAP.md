@@ -60,9 +60,10 @@ Two display engines cover all eight generations, so the work splits by engine:
 - **10b, Tesla to Pascal modesetting:** the NV50 "EVO" display engine (a command
   channel to the display; small changes per generation). Covers five
   generations and most cards still in use. No firmware needed.
-- **10c, Kelvin to Curie modesetting:** the older VGA-style CRTCs and RAMDAC;
-  output setup (TMDS, LVDS) runs the video BIOS's init scripts, so this needs a
-  script interpreter.
+- **10c, Kelvin to Curie modesetting: deferred.** The older VGA-style CRTCs and
+  RAMDAC, with output setup through the video BIOS's init scripts (needs a
+  script interpreter). Until then these cards run on the firmware framebuffer
+  (VBE) with the M5 features, and 10a still identifies them.
 - **10d:** hardware cursor, page flipping with vblank interrupts, several monitors.
 - **10e, optional 2D acceleration** (fill, copy) through the 2D engine:
   - Kelvin to Tesla: no firmware.
@@ -72,15 +73,20 @@ Two display engines cover all eight generations, so the work splits by engine:
     linux-firmware (redistributable, but a binary blob on the image).
   - Measure first: with write-combining from M5, CPU drawing may be fast enough.
 - **Stretch:** start a card the firmware did not initialise (a second card, or
-  an old card on a UEFI machine without CSM: cards before about Kepler have no
-  GOP driver) by running the video BIOS's init tables ("devinit").
+  a Tesla or Fermi card on a UEFI machine without CSM: they have no GOP driver)
+  by running the video BIOS's init tables ("devinit").
+
+Test hardware: a GeForce GTX 1070 (GP104, Pascal). It is PCIe and has a GOP
+driver, so it already boots Halcyon through UEFI; 10a, 10b and 10d are
+developed against it first. Its 2D acceleration (10e) would need the signed
+GP104 firmware.
 
 Constraints:
 
 - **No emulator:** QEMU has no NVIDIA GPU, so none of this runs in the CI
-  matrix. PCIe cards (late Curie onwards) can be tested in QEMU through VFIO
-  passthrough on a Linux host with an IOMMU; AGP cards (all Kelvin and Rankine,
-  early Curie) only on real machines, with `BOOT.LOG` reports.
+  matrix. PCIe cards can be tested in QEMU through VFIO passthrough on a Linux
+  host with an IOMMU (the GTX 1070 qualifies), or on the real machine with
+  `BOOT.LOG` reports.
 - **Clock speeds:** on second-generation Maxwell and Pascal, NVIDIA has not
   released the power-management firmware, so the GPU stays at its boot clocks
   (fine for a 2D desktop).
