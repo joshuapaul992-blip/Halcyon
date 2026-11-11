@@ -90,10 +90,10 @@ UPROGS := $(patsubst userland/programs/%.c,$(BUILD)/user/%.exe,$(wildcard userla
 $(BUILD)/user/crt0.o: userland/lib/crt0.S
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -c $< -o $@
-$(BUILD)/user/%.o: userland/lib/%.c userland/include/hal.h kernel/core/sysabi.h
+$(BUILD)/user/%.o: userland/lib/%.c userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -c $< -o $@
-$(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) userland/include/hal.h kernel/core/sysabi.h
+$(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $<
 	strip $@

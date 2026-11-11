@@ -25,6 +25,9 @@ interrupts on, get a working interrupt:
   user    run C:\\PROGRAMS\\SELFTEST.EXE after boot (QEMU fw_cfg autorun): user-mode
           system calls, crashing / looping child programs, windows; it must
           report "selftest: all N checks passed"
+  sock    run C:\\PROGRAMS\\SOCKTEST.EXE after boot: local stream and datagram
+          sockets between programs, poll, limits, peers that crash or are
+          ended; it must report "socktest: all N checks passed"
   res     a saved resolution (display.width/height = 1280 x 1024 in
           \\HALCYON\\SETTINGS.INI): the loader must choose it and the desktop use it
   fwvideo no display adapter driver (boot flag): the firmware frame buffer only
@@ -46,9 +49,9 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "uhci:uefi", "ehci:uefi", "ich9:uefi", "xhci:uefi",
           "xhci:bios:nomsi", "uhci:bios:pic", "xhci:uefi:pic", "ehci:bios:noirq",
           "xhci:bios:nvme", "xhci:uefi:nvme4k", "xhci:bios:nvme+nomsi", "xhci:uefi:nvme+noirq",
-          "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user",
+          "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user", "xhci:bios:sock",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch"]
-VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0,
+VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0}
 NVME_ERRORS = ["failed", "timed out", "fatal", "offline", "not responding", "no interrupt seen"]
 IDLE_MAX_CPU = 40      # % of one host CPU used by QEMU at the idle desktop
@@ -62,6 +65,8 @@ CHECKS = [
     ("USB keyboard in report protocol", "keyboard (report protocol"),
 ]
 BAD = ["CPU EXCEPTION", "KERNEL PANIC", "nested fault"]
+# variants that run a test program after boot: (program, its report prefix)
+PROGRAMS = {"user": ("SELFTEST.EXE", "selftest"), "sock": ("SOCKTEST.EXE", "socktest")}
 
 
 def cpu_seconds(pid):
@@ -168,8 +173,9 @@ def run(cfg):
         extra += " -drive if=none,id=d1,format=raw,file=%s -device ide-hd,drive=d1,bus=ide.2" % sata_x
     if flags:
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
-    if "user" in opts:
-        extra += " -fw_cfg name=opt/halcyon/autorun,string=C:/PROGRAMS/SELFTEST.EXE"
+    prog = next((PROGRAMS[v] for v in opts if v in PROGRAMS), None)
+    if prog:
+        extra += " -fw_cfg name=opt/halcyon/autorun,string=C:/PROGRAMS/" + prog[0]
     if "switch" in opts:
         extra += " -fw_cfg name=opt/halcyon/setmode,string=1600x900"
         checks.append(("live mode switch", "test mode switch to 1600x900: ok (desktop 1600x900)"))
@@ -211,17 +217,17 @@ def run(cfg):
         if p.poll() is not None:
             break
     elapsed = time.time() - t0
-    if "user" in opts:
+    if prog:
         t1 = time.time()
         while time.time() - t1 < 90 and p.poll() is None:
             text = open(log, errors="replace").read()
-            if "selftest: all" in text or "checks FAILED" in text or any(b in text for b in BAD):
+            if prog[1] + ": all" in text or "checks FAILED" in text or any(b in text for b in BAD):
                 break
             time.sleep(0.5)
         time.sleep(1)
         text = open(log, errors="replace").read()
     idle = None
-    if p.poll() is None and "gui: desktop ready" in text and "user" not in opts:
+    if p.poll() is None and "gui: desktop ready" in text and not prog:
         time.sleep(2)
         c0 = cpu_seconds(p.pid)
         time.sleep(4)
@@ -244,10 +250,10 @@ def run(cfg):
         p.kill()
     failures = [name for name, pat in checks if pat not in text]
     failures += ["log contains '%s'" % b for b in BAD if b in text]
-    if "user" in opts:
-        if "selftest: all" not in text:
-            bad = [l for l in text.splitlines() if "selftest:" in l and ("FAIL" in l or "skipped" in l)]
-            failures.append("selftest (%s)" % (bad[0].strip() if bad else "did not finish"))
+    if prog:
+        if prog[1] + ": all" not in text:
+            bad = [l for l in text.splitlines() if prog[1] + ":" in l and ("FAIL" in l or "skipped" in l)]
+            failures.append("%s (%s)" % (prog[1], bad[0].strip() if bad else "did not finish"))
     if isos:
         if "ISO9660 'HALCYONCD' on cd0" not in text:
             failures.append("CD volume")

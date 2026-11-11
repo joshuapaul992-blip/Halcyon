@@ -225,4 +225,7 @@ enum { MBX_OK = 1, MBX_OKCANCEL, MBX_YESNO, MBX_YESNOCANCEL };
 enum { MBX_ICON_INFO = 0, MBX_ICON_WARNING, MBX_ICON_ERROR, MBX_ICON_QUESTION };
 enum { IDR_OK = 1, IDR_CANCEL = 2, IDR_YES = 6, IDR_NO = 7 };
 
+/* sockets and poll (100-139) */
+#include "../net/sockabi.h"
+
 #endif

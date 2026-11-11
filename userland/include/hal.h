@@ -22,6 +22,19 @@
 #define E_BUSY    -16
 #define E_CANCELED -18
 #define E_PERM    -19
+#define E_TIMEOUT -9
+#define E_AGAIN   -12     /* would wait (non-blocking), or a socket timeout passed */
+#define E_NAMETOOLONG -17
+#define E_ADDRINUSE   -20 /* the name / address is taken */
+#define E_NOTCONN     -21 /* the socket is not connected */
+#define E_ISCONN      -22 /* the socket is already connected */
+#define E_CONNREFUSED -23 /* nobody accepts connections / messages there */
+#define E_CONNRESET   -24 /* the peer went away (data was lost) */
+#define E_PIPE        -25 /* the peer does not take any more data */
+#define E_AFNOSUPPORT -26 /* address family not supported */
+#define E_MSGSIZE     -27 /* message too long */
+#define E_NOTSOCK     -28 /* the handle is not a socket */
+#define E_INPROGRESS  -29 /* a non-blocking connect has started */
 const char *hal_strerror(int err);
 
 /* ---- raw system calls ---- */
@@ -59,8 +72,6 @@ static inline int sysinfo(hal_sysinfo_t *si) { return (int)SC1(SYS_SYSINFO, si);
 void *sbrk(long incr);
 
 /* ---- threads (several per program; each has its own 1 MiB stack) ---- */
-#define E_TIMEOUT -9
-#define E_AGAIN   -12
 typedef struct { volatile int v; } hal_mutex_t;    /* zero-initialised = unlocked */
 typedef struct { volatile int seq; } hal_cond_t;   /* zero-initialised */
 /* start fn(arg) in a new thread; returns its id (> 0) or an error. fn's return
@@ -346,5 +357,55 @@ void ctl_set_tool(int win, int id, int icon, const char *tip);
  * text, OK / Cancel). Returns 1 and fills buf on OK. Events of other windows
  * that arrive meanwhile are kept for win_get_event. */
 int  inputbox(int owner, const char *title, const char *prompt, char *buf, int n);
+
+/* ---- sockets and poll (see net.c and docs/DESIGN-M9.md) ----
+ * BSD sockets. Sockets are handles: read(), write() and close() work on them
+ * too. Results are >= 0 or a negative E_* code; E_AGAIN means the call would
+ * have to wait (non-blocking socket, MSG_DONTWAIT) or SO_RCVTIMEO /
+ * SO_SNDTIMEO passed. Every wait ends when the program is ended.
+ *
+ * AF_LOCAL (= AF_UNIX) connects programs on this computer by name, in one
+ * flat namespace: 1 to 63 characters from A-Z a-z 0-9 . - _ starting with a
+ * letter or digit, case-insensitive, e.g. "halcyon.clipboard" (use
+ * "yourname.program[.service]"; "halcyon." is for the programs that come with
+ * Halcyon). A name is taken until its socket is closed or its program ends.
+ * SOCK_STREAM: listen / accept / connect, bytes in order; SOCK_DGRAM:
+ * messages (up to 64 KiB) with boundaries kept. AF_INET comes with
+ * networking.
+ *
+ * Limits: each socket's receive buffer (SO_RCVBUF, 64 KiB by default, 256 KiB
+ * at most) is the back-pressure: a sender waits while the receiver's buffer
+ * is full. A listen() backlog holds at most 16 connections. A program has at
+ * most 128 sockets and 4 MiB in their buffers; see sockstat(). */
+int  socket(int domain, int type, int protocol);           /* type: SOCK_STREAM / SOCK_DGRAM, | SOCK_NONBLOCK */
+int  bind(int fd, const struct sockaddr *addr, socklen_t len);
+int  listen(int fd, int backlog);
+int  accept(int fd, struct sockaddr *addr, socklen_t *len);   /* addr / len may be 0 */
+int  accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags);   /* flags: SOCK_NONBLOCK */
+int  connect(int fd, const struct sockaddr *addr, socklen_t len);
+long send(int fd, const void *buf, size_t n, int flags);    /* blocking streams send everything */
+long recv(int fd, void *buf, size_t n, int flags);          /* 0 = end of stream */
+long sendto(int fd, const void *buf, size_t n, int flags, const struct sockaddr *to, socklen_t tolen);
+long recvfrom(int fd, void *buf, size_t n, int flags, struct sockaddr *from, socklen_t *fromlen);
+int  shutdown(int fd, int how);                             /* SHUT_RD / SHUT_WR / SHUT_RDWR */
+int  getsockname(int fd, struct sockaddr *addr, socklen_t *len);
+int  getpeername(int fd, struct sockaddr *addr, socklen_t *len);
+int  socketpair(int domain, int type, int protocol, int sv[2]);   /* two connected sockets */
+int  setsockopt(int fd, int level, int name, const void *val, socklen_t len);
+int  getsockopt(int fd, int level, int name, void *val, socklen_t *len);
+int  ioctlsocket(int fd, long cmd, unsigned long *arg);     /* FIONBIO, FIONREAD (as in Winsock) */
+/* wait until one of the handles is ready, at most timeout_ms (< 0: no
+ * limit); returns how many entries have revents set, 0 on timeout. fd may be
+ * a socket, a file (always ready), 1 / 2 (console output), FD_WINDOWS (the
+ * program's window events: then call win_get_event(&ev, 0)), or < 0 (ignored) */
+int  poll(struct pollfd *fds, unsigned nfds, int timeout_ms);
+int  sockstat(hal_sockstat_t *st);                          /* socket use and limits */
+
+/* helpers */
+socklen_t local_addr(struct sockaddr_local *a, const char *name);   /* fill an AF_LOCAL address; its length */
+int  sock_nonblock(int fd, int on);
+int  sock_timeouts(int fd, int recv_ms, int send_ms);      /* SO_RCVTIMEO / SO_SNDTIMEO; 0 = none */
+int  local_listen(const char *name, int backlog);          /* stream socket bound to name, listening */
+int  local_connect(const char *name);                      /* stream socket connected to name */
 
 #endif

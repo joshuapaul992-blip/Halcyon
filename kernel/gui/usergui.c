@@ -501,6 +501,15 @@ static int queue_ready(void *arg) {
     return 0;
 }
 
+/* poll() on window events (net/socket.c): ready now; *next_ms = the next window timer (time_ms) */
+int usergui_poll_ready(proc_t *p, u64 *next_ms) {
+    ustate_t *s = p->gui;
+    *next_ms = ~0ull;
+    for (int i = 0; s && i < MAX_WINDOWS; i++)
+        if (s->wins[i] && s->wins[i]->timer_ms && s->wins[i]->next_timer < *next_ms) *next_ms = s->wins[i]->next_timer;
+    return queue_ready(p);
+}
+
 static long get_event(proc_t *p, u64 uev, long timeout) {
     ustate_t *s = state_of(p);
     if (!s) return E_NOMEM;

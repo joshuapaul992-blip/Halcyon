@@ -13,7 +13,7 @@ its own drivers for USB, SATA and FAT file systems.
 |------|-------------|
 | Boot | Custom MBR plus stage 2 for BIOS (unreal mode, reads `\HALCYON\KERNEL.BIN` from FAT32 via INT 13h), and a UEFI loader (`\EFI\BOOT\BOOTX64.EFI`, GOP framebuffer). One image boots both ways. |
 | Kernel | 64-bit, identity mapped, TSC timing, PCI enumeration, ACPI S5 power-off, PS/2 keyboard and mouse. |
-| Threads and programs | Kernel threads with a scheduler (copies, moves and deletes run in the background with a progress dialog and Cancel). Programs run in user mode in their own address space: static position-independent ELF64 `.EXE` files loaded from disk (`C:\PROGRAMS`), preempted every 10 ms, with system calls for files, memory, processes, the console and windows (an early-2000s style window, drawing and controls API). Pages are no-execute unless they hold code; SMEP, SMAP and UMIP are on where the CPU has them. A program that crashes gets a "has encountered a problem and needs to close" dialog and takes nothing else down. Task Manager (Ctrl+Alt+Del) ends programs that hang. Calculator and Sonar are user programs. |
+| Threads and programs | Kernel threads with a scheduler (copies, moves and deletes run in the background with a progress dialog and Cancel). Programs run in user mode in their own address space: static position-independent ELF64 `.EXE` files loaded from disk (`C:\PROGRAMS`), preempted every 10 ms, with system calls for files, memory, processes, the console and windows (an early-2000s style window, drawing and controls API), and BSD sockets: local stream and datagram sockets between programs, by name (back-pressure, non-blocking calls, timeouts, peers told when a program ends), and `poll` over sockets, files and the program's window events. Pages are no-execute unless they hold code; SMEP, SMAP and UMIP are on where the CPU has them. A program that crashes gets a "has encountered a problem and needs to close" dialog and takes nothing else down. Task Manager (Ctrl+Alt+Del) ends programs that hang. Calculator and Sonar are user programs. |
 | Interrupts | Local APIC (xAPIC or x2APIC) and I/O APICs from the ACPI MADT, or the 8259 PICs. MSI-X and MSI for xHCI and AHCI. PCI INTx for UHCI, OHCI and EHCI: without an AML interpreter the routing is learned from which device raised an interrupt. The CPU halts when there is nothing to do: a one-shot local APIC (or PIT) timer wakes it for the next deadline. A device whose interrupt does not work is polled. |
 | USB | Host controllers: UHCI and OHCI (USB 1.1), EHCI (USB 2.0, with companion hand-off), and xHCI (USB 3.x, SuperSpeed). Class drivers: hubs (USB 2 and SuperSpeed), HID (report descriptor parsing, report protocol as on Windows, boot protocol as the fallback): keyboards including n-key rollover and wireless receivers with several devices on one interface, multimedia keys (volume, media, browser, mail, calculator, power and sleep), mice and tablets; and mass storage (Bulk-Only Transport plus SCSI). Hot-plug. |
 | Storage | AHCI SATA (LBA48, multiple controllers). NVMe SSDs (MSI-X, MSI, INTx or polled; every active namespace with 512- or 4096-byte blocks becomes a disk, `nvme0`, `nvme1`, ...; flushed when the drive has a volatile cache, shutdown notification on Turn Off/Restart). CD/DVD drives on SATA (ATAPI): read-only drive letters, discs detected when inserted, ejected or swapped, Eject in the drive's right-click menu. Block layer with MBR (including extended partitions), GPT and superfloppy detection. |
@@ -111,7 +111,10 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   PIC, no MSI, no interrupts) set through a QEMU-only `fw_cfg` hook, NVMe disks
   (512- and 4096-byte blocks, INTx, polled), a CD drive with a disc swap, and
   user mode: `SELFTEST.EXE` runs after boot and checks the system calls, bad
-  pointers, crashing and looping child programs, preemption and windows, and
+  pointers, crashing and looping child programs, preemption and windows;
+  `SOCKTEST.EXE` checks sockets and poll between copies of itself (large
+  transfers, datagrams, timeouts, backlogs, peers that crash or are ended,
+  per-program and system-wide limits); and
   the display: a saved resolution chosen by both loaders, the firmware frame
   buffer alone, and a live mode switch
 - the EDID parser and the loaders' resolution choice (`tests/host/displaytest.c`)
@@ -191,6 +194,18 @@ The window API in `hal.h` (comments there give the details):
 Every call checks the program's pointers and bounds its work, and a window's
 menus, controls and canvas go away with the window or the program.
 
+Programs talk to each other through sockets (BSD calls: `socket`, `bind`,
+`listen`, `accept`, `connect`, `send`/`recv`, `sendto`/`recvfrom`,
+`shutdown`, `socketpair`, `setsockopt`, and `poll`; `read`, `write` and
+`close` work on sockets too). `AF_LOCAL` sockets have names in one flat,
+case-insensitive namespace, such as `"vendor.program"`: 1 to 63 letters,
+digits, `.`, `-` and `_`, held until the socket closes or its program ends.
+`local_listen(name, backlog)` and `local_connect(name)` are shortcuts. A GUI
+program can wait for its windows and its sockets in one call: put `FD_WINDOWS`
+in the `poll` set, and call `win_get_event(&ev, 0)` when it is ready.
+`SOCKTEST.EXE` checks all of it (`socktest`; the QEMU `sock` variant runs it).
+See [docs/DESIGN-M9.md](docs/DESIGN-M9.md) for the rules and limits.
+
 ## Layout
 
 ```
@@ -201,6 +216,7 @@ kernel/drivers  PCI, PS/2, input, AHCI (disks and CD/DVD), NVMe, ACPI
 kernel/usb   USB core, hub/HID/MSC class drivers, UHCI/OHCI/EHCI/xHCI
 kernel/fs    block layer and partitions, VFS, FAT, exFAT, ISO 9660
 kernel/gui   graphics, window manager, widgets, menus, dialogs, desktop, splash
+kernel/net   sockets and poll (generic layer), local sockets (AF_LOCAL)
 kernel/apps  applications built into the kernel
 userland/    user-mode runtime (crt0, C library subset, GUI calls) and programs
 tools/       image builder, font and icon generators, QEMU test harness
@@ -226,7 +242,7 @@ tests/host   host-side storage, keyboard layout, USB HID and display tests, fuzz
   whatever the firmware chose, and there is one monitor. OVMF (QEMU's UEFI)
   reports no EDID, so the UEFI loader's choice was only tested with a saved
   setting; real UEFI firmware usually provides it.
-- No networking, audio or isochronous USB.
+- No networking (sockets are local only), audio or isochronous USB.
 - The keyboard layout is one for the whole system (Windows keeps one per
   program). No input methods (IME), so no Chinese, Japanese or Korean input, and
   no Japanese or Korean layouts.
