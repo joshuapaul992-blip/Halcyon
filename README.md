@@ -23,7 +23,8 @@ its own drivers for USB, SATA and FAT file systems.
 | Unicode | File names and text are UTF-8 throughout; FAT long names are stored as UTF-16 (including characters outside the BMP), with Unicode case-insensitive lookup. The fonts cover Latin, Greek, Cyrillic and common symbols; other characters are kept and drawn as a replacement box. |
 | GUI | Compositing window manager (move, resize, minimize, maximize), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Theme and wallpaper are kept across restarts (`C:\HALCYON\SETTINGS.INI`). |
 | Display | The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; the QEMU/Bochs/VirtualBox adapter switches at once, with Windows' "keep these settings?" 15-second revert. The frame buffer is write-combining (PAT). |
-| Apps | Explorer (My Computer, file management; copies and deletes in a worker thread), Notepad (UTF-8 text in any keyboard layout, files up to 16 MB), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Sonar (a mine-hunting puzzle), Control Panel, Display Properties, Keyboard settings, About. |
+| Web | A web browser (Web Browser, `BROWSER.EXE`): HTTP/1.1 and HTTPS, pages with headings, lists, tables, forms and PNG / GIF / BMP images, history, error pages, local files; `WGET.EXE` on the command line. HTTPS through BearSSL (TLS 1.2) with certificates checked against Mozilla's root list. Both are user programs on libweb, a library for URLs, HTTP, TLS and gzip. They need the internet stack of milestone 6 (in progress) to reach the network; local pages work now. See [docs/DESIGN-M6-WEB.md](docs/DESIGN-M6-WEB.md). |
+| Apps | Explorer (My Computer, file management; copies and deletes in a worker thread), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Sonar (a mine-hunting puzzle), Control Panel, Display Properties, Keyboard settings, About. |
 
 ## Building
 
@@ -118,6 +119,13 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   the display: a saved resolution chosen by both loaders, the firmware frame
   buffer alone, and a live mode switch
 - the EDID parser and the loaders' resolution choice (`tests/host/displaytest.c`)
+- the web library and the browser's parser and decoders (`tests/web/run.sh`),
+  built for Linux with ASan/UBSan: URLs, the CA list's conversion, inflate
+  against Python's zlib/gzip and corrupt streams, PNG / GIF / BMP against
+  Pillow, HTML and layout on mutated pages, and HTTP / HTTPS against local
+  test servers with a test CA (bad certificates of every kind, broken
+  answers, redirect loops, timeouts, limits); in QEMU, the `web` variant runs
+  `WEBTEST.EXE` (TLS handshakes through BearSSL as built for Halcyon)
 
 The partition, FAT, exFAT and ISO 9660 code can also be fuzzed with libFuzzer, ASan and UBSan
 (needs clang and `libclang-rt-dev`):
@@ -217,6 +225,42 @@ in the `poll` set, and call `win_get_event(&ev, 0)` when it is ready.
 `SOCKTEST.EXE` checks all of it (`socktest`; the QEMU `sock` variant runs it).
 See [docs/DESIGN-M9.md](docs/DESIGN-M9.md) for the rules and limits.
 
+### The web library and the browser
+
+`userland/lib/web/` is **libweb**, a library for HTTP and HTTPS (`web.h`):
+URL parsing and resolution, `web_fetch()` for GET, HEAD and POST with
+redirects, chunked transfers, gzip / deflate, cookies, keep-alive, timeouts,
+size limits and cancellation, and `web_job_start()` to run a request in a
+worker thread. HTTPS goes through BearSSL (`userland/third_party/bearssl`,
+vendored) with the server name sent and checked and the chain checked
+against Mozilla's root certificates (`userland/third_party/cacert`,
+converted at build time by `tools/mktrust.py`); a bad certificate fails the
+request with the reason. It also has its own inflate (`inflate_gzip`...).
+Unlike `userland/lib/*.c` it is a static library linked only into the
+programs that use it (see the explicit rules for `browser.exe`, `wget.exe`
+and `webtest.exe` in the Makefile); it compiles for Linux too
+(`-DWEB_HOST`), which is how `tests/web` tests it.
+
+```c
+web_session_t *s = web_session_new();
+web_request_t rq = { .url = "https://example.com/" };
+web_response_t rs;
+if (web_fetch(s, &rq, &rs) == 0) printf("%d %s, %u bytes\n", rs.status, rs.content_type, (unsigned)rs.body_len);
+else printf("%s\n", rs.error_text);
+web_response_free(&rs);
+```
+
+`WGET.EXE` fetches a URL to a file or the console (`wget -O - URL`).
+`BROWSER.EXE` is the Web Browser: tool buttons, an address bar, history,
+a status bar, error pages, and pages parsed (`browser/html.c`), laid out
+(`browser/layout.c`) and drawn by the program, with its own PNG, GIF and
+BMP decoders (`browser/image.c`) and forms it draws and edits itself. It
+opens web addresses, `file:` URLs and plain paths (`C:\Documents\Web` has
+sample pages); the shell opens `.htm` / `.html` files with it. Network
+pages need the internet stack (milestone 6); until it is merged, they show
+the "not connected to a network" page. See
+[docs/DESIGN-M6-WEB.md](docs/DESIGN-M6-WEB.md).
+
 ## Layout
 
 ```
@@ -229,9 +273,11 @@ kernel/fs    block layer and partitions, VFS, FAT, exFAT, ISO 9660
 kernel/gui   graphics, window manager, widgets, menus, dialogs, desktop, splash
 kernel/net   sockets and poll (generic layer), local sockets (AF_LOCAL)
 kernel/apps  applications built into the kernel
-userland/    user-mode runtime (crt0, C library subset, GUI calls) and programs
+userland/    user-mode runtime (crt0, C library subset, GUI calls) and programs;
+             lib/web the web library, third_party BearSSL and the CA list
 tools/       image builder, font and icon generators, QEMU test harness
 tests/host   host-side storage, keyboard layout, USB HID and display tests, fuzzer
+tests/web    host tests of the web library and the browser's parser and decoders
 ```
 
 ## Limitations
@@ -253,7 +299,17 @@ tests/host   host-side storage, keyboard layout, USB HID and display tests, fuzz
   whatever the firmware chose, and there is one monitor. OVMF (QEMU's UEFI)
   reports no EDID, so the UEFI loader's choice was only tested with a saved
   setting; real UEFI firmware usually provides it.
-- No networking (sockets are local only), audio or isochronous USB.
+- No networking yet (sockets are local only; the internet stack of milestone 6
+  is in progress), no audio or isochronous USB.
+- The Web Browser is minimal: HTML without JavaScript and without style
+  sheets (a few properties of the `style` attribute only), no italic font,
+  no JPEG / WebP / SVG images (their alternative text shows), no `rowspan`,
+  no IPv6 or international domain names. HTTPS is TLS 1.2 only (BearSSL 0.6
+  has no TLS 1.3), so sites that require TLS 1.3 cannot be visited;
+  certificate revocation is not checked; cookies last for the session. The
+  real-time clock's time zone is unknown, so certificate dates are checked
+  to within 14 hours unless `clock.utc_offset` (minutes) is set in
+  `SETTINGS.INI`.
 - The keyboard layout is one for the whole system (Windows keeps one per
   program). No input methods (IME), so no Chinese, Japanese or Korean input, and
   no Japanese or Korean layouts.

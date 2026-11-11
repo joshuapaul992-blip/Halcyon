@@ -134,6 +134,7 @@ static void set_status(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(status_main, sizeof status_main, fmt, ap);
+    dirty = 1;
     va_end(ap);
 }
 

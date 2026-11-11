@@ -836,7 +836,11 @@ static int exchange(web_session_t *s, wconn_t *c, const web_url_t *u, const char
     int is_redirect = (rs->status == 301 || rs->status == 302 || rs->status == 303 || rs->status == 307 || rs->status == 308) &&
                       redirecting_ok && web_header(rs, "location", 0, 0) > 0;
     if (is_redirect) { k.discard = 1; k.coding = 0; }
-    if (nobody) {
+    if (is_redirect && (chunked || clen < 0 || clen > 65536)) {
+        /* a redirect's body is not wanted: rather than read a long one, close */
+        r = 0;
+        close_after = 1;
+    } else if (nobody) {
         r = 0;
     } else if (chunked) {
         r = read_chunked(c, &k, line);
