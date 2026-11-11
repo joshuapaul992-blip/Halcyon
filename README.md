@@ -1,5 +1,7 @@
 # Halcyon
 
+![Halcyon desktop](docs/screenshot.png)
+
 Halcyon is a small x86-64 hobby operating system with an early-2000s style
 desktop: glossy blue title bars, a Start menu, a taskbar with a clock, notification
 balloons, and desktop icons. It boots from a USB stick on BIOS and UEFI PCs and has
