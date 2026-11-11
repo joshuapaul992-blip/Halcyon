@@ -6,6 +6,13 @@ Characters 32..255 (ISO-8859-1) are rendered with grayscale anti-aliasing.
 """
 import os
 import sys
+
+# Use FreeType's classic TrueType bytecode interpreter (v35): full hinting,
+# like early-2000s font rendering, instead of the modern v40 default. This
+# must be set before Pillow loads FreeType (it is read at library init).
+_props = [p for p in os.environ.get("FREETYPE_PROPERTIES", "").split() if not p.startswith("truetype:interpreter-version=")]
+os.environ["FREETYPE_PROPERTIES"] = " ".join(_props + ["truetype:interpreter-version=35"])
+
 from PIL import Image, ImageDraw, ImageFont
 
 FONTDIR = "/usr/share/fonts/truetype/dejavu"
