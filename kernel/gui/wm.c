@@ -802,6 +802,11 @@ static void handle_input(void) {
                 shell_run("C:/PROGRAMS/TASKMGR.EXE", NULL);
                 continue;
             }
+            /* Calculator key (USB consumer control) */
+            if (ev.pressed && ev.key == KEY_CALCULATOR) {
+                desktop_launch_calculator();
+                continue;
+            }
             key_event(&ev);
             continue;
         }

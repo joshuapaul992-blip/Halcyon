@@ -16,6 +16,16 @@ enum {
     KEY_KP_1 = 0x59, KEY_KP_0 = 0x62, KEY_KP_DOT = 0x63, KEY_NONUS_BSLASH = 0x64, KEY_MENU = 0x65,
     KEY_LCTRL = 0xE0, KEY_LSHIFT = 0xE1, KEY_LALT = 0xE2, KEY_LGUI = 0xE3,
     KEY_RCTRL = 0xE4, KEY_RSHIFT = 0xE5, KEY_RALT = 0xE6, KEY_RGUI = 0xE7,
+
+    /* Consumer Control (usage page 0x0C) and System Control (Generic Desktop
+     * 0x81-0x83) keys of multimedia keyboards, mapped by kernel/usb/hidparse.c.
+     * The HID keyboard page leaves 0xE8-0xFF unused, so these live there.
+     * Mute / Volume Up / Volume Down are the keyboard page's 0x7F-0x81. */
+    KEY_MEDIA_PLAYPAUSE = 0xE8, KEY_MEDIA_NEXT = 0xE9, KEY_MEDIA_PREV = 0xEA, KEY_MEDIA_STOP = 0xEB,
+    KEY_BROWSER_HOME = 0xEC, KEY_MAIL = 0xED, KEY_CALCULATOR = 0xEE,
+    KEY_POWER = 0xEF, KEY_SLEEP = 0xF0, KEY_WAKE = 0xF1,
+    KEY_BROWSER_BACK = 0xF2, KEY_BROWSER_FORWARD = 0xF3, KEY_BROWSER_REFRESH = 0xF4,
+    KEY_BROWSER_SEARCH = 0xF5, KEY_BROWSER_FAVORITES = 0xF6, KEY_MY_COMPUTER = 0xF7,
 };
 
 #define MOD_CTRL  0x01

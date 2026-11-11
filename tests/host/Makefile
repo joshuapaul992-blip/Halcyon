@@ -2,9 +2,11 @@
 # host compiler against a small libc shim, run against real FAT and exFAT
 # images (exFAT results are cross-checked with exfat_tool.py, an independent
 # Python implementation, and fsck.exfat) and ISO 9660 images (isotest.c,
-# built with xorriso).
+# built with xorriso). Also the USB HID report descriptor parser and report
+# decoder (kernel/usb/hidparse.c, hidtest.c), which run first.
 #
 #   tests/host/run.sh            (== make -C tests/host test)
+#   make -C tests/host hid       only the HID tests (HIDARGS=-v lists every report)
 #                                includes the "hostile" scenario: corrupted
 #                                partition tables / FAT / exFAT volumes and the
 #                                minimized fuzzer crash inputs (fuzz_regress/)
@@ -39,11 +41,18 @@ FUZZ_ARGS ?=
 CORPUS  := $(OUT)/fuzz_corpus
 SEEDS   := $(OUT)/fuzz_seeds
 
-all: $(OUT)/fstest $(OUT)/fuzz_replay
+all: $(OUT)/fstest $(OUT)/fuzz_replay $(OUT)/hidtest
 
 $(OUT)/fstest: $(SRCS) isotest.c $(HDRS) Makefile
 	@mkdir -p $(OUT)
 	gcc $(CFLAGS) $(SRCS) -o $@
+
+HIDSRCS := $(ROOT)/kernel/usb/hidparse.c hidtest.c
+HIDHDRS := $(ROOT)/kernel/usb/hidparse.h $(ROOT)/kernel/drivers/input.h $(wildcard $(ROOT)/kernel/core/*.h)
+
+$(OUT)/hidtest: $(HIDSRCS) $(HIDHDRS) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) $(HIDSRCS) -o $@
 
 $(OUT)/fuzz_replay: $(KSRCS) fuzz_fs.c fuzz_main.c $(HDRS) Makefile
 	@mkdir -p $(OUT)
@@ -60,7 +69,10 @@ $(SEEDS)/.stamp: fuzz_seeds.sh
 
 seeds: $(SEEDS)/.stamp
 
-test: $(OUT)/fstest
+hid: $(OUT)/hidtest
+	$(OUT)/hidtest $(HIDARGS)
+
+test: $(OUT)/fstest hid
 	@rm -rf $(OUT)/work && mkdir -p $(OUT)/work
 	$(OUT)/fstest $(OUT)/work $(ARGS)
 
@@ -82,4 +94,4 @@ fuzz-run: $(OUT)/fuzz_fs seeds
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all test seeds fuzz fuzz-run fuzz-regress clean
+.PHONY: all hid test seeds fuzz fuzz-run fuzz-regress clean

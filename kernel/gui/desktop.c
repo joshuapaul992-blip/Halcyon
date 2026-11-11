@@ -180,6 +180,7 @@ static void run_or(const char *path, void (*builtin)(void)) {
     if (proc_spawn(path, NULL, NULL, NULL) < 0) builtin();
 }
 static void l_calc(void) { run_or("C:/PROGRAMS/CALC.EXE", app_calc); }
+void desktop_launch_calculator(void) { l_calc(); }
 static void l_control(void) { app_control(); }
 static void l_mines(void) { run_or("C:/PROGRAMS/SONAR.EXE", app_mines); }
 static void l_about(void) { app_about(); }

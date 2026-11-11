@@ -7,7 +7,10 @@ usage: tools/boottest.py [CONFIG ...]     CONFIG = hc:fw[:variant[+variant]], e.
 
 Each boot must reach "gui: desktop ready", mount the boot stick as C:, mount
 the SATA test disks (FAT32/GPT and exFAT/MBR), write \\HALCYON\\BOOT.LOG, and
-log no exception/panic.
+log no exception/panic. A USB keyboard (QEMU usb-kbd) and tablet are attached
+on the controller under test: the keyboard must run in HID report protocol,
+and Caps Lock pressed through the QEMU monitor must come back as a keyboard
+LED output report (key report in, LED report out).
 With interrupts on, the idle desktop must also leave QEMU mostly idle (the
 guest halts the CPU), and the USB controller must get a working interrupt.
 Variants add boot flags through QEMU fw_cfg (see qemu_boot_flags()):
@@ -49,6 +52,7 @@ CHECKS = [
     ("SATA volume", "on sata0"),
     ("exFAT volume", "exFAT 'EXFATDISK' on sata"),
     ("BOOT.LOG", "bootlog: saved"),
+    ("USB keyboard in report protocol", "keyboard (report protocol"),
 ]
 BAD = ["CPU EXCEPTION", "KERNEL PANIC", "nested fault"]
 
@@ -106,6 +110,19 @@ def cd_media_change(log, isos):
     return fails
 
 
+def keyboard_leds(log):
+    """Caps Lock on the USB keyboard must switch its Caps Lock LED on and off"""
+    mon = os.path.join(BUILD, "mon.sock")
+    fails = []
+    for want in ("LEDs Num Caps\n", "LEDs Num\n"):
+        start = len(open(log, errors="replace").read())
+        subprocess.run([sys.executable, "tools/qemu_ctl.py", mon, "sendkey caps_lock"], stdout=subprocess.DEVNULL)
+        if not wait_log(log, want, start, 8):
+            fails.append("USB keyboard LEDs ('%s' not seen after Caps Lock)" % want.strip())
+            break
+    return fails
+
+
 def run(cfg):
     parts = cfg.split(":")
     hc, fw = parts[0], parts[1]
@@ -118,7 +135,7 @@ def run(cfg):
     log = os.path.join(BUILD, "serial.log")
     if os.path.exists(log):
         os.remove(log)
-    extra = "-device usb-tablet,bus=usb.0 "
+    extra = "-device usb-tablet,bus=usb.0 -device usb-kbd,bus=usb.0 "
     checks = list(CHECKS)
     if nvme:
         disk = os.path.join(BUILD, "ci_nvme.img")
@@ -192,6 +209,10 @@ def run(cfg):
         if c0 is not None and c1 is not None:
             idle = (c1 - c0) * 100 / 4
         text = open(log, errors="replace").read()
+    kbd_fails = []
+    if p.poll() is None and "gui: desktop ready" in text:
+        kbd_fails = keyboard_leds(log)
+        text = open(log, errors="replace").read()
     cd_fails = []
     if isos and p.poll() is None and "gui: desktop ready" in text:
         cd_fails = cd_media_change(log, isos)
@@ -211,6 +232,7 @@ def run(cfg):
         if "ISO9660 'HALCYONCD' on cd0" not in text:
             failures.append("CD volume")
         failures += cd_fails
+    failures += kbd_fails
     want_mode = {"": "irq: mode I/O APIC", "pic": "irq: mode 8259 PIC", "nomsi": "irq: mode I/O APIC",
                  "noirq": "interrupts disabled by boot option"}[irqmode]
     if want_mode not in text:
