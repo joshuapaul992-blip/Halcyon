@@ -8,6 +8,7 @@
 #include "core/kmath.h"
 #include "core/io.h"
 #include "fs/vfs.h"
+#include "core/settings.h"
 #include "usb/usb.h"
 
 static surface_t *wallpaper;
@@ -738,7 +739,9 @@ void shell_open(const char *path) {
 }
 
 void desktop_init(void) {
-    desktop_wallpaper_set(0);
+    int th = settings_get_int("desktop.theme", 0);
+    if (th > 0 && th < g_theme_count) theme_set(th);
+    desktop_wallpaper_set(CLAMP(settings_get_int("desktop.wallpaper", 0), 0, 3));
     last_vgen = vfs_generation();
     for (int i = 0; i < vfs_volume_count(); i++) {
         volume_t *v = vfs_volume(i);

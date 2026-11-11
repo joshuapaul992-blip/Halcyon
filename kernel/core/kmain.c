@@ -28,6 +28,7 @@ void splash_finish(void) WEAK;
 void hwreport_early(void) WEAK;
 void hwreport_late(void) WEAK;
 int  bootlog_save(const char *reason) WEAK;
+void settings_load(void) WEAK;
 #define PROGRESS(p, m) do { if (splash_progress) splash_progress(p, m); } while (0)
 
 
@@ -72,6 +73,7 @@ void kmain(struct bootinfo *bi) {
     storage_service();          /* register the USB disks found by usb_init */
     PROGRESS(100, "Starting the desktop...");
     if (hwreport_late) hwreport_late();
+    if (settings_load) settings_load();
     if (bootlog_save) {
         int r = bootlog_save("desktop starting");
         kprintf("bootlog: %s\n", r == 0 ? "saved" : strerror(r));

@@ -5,6 +5,7 @@
 #include "core/mm.h"
 #include "core/kernel.h"
 #include "core/kmath.h"
+#include "core/settings.h"
 
 #define CP_W 560
 #define CP_H 420
@@ -234,6 +235,9 @@ static void apply(window_t *w) {
         desktop_wallpaper_set(c->wall);
         wm_set_busy(0);
     }
+    settings_set_int("desktop.theme", theme_index());
+    settings_set_int("desktop.wallpaper", desktop_wallpaper_style());
+    settings_save();
     update_apply(w);
 }
 
