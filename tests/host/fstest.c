@@ -18,6 +18,7 @@
 #include "core/kernel.h"
 #include "fs/block.h"
 #include "fs/vfs.h"
+#include "fuzz_fs.h"
 
 extern int shim_verbose;
 extern size_t shim_live_allocs;
@@ -1412,6 +1413,601 @@ static void s_testdisks(void) {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* hostile volumes: corrupted / malicious partition tables and FAT      */
+/* volumes, built by patching the fuzzer seeds (fuzz_seeds.sh). Every   */
+/* image goes through the fuzz harness (fuzz_fs.c: mount, walk, mutate, */
+/* unmount; aborts on any sanitizer report, leak, hang, ...), some get  */
+/* specific checks on top.                                              */
+
+static u16 g16(const u8 *p) { return (u16)(p[0] | (p[1] << 8)); }
+static u32 g32(const u8 *p) { return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24); }
+static u64 g64(const u8 *p) { return g32(p) | ((u64)g32(p + 4) << 32); }
+static void s16(u8 *p, u32 v) { p[0] = (u8)v; p[1] = (u8)(v >> 8); }
+static void s32(u8 *p, u32 v) { s16(p, v); s16(p + 2, v >> 16); }
+static void s64(u8 *p, u64 v) { s32(p, (u32)v); s32(p + 4, (u32)(v >> 32)); }
+
+static u32 h_crc32(const u8 *p, size_t n) {
+    u32 c = 0xFFFFFFFF;
+    while (n--) {
+        c ^= *p++;
+        for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320 & -(c & 1));
+    }
+    return ~c;
+}
+
+typedef struct { u8 *b; size_t n; u8 cfg; } himg_t;
+
+static char g_seed_dir[1100];
+
+/* load a seed (config byte + image) into a fresh buffer */
+static himg_t h_seed(const char *name) {
+    char path[1300];
+    himg_t h = { NULL, 0, 0 };
+    snprintf(path, sizeof path, "%s/%s", g_seed_dir, name);
+    size_t n = 0;
+    u8 *b = host_read(path, &n);
+    CHECK(b && n > 512, "seed %s missing", name);
+    if (!b || n <= 512) { free(b); return h; }
+    h.cfg = b[0];
+    memmove(b, b + 1, n - 1);
+    h.b = b;
+    h.n = n - 1;
+    return h;
+}
+
+static himg_t h_copy(const himg_t *src) {
+    himg_t h = *src;
+    h.b = malloc(src->n);
+    memcpy(h.b, src->b, src->n);
+    return h;
+}
+
+static void h_free(himg_t *h) { free(h->b); h->b = NULL; }
+
+/* run an image through the fuzz harness (read-write, read-only, another
+ * operation variant, then with I/O errors injected at a few points);
+ * returns the number of mounted volumes */
+static int h_run(const char *what, himg_t *h, int want_vols) {
+    int nv = -1;
+    u8 base = h->cfg & FZ_CFG_4K;
+    const u8 cfgs[] = { base, (u8)(base | FZ_CFG_RO), (u8)(base | (0x0D << 2)),
+                        (u8)(base | FZ_CFG_FAULTS | (3 << 2)), (u8)(base | FZ_CFG_FAULTS | FZ_CFG_BOOT | (9 << 2)),
+                        (u8)(base | FZ_CFG_FAULTS | (0x1F << 2)) };
+    for (size_t i = 0; i < ARRAY_SIZE(cfgs); i++) {
+        if (shim_verbose) printf("    hostile: %s (cfg %02x)\n", what, cfgs[i]);
+        int r = fuzz_fs_image(cfgs[i], h->b, h->n);
+        if (!i) nv = r;
+        else if (!(cfgs[i] & FZ_CFG_FAULTS))
+            CHECK(r == nv, "%s: %d volumes with cfg %02x, %d without", what, r, cfgs[i], nv);
+    }
+    if (want_vols >= 0) CHECK(nv == want_vols, "%s: %d volume(s) mounted, want %d", what, nv, want_vols);
+    else g_checks++;
+    return nv;
+}
+
+/* FAT geometry of the file system at byte offset off */
+typedef struct { u32 off, bps, spc, rsv, nfats, rootent, tot, fatsz, type, root0, data0, rootclus, nclus; } fsg_t;
+
+static void h_fsg(const himg_t *h, u32 off, fsg_t *g) {
+    const u8 *s = h->b + off;
+    g->off = off;
+    g->bps = g16(s + 11); g->spc = s[13]; g->rsv = g16(s + 14); g->nfats = s[16]; g->rootent = g16(s + 17);
+    g->tot = g16(s + 19) ? g16(s + 19) : g32(s + 32);
+    g->fatsz = g16(s + 22) ? g16(s + 22) : g32(s + 36);
+    g->root0 = g->rsv + g->nfats * g->fatsz;
+    g->data0 = g->root0 + (g->rootent * 32 + g->bps - 1) / g->bps;
+    g->nclus = (g->tot - g->data0) / g->spc;
+    g->type = g->nclus < 4085 ? 12 : g->nclus < 65525 ? 16 : 32;
+    g->rootclus = g->type == 32 ? g32(s + 44) : 0;
+}
+
+static u8 *h_sec(himg_t *h, fsg_t *g, u32 sec) { return h->b + g->off + (size_t)sec * g->bps; }
+static u8 *h_clus(himg_t *h, fsg_t *g, u32 c) { return h_sec(h, g, g->data0 + (c - 2) * g->spc); }
+
+static u32 h_fat_get(himg_t *h, fsg_t *g, u32 c) {
+    u8 *f = h_sec(h, g, g->rsv);
+    if (g->type == 12) { u32 v = g16(f + c + c / 2); return (c & 1) ? v >> 4 : v & 0xFFF; }
+    if (g->type == 16) return g16(f + c * 2);
+    return g32(f + c * 4) & 0x0FFFFFFF;
+}
+
+static void h_fat_set(himg_t *h, fsg_t *g, u32 c, u32 v) {
+    for (u32 i = 0; i < g->nfats; i++) {
+        u8 *f = h_sec(h, g, g->rsv + i * g->fatsz);
+        if (g->type == 12) {
+            u8 *p = f + c + c / 2;
+            u32 o = g16(p);
+            s16(p, (c & 1) ? (o & 0x000F) | (v << 4) : (o & 0xF000) | (v & 0xFFF));
+        } else if (g->type == 16) {
+            s16(f + c * 2, v);
+        } else {
+            s32(f + c * 4, v);
+        }
+    }
+}
+
+/* replace the end-of-chain marker of every chain with target(c) */
+static void h_chain_ends(himg_t *h, fsg_t *g, u32 (*target)(fsg_t *g, u32 c)) {
+    u32 eoc = g->type == 12 ? 0xFF8 : g->type == 16 ? 0xFFF8 : 0x0FFFFFF8;
+    u32 maxc = MIN(g->nclus + 2, (u32)((u64)g->fatsz * g->bps * 8 / g->type));
+    for (u32 c = 2; c < maxc; c++)
+        if (h_fat_get(h, g, c) >= eoc) h_fat_set(h, g, c, target(g, c));
+}
+static u32 t_self(fsg_t *g, u32 c) { return c; }
+static u32 t_two(fsg_t *g, u32 c) { return 2; }
+static u32 t_past(fsg_t *g, u32 c) { return g->nclus + 2; }
+static u32 t_one(fsg_t *g, u32 c) { return 1; }
+static u32 t_zero(fsg_t *g, u32 c) { return 0; }
+static u32 t_bad(fsg_t *g, u32 c) { return g->type == 12 ? 0xFF7 : g->type == 16 ? 0xFFF7 : 0x0FFFFFF7; }
+static u32 t_rsvd(fsg_t *g, u32 c) { return g->type == 12 ? 0xFF0 : g->type == 16 ? 0xFFF0 : 0x0FFFFFF0; }
+
+/* directory entry by raw 8.3 name in directory dirclus (0 = root), first cluster only */
+static u8 *h_dirent(himg_t *h, fsg_t *g, u32 dirclus, const char *n11) {
+    u8 *d;
+    u32 cnt;
+    if (!dirclus && g->type != 32) { d = h_sec(h, g, g->root0); cnt = g->rootent; }
+    else { d = h_clus(h, g, dirclus ? dirclus : g->rootclus); cnt = g->spc * g->bps / 32; }
+    for (u32 i = 0; i < cnt; i++) if (!memcmp(d + 32 * i, n11, 11)) return d + 32 * i;
+    return NULL;
+}
+static u32 h_ent_clus(fsg_t *g, const u8 *de) { return g16(de + 26) | (g->type == 32 ? (u32)g16(de + 20) << 16 : 0); }
+static void h_ent_set_clus(u8 *de, u32 c) { s16(de + 26, c); s16(de + 20, c >> 16); }
+static u32 h_dir_clus(himg_t *h, fsg_t *g, const char *n11) {
+    u8 *de = h_dirent(h, g, 0, n11);
+    CHECK(de, "%.11s not found", n11);
+    return de ? h_ent_clus(g, de) : 0;
+}
+
+/* first free root directory slot (FAT12/16) */
+static u8 *h_root_free(himg_t *h, fsg_t *g) {
+    u8 *d = h_sec(h, g, g->root0);
+    for (u32 i = 0; i < g->rootent; i++) if (d[32 * i] == 0) return d + 32 * i;
+    return NULL;
+}
+
+static u8 h_lfn_chk(const char *n11) {
+    u8 s = 0;
+    for (int i = 0; i < 11; i++) s = (u8)(((s & 1) << 7) + (s >> 1) + (u8)n11[i]);
+    return s;
+}
+
+/* an LFN slot: ord byte, up to 13 chars of name, checksum */
+static void h_lfn(u8 *p, u8 ord, const char *part, u8 chk) {
+    static const u8 pos[13] = { 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
+    memset(p, 0, 32);
+    p[0] = ord;
+    p[11] = 0x0F;
+    p[13] = chk;
+    int len = (int)strlen(part);
+    for (int i = 0; i < 13; i++) s16(p + pos[i], i < len ? (u8)part[i] : i == len ? 0 : 0xFFFF);
+}
+
+static void h_short(u8 *p, const char *n11, u8 attr, u32 clus, u32 size) {
+    memset(p, 0, 32);
+    memcpy(p, n11, 11);
+    p[11] = attr;
+    h_ent_set_clus(p, clus);
+    s32(p + 28, size);
+}
+
+/* mount an image through a file-backed device, for checks beyond the harness */
+static hdisk_t *h_attach(himg_t *h, int readonly) {
+    const char *path = wpath("hostile.img");
+    host_write(path, h->b, h->n);
+    hdisk_t *d = calloc(1, sizeof *d);
+    d->fd = open(path, readonly ? O_RDONLY : O_RDWR);
+    snprintf(d->bd.name, sizeof d->bd.name, "hz%d", g_disk_no++);
+    d->bd.sector_size = (h->cfg & FZ_CFG_4K) ? 4096 : 512;
+    d->bd.sector_count = h->n / d->bd.sector_size;
+    d->bd.readonly = (u8)readonly;
+    d->bd.read = hd_read;
+    d->bd.write = hd_write;
+    int r = blockdev_register(&d->bd);
+    CHECK(r == 0, "blockdev_register = %d", r);
+    return d;
+}
+
+/* read a whole file; returns the last result (0 at EOF or an error), bytes in *got */
+static int h_read_all(const char *path, u64 *got) {
+    static u8 buf[65536];
+    vfs_file_t *f;
+    *got = 0;
+    int r = vfs_open(path, VFS_O_READ, &f);
+    if (r) return r;
+    while ((r = vfs_read(f, buf, sizeof buf)) > 0) *got += (u32)r;
+    vfs_close(f);
+    return r;
+}
+
+#define CASE(desc) for (int _once = (h = h_copy(&base), snprintf(what, sizeof what, "%s: %s", tag, desc), 1); \
+                        _once; _once = 0, h_free(&h))
+
+static void t_hostile_fat(const char *tag) {
+    himg_t base = h_seed(tag), h;
+    if (!base.b) return;
+    fsg_t g;
+    h_fsg(&base, 0, &g);
+    char what[200], desc[80];
+    u8 *de;
+    CASE("unmodified") h_run(what, &h, 1);
+
+    /* cluster chains: loops, out of range, reserved values, free */
+    struct { const char *d; u32 (*t)(fsg_t *, u32); } ends[] = {
+        { "chains end in a self loop", t_self }, { "chains loop back to cluster 2", t_two },
+        { "chains run past the last cluster", t_past }, { "chains point to cluster 1", t_one },
+        { "chains point to a free cluster", t_zero }, { "chains point to a bad cluster", t_bad },
+        { "chains point to a reserved value", t_rsvd } };
+    for (size_t i = 0; i < ARRAY_SIZE(ends); i++) {
+        CASE(ends[i].d) {
+            h_chain_ends(&h, &g, ends[i].t);
+            /* and a file claiming far more data than its chain holds */
+            u32 sub = h_dir_clus(&h, &g, "SUBDIR     ");
+            if (sub && (de = h_dirent(&h, &g, sub, "MULTI   BIN"))) s32(de + 28, 0xFFFFFFF0);
+            if (h_run(what, &h, -1) == 1) {
+                hdisk_t *d = h_attach(&h, 0);
+                u64 got;
+                int r = h_read_all(P(letter_of(d), "SUBDIR/MULTI.BIN"), &got);
+                CHECK(r == E_IO || r == E_NOENT || r == E_NOTDIR, "%s: reading MULTI.BIN = %d (%s), want E_IO",
+                      what, r, ename(r));
+                CHECK(got <= h.n, "%s: read %lu bytes from a %lu byte disk", what, (unsigned long)got,
+                      (unsigned long)h.n);
+                disk_detach(d);
+            }
+        }
+    }
+    CASE("file size exceeds its chain") {
+        de = h_dirent(&h, &g, 0, "README  TXT");
+        CHECK(de, "README.TXT not found");
+        if (de) s32(de + 28, 0xFFFFFFFF);
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        u64 got;
+        EXPECT(h_read_all(P(letter_of(d), "README.TXT"), &got), E_IO);
+        disk_detach(d);
+    }
+    CASE("directory entries with out-of-range clusters") {
+        if ((de = h_dirent(&h, &g, 0, "SUBDIR     "))) h_ent_set_clus(de, g.nclus + 100);
+        if ((de = h_dirent(&h, &g, 0, "README  TXT"))) h_ent_set_clus(de, 1);
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        char L = letter_of(d);
+        vfs_dirent_t *ents;
+        EXPECT(vfs_list(P(L, "SUBDIR"), &ents), E_IO);
+        u64 got;
+        EXPECT(h_read_all(P(L, "README.TXT"), &got), E_IO);
+        disk_detach(d);
+    }
+    CASE("directory cluster chain loops onto itself") {
+        u32 sub = h_dir_clus(&h, &g, "SUBDIR     ");
+        if (sub) {
+            h_fat_set(&h, &g, sub, sub);
+            /* fill the directory so that a scan never hits an end marker */
+            u8 *d = h_clus(&h, &g, sub);
+            for (u32 i = 4; i < g.spc * g.bps / 32; i++) {
+                char n11[16];
+                snprintf(n11, sizeof n11, "F%07uTXT", i);
+                h_short(d + 32 * i, n11, 0x20, 0, 0);
+            }
+            h_run(what, &h, 1);
+            hdisk_t *dk = h_attach(&h, 0);
+            char L = letter_of(dk);
+            int n = v_count(P(L, "SUBDIR"));
+            CHECK(n > 0 && n <= 65536, "looping directory: %d entries", n);
+            EXPECT(vfs_mkdir(P(L, "SUBDIR/one more")), E_NOSPC);
+            disk_detach(dk);
+        }
+    }
+    CASE("'.' and '..' entries pointing anywhere") {
+        u32 sub = h_dir_clus(&h, &g, "SUBDIR     "), lng = h_dir_clus(&h, &g, "LONGDI~1   ");
+        if (sub && lng) {
+            u8 *d = h_clus(&h, &g, sub);
+            h_ent_set_clus(d, 2);            /* "." -> cluster 2 */
+            h_ent_set_clus(d + 32, sub);     /* ".." -> itself */
+            d = h_clus(&h, &g, lng);
+            h_ent_set_clus(d + 32, 1);       /* ".." -> invalid */
+            h_run(what, &h, 1);
+            hdisk_t *dk = h_attach(&h, 0);
+            char L = letter_of(dk);
+            /* moving a directory into SUBDIR walks its looping ".." chain */
+            int r = vfs_rename(P(L, "Long Directory Name/Nested"), P(L, "SUBDIR/Nested"));
+            CHECK(r == 0 || r == E_IO, "rename into a dir with a '..' loop = %d (%s)", r, ename(r));
+            /* and into "Long Directory Name" its invalid ".." */
+            r = vfs_rename(P(L, "SUBDIR"), P(L, "Long Directory Name/SUBDIR"));
+            CHECK(r == E_IO, "rename into a dir with an invalid '..' = %d (%s)", r, ename(r));
+            disk_detach(dk);
+        }
+    }
+    CASE("moving a directory with an invalid cluster") {
+        if ((de = h_dirent(&h, &g, 0, "LONGDI~1   "))) h_ent_set_clus(de, 1);
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        char L = letter_of(d);
+        EXPECT(vfs_rename(P(L, "Long Directory Name"), P(L, "SUBDIR/moved")), E_IO);
+        disk_detach(d);
+    }
+    if (g.type != 32) {
+        CASE("hostile names: LFN sequences, checksums, path characters") {
+            u8 *p = h_root_free(&h, &g);
+            CHECK(p && p + 32 * 24 <= h_sec(&h, &g, g.data0), "no room in the root directory");
+            if (p && p + 32 * 24 <= h_sec(&h, &g, g.data0)) {
+                const char *n1 = "BADSEQ  TXT", *n2 = "BADCHK  TXT", *n3 = "DOTDOT  TXT", *n4 = "SLASH   TXT",
+                           *n5 = "DRIVE   TXT", *n6 = "BIGORD  TXT", *n7 = "EMPTYLFNTXT";
+                h_lfn(p, 0x43, "missing", h_lfn_chk(n1)); p += 32;     /* 3, then 1: 2 is missing */
+                h_lfn(p, 0x01, "sequence", h_lfn_chk(n1)); p += 32;
+                h_short(p, n1, 0x20, 0, 0); p += 32;
+                h_lfn(p, 0x41, "wrong checksum", 0x55); p += 32;
+                h_short(p, n2, 0x20, 0, 0); p += 32;
+                h_lfn(p, 0x41, "..", h_lfn_chk(n3)); p += 32;
+                h_short(p, n3, 0x10, 0, 0); p += 32;
+                h_lfn(p, 0x41, "../../x", h_lfn_chk(n4)); p += 32;
+                h_short(p, n4, 0x20, 0, 0); p += 32;
+                h_lfn(p, 0x41, "C:", h_lfn_chk(n5)); p += 32;
+                h_short(p, n5, 0x20, 0, 0); p += 32;
+                h_lfn(p, 0x40 | 25, "huge ordinal", h_lfn_chk(n6)); p += 32;
+                h_short(p, n6, 0x20, 0, 0); p += 32;
+                h_lfn(p, 0x41, "", h_lfn_chk(n7)); p += 32;
+                h_short(p, n7, 0x20, 0, 0); p += 32;
+                h_short(p, "A/B:C\\D EXT", 0x20, 0, 0); p += 32;    /* path characters in a short name */
+                h_short(p, "           ", 0x20, 0, 0); p += 32;    /* blank short name */
+                h_lfn(p, 0x42, "orphan", 0x12); p += 32;            /* orphaned LFN slots */
+                h_lfn(p, 0x01, "slots", 0x12); p += 32;
+                p[0] = 0xE5;
+                h_run(what, &h, 1);
+                hdisk_t *d = h_attach(&h, 0);
+                char L = letter_of(d);
+                CHECK(v_listed(P(L, ""), "BADSEQ.TXT", NULL), "bad LFN sequence: short name not used");
+                CHECK(v_listed(P(L, ""), "BADCHK.TXT", NULL), "bad LFN checksum: short name not used");
+                CHECK(v_listed(P(L, ""), "DOTDOT.TXT", NULL), "LFN '..' not rejected");
+                CHECK(v_listed(P(L, ""), "SLASH.TXT", NULL), "LFN with '/' not rejected");
+                CHECK(v_listed(P(L, ""), "DRIVE.TXT", NULL), "LFN 'C:' not rejected");
+                CHECK(v_listed(P(L, ""), "BIGORD.TXT", NULL), "LFN ordinal 25 not rejected");
+                CHECK(v_listed(P(L, ""), "EMPTYLFN.TXT", NULL), "empty LFN not rejected");
+                CHECK(v_listed(P(L, ""), "A_B_C_D.EXT", NULL), "short name path characters not replaced");
+                CHECK(v_listed(P(L, ""), "_", NULL), "blank short name not shown as '_'");
+                CHECK(!v_listed(P(L, ""), "..", NULL), "'..' listed");
+                /* the entries are usable under their safe names */
+                EXPECT(vfs_write_file(P(L, "A_B_C_D.EXT"), "x", 1), 1);
+                OK(vfs_unlink(P(L, "SLASH.TXT")));
+                disk_detach(d);
+            }
+        }
+    }
+
+    /* BPB fields */
+    struct { const char *d; int off, width; u32 val; int want; } bpb[] = {
+        { "bytes/sector 0", 11, 2, 0, 0 }, { "bytes/sector 1000", 11, 2, 1000, 0 },
+        { "bytes/sector 256", 11, 2, 256, 0 }, { "bytes/sector 8192", 11, 2, 8192, 0 },
+        { "sectors/cluster 0", 13, 1, 0, 0 }, { "sectors/cluster 3", 13, 1, 3, 0 },
+        { "sectors/cluster 128", 13, 1, 128, -1 }, { "reserved sectors 0", 14, 2, 0, 0 },
+        { "FAT count 0", 16, 1, 0, 0 }, { "FAT count 3", 16, 1, 3, 0 },
+        { "media byte 0x12", 21, 1, 0x12, 0 },
+        { "total sectors 0xFFFFFFFF", 32, 4, 0xFFFFFFFF, -1 },
+        { "total sectors 3x the device", 32, 4, 0, -1 },
+        { "total sectors below the metadata", 32, 4, 3, 0 },
+        { "reserved sectors past the device", 14, 2, 0xFFFF, 0 },
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(bpb); i++) {
+        CASE(bpb[i].d) {
+            u8 *s = h.b + bpb[i].off;
+            u32 v = bpb[i].val;
+            if (bpb[i].off == 32) {
+                if (!v) v = (u32)(h.n / g.bps * 3);
+                s16(h.b + 19, 0);          /* use the 32-bit field */
+            }
+            if (bpb[i].width == 1) *s = (u8)v;
+            else if (bpb[i].width == 2) s16(s, v);
+            else s32(s, v);
+            h_run(what, &h, bpb[i].want);
+        }
+    }
+    if (g.type != 32) {
+        CASE("root entry count 0") { s16(h.b + 17, 0); h_run(what, &h, 0); }
+        CASE("root entry count 1") { s16(h.b + 17, 1); h_run(what, &h, -1); }
+        CASE("FAT size 0xFFFF") { s16(h.b + 22, 0xFFFF); h_run(what, &h, 0); }
+    } else {
+        u32 rc[] = { 0, 1, g.nclus + 2, 0x0FFFFFFF, 0xFFFFFFFF };
+        for (size_t i = 0; i < ARRAY_SIZE(rc); i++) {
+            snprintf(desc, sizeof desc, "root cluster %u", rc[i]);
+            CASE(desc) { s32(h.b + 44, rc[i]); h_run(what, &h, 0); }
+        }
+        CASE("root cluster past the end of the device") { s32(h.b + 44, g.nclus + 1); h_run(what, &h, 0); }
+        CASE("FAT size 0xFFFFFFFF") { s32(h.b + 36, 0xFFFFFFFF); h_run(what, &h, 0); }
+        CASE("FAT size wrapping the layout") { h.b[16] = 2; s32(h.b + 36, 0x80000001); h_run(what, &h, 0); }
+        CASE("FSInfo hints out of range") {
+            u8 *fsi = h.b + g16(h.b + 48) * g.bps;
+            s32(fsi + 488, 0xFFFFFFF0);
+            s32(fsi + 492, 0xFFFFFFFF);
+            h_run(what, &h, 1);
+            /* read-only device: counting the free clusters must not leave
+             * a dirty FSInfo sector behind that can never be written */
+            hdisk_t *d = h_attach(&h, 1);
+            char L = letter_of(d);
+            u64 t, fr;
+            OK(vfs_statfs(L, &t, &fr));
+            vfs_file_t *fh;
+            if (vfs_open(P(L, "README.TXT"), VFS_O_READ, &fh) == 0) EXPECT(vfs_close(fh), 0);
+            EXPECT(vfs_sync_all(), 0);
+            disk_detach(d);
+        }
+        CASE("FSInfo sector past the reserved area") { s16(h.b + 48, 0xFFF0); h_run(what, &h, 1); }
+        CASE("active FAT out of range") { s16(h.b + 40, 0x8F); h_run(what, &h, 1); }
+    }
+    h_free(&base);
+}
+
+/* MBR / EBR chains on the mbr_extended seed (primary at 8, extended at
+ * 320 holding logicals at 328 and 640) */
+static void t_hostile_mbr(void) {
+    const char *tag = "mbr";
+    himg_t base = h_seed("mbr_extended"), h;
+    if (!base.b) return;
+    char what[200];
+    CHECK(base.b[446 + 16 + 4] == 0x05 && g32(base.b + 446 + 16 + 8) == 320, "unexpected seed layout");
+    u32 ebr1 = 320 * 512;
+    u32 ebr2 = (320 + g32(base.b + ebr1 + 462 + 8)) * 512;
+    CHECK(ebr2 > ebr1 && ebr2 < base.n, "second EBR");
+    CASE("unmodified") h_run(what, &h, 3);
+    CASE("EBR points to itself") { s32(h.b + ebr1 + 462 + 8, 0); h_run(what, &h, 2); }
+    CASE("EBR loops back") { s32(h.b + ebr2 + 462 + 8, 0); h_run(what, &h, 3); }
+    CASE("EBR points outside the disk") { s32(h.b + ebr1 + 462 + 8, 0xFFFFFF00); h_run(what, &h, 2); }
+    CASE("logical partition outside the disk") { s32(h.b + ebr1 + 446 + 8, 0xFFFFFFF0); h_run(what, &h, 2); }
+    CASE("logical partition huge") { s32(h.b + ebr2 + 446 + 12, 0xFFFFFFFF); h_run(what, &h, 3); }
+    CASE("partition beyond the end of the disk") { s32(h.b + 446 + 12, 0xFFFFFFF0); h_run(what, &h, -1); }
+    CASE("duplicate primary entries") {
+        memcpy(h.b + 446 + 32, h.b + 446, 16);
+        memcpy(h.b + 446 + 48, h.b + 446, 16);
+        h_run(what, &h, 3);
+    }
+    CASE("primary overlapping a logical partition") {
+        memcpy(h.b + 446 + 32, h.b + 446, 16);
+        s32(h.b + 446 + 32 + 8, 500);
+        h_run(what, &h, 3);
+    }
+    CASE("zero-length partition") {
+        memcpy(h.b + 446 + 32, h.b + 446, 16);
+        s32(h.b + 446 + 32 + 12, 0);
+        h_run(what, &h, -1);
+    }
+    CASE("partition starting at LBA 0") {
+        memcpy(h.b + 446 + 32, h.b + 446, 16);
+        s32(h.b + 446 + 32 + 8, 0);
+        h_run(what, &h, -1);
+    }
+    CASE("extended partition over the primary") { s32(h.b + 446 + 16 + 8, 8); h_run(what, &h, -1); }
+    CASE("long EBR chain") {
+        /* 300 EBRs, each followed by a one-sector logical partition */
+        memset(h.b + 446, 0, h.n - 446);
+        h.b[510] = 0x55; h.b[511] = 0xAA;
+        u8 *e = h.b + 446;
+        e[4] = 0x05; s32(e + 8, 2); s32(e + 12, 1000);
+        for (u32 k = 0; k < 300 && (size_t)(2 + 3 * (k + 1)) * 512 <= h.n; k++) {
+            u8 *b = h.b + (size_t)(2 + 3 * k) * 512;
+            b[446 + 4] = 0x01; s32(b + 446 + 8, 1); s32(b + 446 + 12, 1);
+            b[462 + 4] = 0x05; s32(b + 462 + 8, 3 * (k + 1)); s32(b + 462 + 12, 3);
+            b[510] = 0x55; b[511] = 0xAA;
+        }
+        h_run(what, &h, 0);
+    }
+    h_free(&base);
+}
+
+static void h_gpt_fix(himg_t *h, u8 **hdr) {
+    const u32 ss = 512;
+    for (int i = 0; i < 2; i++) {
+        u8 *hd = hdr[i];
+        if (memcmp(hd, "EFI PART", 8)) continue;
+        u64 n = (u64)g32(hd + 80) * g32(hd + 84), lba = g64(hd + 72);
+        if (n <= 1024 * 1024 && lba * ss + n <= h->n) s32(hd + 88, h_crc32(h->b + lba * ss, (size_t)n));
+        u32 hs = g32(hd + 12);
+        if (hs < 92 || hs > ss) continue;
+        s32(hd + 16, 0);
+        s32(hd + 16, h_crc32(hd, hs));
+    }
+}
+
+/* GPT on the gpt_two seed (partitions at 40..439 and 480..1079); edits go
+ * to both the primary and the backup header / entry array */
+static void t_hostile_gpt(void) {
+    const char *tag = "gpt";
+    himg_t base = h_seed("gpt_two"), h;
+    if (!base.b) return;
+    char what[200];
+    const u32 ss = 512;
+    u64 alt = g64(base.b + ss + 32);
+    CHECK(alt == base.n / ss - 1, "unexpected seed layout");
+    u64 ent[2] = { g64(base.b + ss + 72), g64(base.b + alt * ss + 72) };
+    u8 *hdr[2];
+#define EACH for (int k = 0; k < 2; k++)
+#define ENT(i) (h.b + ent[k] * ss + (i) * 128)
+#define FIX() (hdr[0] = h.b + ss, hdr[1] = h.b + alt * ss, h_gpt_fix(&h, hdr))
+#define HDR(k) (h.b + ((k) ? alt : 1) * ss)
+    CASE("unmodified") h_run(what, &h, 2);
+    CASE("entry count 0xFFFFFFFF") { EACH s32(HDR(k) + 80, 0xFFFFFFFF); FIX(); h_run(what, &h, 2); }
+    CASE("entry count 2^20, entry size 4096 (32-bit wrap)") {
+        EACH { s32(HDR(k) + 80, 1u << 20); s32(HDR(k) + 84, 4096); }
+        FIX();
+        h_run(what, &h, 0);     /* 256 entries of 4 KiB don't fit the disk */
+    }
+    CASE("entry count 1000") { EACH s32(HDR(k) + 80, 1000); FIX(); h_run(what, &h, 2); }
+    CASE("entry size 0") { EACH s32(HDR(k) + 84, 0); FIX(); h_run(what, &h, 0); }
+    CASE("entry size 0xFFFFFFF8") { EACH s32(HDR(k) + 84, 0xFFFFFFF8); FIX(); h_run(what, &h, 0); }
+    CASE("entry array outside the disk") { EACH s64(HDR(k) + 72, 0xFFFFFFFFFFull); FIX(); h_run(what, &h, 0); }
+    CASE("entry array at the last sector") { EACH s64(HDR(k) + 72, h.n / ss - 1); FIX(); h_run(what, &h, 0); }
+    CASE("header size 0xFFFFFFFF") { EACH s32(HDR(k) + 12, 0xFFFFFFFF); h_run(what, &h, 0); }
+    CASE("overlapping partitions") {
+        EACH { s64(ENT(1) + 32, 100); s64(ENT(1) + 40, 700); }
+        FIX();
+        h_run(what, &h, 1);
+    }
+    CASE("identical partitions") { EACH memcpy(ENT(1), ENT(0), 128); FIX(); h_run(what, &h, 1); }
+    CASE("partition out of range") { EACH s64(ENT(1) + 40, 0xFFFFFFFFFFFFull); FIX(); h_run(what, &h, 1); }
+    CASE("zero-length partition (end before start)") {
+        EACH { s64(ENT(1) + 32, 900); s64(ENT(1) + 40, 899); }
+        FIX();
+        h_run(what, &h, 1);
+    }
+    CASE("partition over the GPT itself") {
+        EACH { s64(HDR(k) + 40, 0); s64(ENT(1) + 32, 0); s64(ENT(1) + 40, 2000); }
+        FIX();
+        h_run(what, &h, -1);
+    }
+    CASE("primary header destroyed, backup absurd") {
+        s32(HDR(1) + 80, 1u << 20);
+        s32(HDR(1) + 84, 4096);
+        FIX();
+        memset(HDR(0), 0, 92);
+        h_run(what, &h, 0);
+    }
+#undef HDR
+#undef FIX
+#undef ENT
+#undef EACH
+    h_free(&base);
+}
+#undef CASE
+
+/* minimized fuzzer crash inputs (fuzz_regress/NAME.gz: config byte + image) */
+static void t_fuzz_regress(void) {
+    char path[1300];
+    int n = 0;
+    snprintf(path, sizeof path, "%s", wpath("regress"));
+    sh("rm -rf %s && mkdir -p %s && for f in fuzz_regress/*.gz; do [ -e \"$f\" ] || continue; "
+       "gzip -dc \"$f\" > %s/$(basename \"$f\" .gz); done", q(path), q(path), q(path));
+    FILE *ls = popen("ls fuzz_regress 2>/dev/null", "r");
+    char name[512];
+    while (ls && fgets(name, sizeof name, ls)) {
+        size_t len = strlen(name);
+        while (len && (name[len - 1] == '\n' || name[len - 1] == '\r')) name[--len] = 0;
+        if (len < 4 || strcmp(name + len - 3, ".gz")) continue;
+        name[len - 3] = 0;
+        char file[1900];
+        snprintf(file, sizeof file, "%s/%s", path, name);
+        size_t sz = 0;
+        u8 *b = host_read(file, &sz);
+        CHECK(b && sz > 1, "fuzz regression input %s unreadable", name);
+        if (shim_verbose) printf("    regress: %s\n", name);
+        if (b && sz > 1) fuzz_fs_run(b, sz);
+        free(b);
+        n++;
+    }
+    if (ls) pclose(ls);
+    CHECK(n > 0, "no fuzz regression inputs found");
+}
+
+static void s_hostile(void) {
+    snprintf(g_seed_dir, sizeof g_seed_dir, "%s", wpath("seeds"));
+    int r = sh("rm -rf %s && sh fuzz_seeds.sh %s", q(g_seed_dir), q(g_seed_dir));
+    CHECK(r == 0, "fuzz_seeds.sh failed");
+    if (r) return;
+    t_hostile_fat("super_fat12");
+    t_hostile_fat("super_fat16");
+    t_hostile_fat("super_fat32");
+    t_hostile_mbr();
+    t_hostile_gpt();
+    t_fuzz_regress();
+}
+
 typedef struct { const char *name; void (*fn)(void); } scen_t;
 
 static void s_paths(void) { t_paths(); }
@@ -1509,6 +2105,7 @@ static void s_misc(void) {
 static const scen_t scenarios[] = {
     { "paths", s_paths }, { "fat12", s_fat12 }, { "fat16", s_fat16 }, { "fat32", s_fat32 },
     { "gpt", s_gpt }, { "4k", s_4k }, { "misc", s_misc }, { "random", s_random }, { "testdisks", s_testdisks },
+    { "hostile", s_hostile },
 };
 
 int main(int argc, char **argv) {

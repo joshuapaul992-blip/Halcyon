@@ -295,7 +295,7 @@ static void cache_inval(fat_t *f, u32 sec, u32 n) {
 }
 
 static int fsinfo_store(fat_t *f) {
-    if (f->type != 32 || !f->fsinfo_sec || !f->fsinfo_dirty) return 0;
+    if (f->type != 32 || !f->fsinfo_sec || !f->fsinfo_dirty || f->ro) return 0;
     int err = 0;
     cent_t *c = cget(f, f->fsinfo_sec, 0, &err);
     if (!c) return err;
@@ -543,19 +543,25 @@ static u8 lfn_checksum(const u8 *name11) {
 
 static const u8 lfn_pos[13] = { 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
 
+/* bytes that must not appear in a name we hand out: they would make it more
+ * than one path component (or name a drive) */
+static int name_char_bad(u32 c) { return c < 0x20 || c == '/' || c == '\\' || c == ':'; }
+
 static void short_display(const u8 *de, char *sname, char *disp) {
     int n = 0, m = 0;
     u8 nt = de[12];
     for (int i = 0; i < 8 && de[i] != ' '; i++) {
-        char c = (char)(i == 0 && de[0] == 0x05 ? 0xE5 : de[i]);
+        char c = (char)(i == 0 && de[0] == 0x05 ? 0xE5 : name_char_bad(de[i]) ? '_' : de[i]);
         sname[n++] = c;
         disp[m++] = (char)((nt & 0x08) ? tolower(c) : c);
     }
+    if (!n) { sname[n++] = '_'; disp[m++] = '_'; }     /* corrupt: blank base name */
     if (de[8] != ' ') {
         sname[n++] = '.'; disp[m++] = '.';
         for (int i = 8; i < 11 && de[i] != ' '; i++) {
-            sname[n++] = (char)de[i];
-            disp[m++] = (char)((nt & 0x10) ? tolower(de[i]) : de[i]);
+            char c = (char)(name_char_bad(de[i]) ? '_' : de[i]);
+            sname[n++] = c;
+            disp[m++] = (char)((nt & 0x10) ? tolower(c) : c);
         }
     }
     sname[n] = 0;
@@ -613,11 +619,13 @@ static int dir_scan(fat_t *f, u32 dir, scan_cb cb, void *ctx, fent_t *e) {
             e->has_lfn = 0;
             if (lfn_ok && lfn_expect == 1 && lfn_checksum(p) == lfn_chk && !e->is_dot) {
                 char tmp[VFS_MAX_NAME + 1];
-                int n = 0, bad = 0;
+                int n = 0, bad = 0, dots = 0;
                 for (int i = 0; i < LFN_MAX_SLOTS * 13 && lfn[i] && lfn[i] != 0xFFFF; i++) {
-                    if (lfn[i] >= 0x80 || lfn[i] < 0x20 || n >= VFS_MAX_NAME) { bad = 1; break; }
+                    if (lfn[i] >= 0x80 || n >= VFS_MAX_NAME || name_char_bad(lfn[i])) { bad = 1; break; }
+                    dots += lfn[i] == '.';
                     tmp[n++] = (char)lfn[i];
                 }
+                if (dots == n) bad = 1;          /* "", ".", "..": not a usable name */
                 tmp[n] = 0;
                 if (!bad && n) {
                     memcpy(e->name, tmp, n + 1);
@@ -966,6 +974,7 @@ static void tmpl_new(u8 *de, u8 attr, u32 clus) {
 /* parent directory id of directory cluster c (via its ".." entry) */
 static int dir_parent(fat_t *f, u32 c, u32 *parent) {
     int err = 0;
+    if (!clus_ok(f, c)) return E_IO;
     cent_t *ce = cget(f, clus_sec(f, c), 0, &err);
     if (!ce) return err;
     const u8 *p = ce->buf + 32;
@@ -1005,7 +1014,7 @@ static int clus_at(fat_t *f, fnode_t *n, u32 idx, u32 *out) {
     u32 c, i;
     if (n->hint_clus && n->hint_idx <= idx) { c = n->hint_clus; i = n->hint_idx; }
     else { c = n->first; i = 0; }
-    if (!clus_ok(f, c)) return E_IO;
+    if (!clus_ok(f, c) || idx >= f->nclusters) return E_IO;   /* longer than any chain: loop */
     while (i < idx) {
         u32 nx;
         int r = chain_next(f, c, &nx);
@@ -1477,7 +1486,7 @@ static int fat_rename(volume_t *v, const char *from, const char *to) {
     int is_dir = (src->de[11] & ATTR_DIR) != 0;
     u32 sclus = ent_clus(f, src->de);
     if (is_dir && ddir != src->dir) {
-        if (!sclus) { r = E_IO; goto out; }
+        if (!clus_ok(f, sclus)) { r = E_IO; goto out; }
         u32 cur = ddir;
         for (int depth = 0; ; depth++) {
             if (cur == sclus) { r = E_INVAL; goto out; }
@@ -1638,9 +1647,9 @@ int fat_probe(blockdev_t *bd, volume_t *v) {
     f->fat_size = rd16(s + 22) ? rd16(s + 22) : rd32(s + 36);
     f->root_sectors = (f->root_entries * 32 + f->bps - 1) / f->bps;
     f->fat_base = rsv;
-    u32 meta = rsv + f->nfats * f->fat_size + f->root_sectors;
-    if (f->total_sectors <= meta) goto bad;
-    u32 nclus = (f->total_sectors - meta) / f->spc;
+    u64 meta = (u64)rsv + (u64)f->nfats * f->fat_size + f->root_sectors;
+    if (f->total_sectors <= meta) goto bad;     /* also keeps all sums below in 32 bits */
+    u32 nclus = (u32)((f->total_sectors - meta) / f->spc);
     if (nclus < 4085) f->type = 12;
     else if (nclus < 65525) f->type = 16;
     else f->type = 32;
@@ -1665,7 +1674,14 @@ int fat_probe(blockdev_t *bd, volume_t *v) {
     }
     f->root_start = rsv + f->nfats * f->fat_size;
     f->data_start = f->root_start + f->root_sectors;
-    if ((u64)f->data_start << f->shift >= bd->sector_count) goto bad;
+    u64 dev_secs = bd->sector_count >> f->shift;
+    if (f->data_start >= dev_secs) goto bad;
+    if ((u64)f->data_start + (u64)f->nclusters * f->spc > dev_secs) {
+        /* file system larger than the device (truncated image, bad BPB):
+         * clusters past the end of the device don't exist */
+        kprintf("fat: %s: file system exceeds the device, clusters limited\n", bd->name);
+        f->nclusters = (u32)((dev_secs - f->data_start) / f->spc);
+    }
     switch (f->type) {
     case 12: f->eoc_min = 0xFF8; f->eoc_mark = 0xFFF; break;
     case 16: f->eoc_min = 0xFFF8; f->eoc_mark = 0xFFFF; break;

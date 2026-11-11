@@ -11,6 +11,7 @@
 
 struct bootinfo g_bootinfo;
 int shim_verbose;
+int shim_kprintf_format;    /* format messages even when not printing them (fuzzing) */
 size_t shim_live_allocs;
 
 void *kmalloc(size_t n) { void *p = malloc(n ? n : 1); if (p) shim_live_allocs++; return p; }
@@ -23,8 +24,16 @@ void *krealloc(void *p, size_t n) {
 void kfree(void *p) { if (p) { shim_live_allocs--; free(p); } }
 
 void kprintf(const char *fmt, ...) {
-    if (!shim_verbose) return;
     va_list ap;
+    if (!shim_verbose) {
+        if (shim_kprintf_format) {
+            char buf[512];
+            va_start(ap, fmt);
+            vsnprintf(buf, sizeof buf, fmt, ap);
+            va_end(ap);
+        }
+        return;
+    }
     va_start(ap, fmt);
     fputs("    [k] ", stderr);
     vfprintf(stderr, fmt, ap);

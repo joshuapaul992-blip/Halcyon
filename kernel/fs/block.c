@@ -79,6 +79,13 @@ static blockdev_t *add_part(blockdev_t *disk, u64 start, u64 count, int index, u
         kprintf("block: %s: partition %d exceeds the disk, clipped\n", disk->name, index);
         count = disk->sector_count - start;
     }
+    /* two volumes on the same sectors would corrupt each other */
+    for (blockdev_t *b = g_devs; b; b = b->next) {
+        if (b->parent != disk || start >= b->part_start + b->sector_count || b->part_start >= start + count)
+            continue;
+        kprintf("block: %s: partition %d overlaps partition %d, ignored\n", disk->name, index, b->part_index);
+        return NULL;
+    }
     blockdev_t *p = kzalloc(sizeof *p);
     if (!p) return NULL;
     char nm[40];
@@ -198,16 +205,19 @@ static int scan_gpt(blockdev_t *disk, u8 *buf) {
     u64 ent_lba = rd64(buf + 72);
     u32 num = rd32(buf + 80), esz = rd32(buf + 84), ecrc = rd32(buf + 88);
     u64 first_usable = rd64(buf + 40), last_usable = rd64(buf + 48);
-    u32 total = num * esz;
+    /* only the first MAX_GPT_PARTS entries are used: don't read (or overflow
+     * on) an absurd entry count */
+    u32 used = MIN(num, (u32)MAX_GPT_PARTS);
+    u32 total = used * esz;             /* <= 256 * 4096 */
     u32 nsec = (total + ss - 1) / ss;
-    if (ent_lba + nsec > disk->sector_count) return -1;
+    if (nsec > disk->sector_count - ent_lba) return -1;
     u8 *ents = kmalloc((size_t)nsec * ss);
     if (!ents) return -1;
     if (blk_read(disk, ent_lba, nsec, ents)) { kfree(ents); return -1; }
-    if (crc32(ents, total) != ecrc)
+    if (used == num && crc32(ents, total) != ecrc)
         kprintf("block: %s: GPT entry array CRC mismatch (using it anyway)\n", disk->name);
     int count = 0;
-    for (u32 i = 0; i < num && i < MAX_GPT_PARTS; i++) {
+    for (u32 i = 0; i < used; i++) {
         const u8 *e = ents + (size_t)i * esz;
         int empty = 1;
         for (int k = 0; k < 16; k++) if (e[k]) { empty = 0; break; }
