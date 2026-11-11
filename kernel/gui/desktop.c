@@ -2,6 +2,7 @@
  * notification balloons, shutdown */
 #include "wm.h"
 #include "core/lib.h"
+#include "core/proc.h"
 #include "core/mm.h"
 #include "core/kernel.h"
 #include "core/kmath.h"
@@ -175,6 +176,7 @@ static void l_calc(void) { app_calc(); }
 static void l_control(void) { app_control(); }
 static void l_mines(void) { app_mines(); }
 static void l_about(void) { app_about(); }
+static void l_taskmgr(void) { shell_run("C:/PROGRAMS/TASKMGR.EXE", NULL); }
 
 static const dicon_t dicons[] = {
     { "My Computer", ICON_COMPUTER, l_computer },
@@ -438,6 +440,7 @@ static const sitem_t right_items[] = {
     { "My Computer", NULL, ICON_COMPUTER, l_computer },
     { "Control Panel", NULL, ICON_CONTROL, l_control },
     { "System Information", NULL, ICON_SYSINFO, l_sysinfo },
+    { "Task Manager", NULL, ICON_DISPLAY, l_taskmgr },
     { "About Halcyon", NULL, ICON_HELP, l_about },
 };
 #define SM_W 400
@@ -701,11 +704,24 @@ void shutdown_dialog(void) {
 }
 
 /* ---------------- file associations ---------------- */
+/* start a user program (no console) */
+int shell_run(const char *path, const char *args) {
+    int pid = proc_spawn(path, args, NULL, NULL);
+    if (pid < 0) {
+        char msg[VFS_MAX_PATH + 128];
+        snprintf(msg, sizeof msg, "Halcyon cannot run \"%s\".\n\n%s", vfs_basename(path),
+                 pid == E_INVAL ? "It is not a valid Halcyon program." : pid == E_NOENT ? "The file was not found." : strerror(pid));
+        msgbox(NULL, "Run", msg, ICON_ERROR, MB_OK);
+    }
+    return pid;
+}
+
 void shell_open(const char *path) {
     vfs_dirent_t st;
     if (vfs_stat(path, &st) == 0 && st.is_dir) { app_explorer(path); return; }
     const char *dot = strrchr(vfs_basename(path), '.');
     const char *ext = dot ? dot + 1 : "";
+    if (!strcasecmp(ext, "exe")) { shell_run(path, NULL); return; }
     static const char *text_ext[] = { "txt", "log", "ini", "cfg", "c", "h", "md", "bat", "asm", "s", "py", "csv",
                                       "json", "xml", "htm", "html", "inf", "conf", "sh", "nfo", "diz", "me", "1st", "rtf" };
     for (size_t i = 0; i < ARRAY_SIZE(text_ext); i++) if (!strcasecmp(ext, text_ext[i])) { app_notepad(path); return; }

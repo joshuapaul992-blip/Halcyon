@@ -19,6 +19,9 @@ which must mount as a volume "on nvme0" without NVMe errors and, with
 interrupts on, get a working interrupt:
   nvme    fat32gpt.img on an NVMe controller (512-byte LBAs)
   nvme4k  fat32_4k.img on an NVMe namespace with 4096-byte LBAs
+  user    run C:\\PROGRAMS\\SELFTEST.EXE after boot (QEMU fw_cfg autorun): user-mode
+          system calls, crashing / looping child programs, windows; it must
+          report "selftest: all N checks passed"
   cd      also an AHCI CD-ROM drive with an ISO 9660 + Joliet test disc
           (built with xorriso): the disc must mount, and after the desktop is
           up the disc is ejected and another one inserted through the QEMU
@@ -35,8 +38,8 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "uhci:uefi", "ehci:uefi", "ich9:uefi", "xhci:uefi",
           "xhci:bios:nomsi", "uhci:bios:pic", "xhci:uefi:pic", "ehci:bios:noirq",
           "xhci:bios:nvme", "xhci:uefi:nvme4k", "xhci:bios:nvme+nomsi", "xhci:uefi:nvme+noirq",
-          "xhci:bios:cd"]
-VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0}
+          "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user"]
+VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0}
 NVME_ERRORS = ["failed", "timed out", "fatal", "offline", "not responding", "no interrupt seen"]
 IDLE_MAX_CPU = 40      # % of one host CPU used by QEMU at the idle desktop
 TIMEOUT = {"uhci": 90, "ohci": 60}
@@ -141,6 +144,8 @@ def run(cfg):
         extra += " -drive if=none,id=d1,format=raw,file=%s -device ide-hd,drive=d1,bus=ide.2" % sata_x
     if flags:
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
+    if "user" in opts:
+        extra += " -fw_cfg name=opt/halcyon/autorun,string=C:/PROGRAMS/SELFTEST.EXE"
     isos = None
     if "cd" in opts:
         isos = make_cd_isos()
@@ -168,8 +173,17 @@ def run(cfg):
         if p.poll() is not None:
             break
     elapsed = time.time() - t0
+    if "user" in opts:
+        t1 = time.time()
+        while time.time() - t1 < 90 and p.poll() is None:
+            text = open(log, errors="replace").read()
+            if "selftest: all" in text or "checks FAILED" in text or any(b in text for b in BAD):
+                break
+            time.sleep(0.5)
+        time.sleep(1)
+        text = open(log, errors="replace").read()
     idle = None
-    if p.poll() is None and "gui: desktop ready" in text:
+    if p.poll() is None and "gui: desktop ready" in text and "user" not in opts:
         time.sleep(2)
         c0 = cpu_seconds(p.pid)
         time.sleep(4)
@@ -188,6 +202,10 @@ def run(cfg):
         p.kill()
     failures = [name for name, pat in checks if pat not in text]
     failures += ["log contains '%s'" % b for b in BAD if b in text]
+    if "user" in opts:
+        if "selftest: all" not in text:
+            bad = [l for l in text.splitlines() if "selftest:" in l and ("FAIL" in l or "skipped" in l)]
+            failures.append("selftest (%s)" % (bad[0].strip() if bad else "did not finish"))
     if isos:
         if "ISO9660 'HALCYONCD' on cd0" not in text:
             failures.append("CD volume")

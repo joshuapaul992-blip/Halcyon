@@ -411,6 +411,7 @@ static void cmd_help(term_t *t) {
         "  BOOTLOG               save \\HALCYON\\BOOT.LOG   CRASHTEST   test the crash screen\n"
         "  IRQ                   interrupts, timer and CPU usage\n"
         "  FORMAT [x: | device]  format a disk (FAT, FAT32, exFAT)\n"
+        "  TASKLIST / TASKKILL   running programs / end one   NAME [args]  run C:\\PROGRAMS\\NAME.EXE\n"
         "\nAny command's output can be redirected with > file or >> file.\n");
 }
 
@@ -627,6 +628,32 @@ static void execute(term_t *t, int argc, char **argv, const char *rest) {
         tprintf(t, r == 0 ? "Kernel log saved to \\HALCYON\\BOOT.LOG on the boot drive.\n" : "Could not save the log: %s\n", strerror(r));
     }
     else if (!strcasecmp(c, "format")) cmd_format(t, argc, argv);
+    else if (!strcasecmp(c, "tasklist")) {
+        tputs(t, "\nImage Name          PID  Parent  Threads    Memory    CPU time\n"
+                 "================  =====  ======  =======  ========  ==========\n");
+        tprintf(t, "%-16s  %5d  %6s  %7d  %6lu KB  (kernel)\n", "System", 0, "-", thread_count(), (u64)0);
+        for (proc_t *pr = proc_first(); pr; pr = pr->next) {
+            if (pr->state != P_RUNNING) continue;
+            u64 cpu = pr->main ? pr->main->cpu_tsc / tsc_khz() : 0;
+            tprintf(t, "%-16s  %5u  %6u  %7d  %6lu KB  %lu.%03lu s\n", pr->name, pr->pid, pr->parent, pr->nthreads,
+                    pr->pages * 4, cpu / 1000, cpu % 1000);
+        }
+    }
+    else if (!strcasecmp(c, "taskkill")) {
+        if (argc < 2) { tputs(t, "usage: TASKKILL pid | name.exe\n"); return; }
+        int n = 0;
+        char *end;
+        long pid = strtol(argv[1], &end, 10);
+        for (proc_t *pr = proc_first(); pr; pr = pr->next) {
+            if (pr->state != P_RUNNING) continue;
+            if ((*end == 0 && pr->pid == (u32)pid) || (*end && !strcasecmp(pr->name, argv[1]))) {
+                proc_kill(pr->pid, NULL);
+                tprintf(t, "SUCCESS: process %s (PID %u) was ended.\n", pr->name, pr->pid);
+                n++;
+            }
+        }
+        if (!n) tprintf(t, "ERROR: no running process \"%s\".\n", argv[1]);
+    }
     else if (!strcasecmp(c, "irq")) {
         char *buf = kmalloc(4096);
         if (buf) {

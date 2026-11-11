@@ -32,7 +32,8 @@ typedef struct proc {
     int state;
     int exit_code;
     volatile int killed;            /* end at the next return to user mode */
-    char fault[160];                /* why it was ended, if it crashed */
+    char fault[160];                /* why it ended, if it did not exit by itself */
+    int crashed;                    /* it ended because of an exception */
     u64 *pml4;
     u64 pages;                      /* user pages mapped */
     u64 brk_start, brk;

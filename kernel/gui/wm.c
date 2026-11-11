@@ -795,7 +795,16 @@ static void key_event(input_event_t *k) {
 static void handle_input(void) {
     input_event_t ev;
     while (input_get(&ev)) {
-        if (ev.type == EV_KEY) { key_event(&ev); continue; }
+        if (ev.type == EV_KEY) {
+            /* Ctrl+Alt+Del: Task Manager */
+            if (ev.pressed && ev.key == KEY_DELETE && (ev.mods & MOD_CTRL) && (ev.mods & MOD_ALT)) {
+                int shell_run(const char *path, const char *args);
+                shell_run("C:/PROGRAMS/TASKMGR.EXE", NULL);
+                continue;
+            }
+            key_event(&ev);
+            continue;
+        }
         int ox = mx, oy = my;
         if (ev.absolute) {
             mx = ev.x * screen_w() / 32768;
@@ -965,6 +974,14 @@ void gui_main(void) {
     desktop_init();
     gui_full_redraw();
     kprintf("gui: desktop ready (%dx%d)\n", screen_w(), screen_h());
+    /* test hook: QEMU fw_cfg "opt/halcyon/autorun" = "C:/PROGRAMS/X.EXE args" */
+    char autorun[256];
+    if (qemu_fw_file("opt/halcyon/autorun", autorun, sizeof autorun) && autorun[0]) {
+        char *args = strchr(autorun, ' ');
+        if (args) *args++ = 0;
+        kprintf("gui: autorun %s\n", autorun);
+        shell_run(autorun, args);
+    }
     for (;;) gui_step();
 }
 

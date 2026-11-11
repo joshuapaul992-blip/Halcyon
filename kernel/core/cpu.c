@@ -284,10 +284,11 @@ void mdelay(u64 ms) {
  * adds BOOTF_* flags, so automated tests can reach the fallback paths that
  * otherwise need the F8 menu. Never probed on real hardware. */
 static u32 be32(const u8 *p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
-u32 qemu_boot_flags(void) {
+/* contents of a QEMU fw_cfg file as a string; 0 if there is none */
+int qemu_fw_file(const char *name, char *buf, int bufsz) {
     u32 a, b, c, d;
     cpuid(1, 0, &a, &b, &c, &d);
-    if (!(c & (1u << 31))) return 0;
+    if (!(c & (1u << 31)) || bufsz < 1) return 0;
     u8 sig[4];
     outw(0x510, 0x0000);
     for (int i = 0; i < 4; i++) sig[i] = inb(0x511);
@@ -298,14 +299,19 @@ u32 qemu_boot_flags(void) {
     u32 n = be32(hdr);
     for (u32 f = 0; f < n && f < 256; f++) {
         for (int i = 0; i < 64; i++) hdr[i] = inb(0x511);
-        if (strcmp((char *)hdr + 8, "opt/halcyon/bootflags")) continue;
+        if (strcmp((char *)hdr + 8, name)) continue;
         u32 size = be32(hdr);
-        char buf[24] = { 0 };
+        memset(buf, 0, bufsz);
         outw(0x510, (u16)(hdr[4] << 8 | hdr[5]));
-        for (u32 i = 0; i < size && i < sizeof buf - 1; i++) buf[i] = (char)inb(0x511);
-        return (u32)strtol(buf, NULL, 0);
+        for (u32 i = 0; i < size && i < (u32)bufsz - 1; i++) buf[i] = (char)inb(0x511);
+        return 1;
     }
     return 0;
+}
+
+u32 qemu_boot_flags(void) {
+    char buf[24];
+    return qemu_fw_file("opt/halcyon/bootflags", buf, sizeof buf) ? (u32)strtol(buf, NULL, 0) : 0;
 }
 
 /* ---------------- RTC ---------------- */

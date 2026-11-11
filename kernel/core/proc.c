@@ -429,7 +429,7 @@ static void proc_finish(proc_t *p) {
             p->fault[0] ? ": " : "", p->fault);
     if (p->con && p->con->exited) p->con->exited(p->con_ctx, p->exit_code);
     p->con = NULL;
-    if (p->fault[0] && proc_crash_hook) proc_crash_hook(p);
+    if (p->crashed && proc_crash_hook) proc_crash_hook(p);
 }
 
 NORETURN void proc_exit(int code) {
@@ -474,6 +474,7 @@ void proc_user_fault(struct regs *r) {
     else
         snprintf(p->fault, sizeof p->fault, "%s at %#lx", what, r->rip);
     p->exit_code = -(int)(1000 + r->vector);
+    p->crashed = 1;
     proc_exit(p->exit_code);
 }
 

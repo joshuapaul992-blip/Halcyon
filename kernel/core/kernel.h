@@ -34,7 +34,8 @@ void rtc_read(struct rtc_time *t);
  * input keeps flowing (e.g. during long disk transfers). May be NULL. */
 extern void (*g_idle_hook)(void);
 
-u32  qemu_boot_flags(void);       /* test hook: extra BOOTF_* from QEMU fw_cfg */
+u32  qemu_boot_flags(void);
+int  qemu_fw_file(const char *name, char *buf, int bufsz);   /* test hook: QEMU fw_cfg string */       /* test hook: extra BOOTF_* from QEMU fw_cfg */
 
 void reboot(void);
 void shutdown(void);   /* ACPI-less: tries QEMU/Bochs/VirtualBox ports, then halts */

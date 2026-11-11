@@ -226,5 +226,6 @@ void app_mines(void);
 void shutdown_dialog(void);
 /* open a file with the right application, by extension */
 void shell_open(const char *path);
+int  shell_run(const char *path, const char *args);   /* start a user program; pid or error (reported) */
 
 #endif
