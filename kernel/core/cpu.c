@@ -198,8 +198,10 @@ void reboot(void) {
     for (;;) __asm__ volatile("hlt");
 }
 
+int acpi_poweroff(void) __attribute__((weak));
 void shutdown(void) {
     kprintf("Shutting down...\n");
+    if (acpi_poweroff) acpi_poweroff();
     outw(0x604, 0x2000);    /* QEMU q35/piix (newer) */
     outw(0xB004, 0x2000);   /* Bochs / old QEMU */
     outw(0x4004, 0x3400);   /* VirtualBox */

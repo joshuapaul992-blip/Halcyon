@@ -17,6 +17,7 @@ void ps2_init(void) WEAK;
 void gui_main(void) WEAK;
 void kernel_selftest(void) WEAK;   /* optional test hook (debug builds) */
 void splash_init(void) WEAK;
+void acpi_init(void) WEAK;
 void splash_progress(int pct, const char *msg) WEAK;
 #define PROGRESS(p, m) do { if (splash_progress) splash_progress(p, m); } while (0)
 
@@ -37,6 +38,7 @@ void kmain(struct bootinfo *bi) {
     if (splash_init) splash_init();
     PROGRESS(10, "Scanning PCI devices...");
     pci_init();
+    if (acpi_init) acpi_init();
     if (blockdev_init) blockdev_init();
     if (vfs_init) vfs_init();
     PROGRESS(20, "Starting keyboard and mouse...");
