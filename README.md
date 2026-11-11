@@ -16,7 +16,8 @@ its own drivers for USB, SATA and FAT file systems.
 | Interrupts | Local APIC (xAPIC or x2APIC) and I/O APICs from the ACPI MADT, or the 8259 PICs. MSI-X and MSI for xHCI and AHCI. PCI INTx for UHCI, OHCI and EHCI: without an AML interpreter the routing is learned from which device raised an interrupt. The CPU halts when there is nothing to do: a one-shot local APIC (or PIT) timer wakes it for the next deadline. A device whose interrupt does not work is polled. |
 | USB | Host controllers: UHCI and OHCI (USB 1.1), EHCI (USB 2.0, with companion hand-off), and xHCI (USB 3.x, SuperSpeed). Class drivers: hubs (USB 2 and SuperSpeed), HID keyboards (boot protocol), HID mice and tablets (report descriptor parsing), and mass storage (Bulk-Only Transport plus SCSI). Hot-plug. |
 | Storage | AHCI SATA (LBA48, multiple controllers). Block layer with MBR (including extended partitions), GPT and superfloppy detection. |
-| File systems | FAT12, FAT16 and FAT32, read and write: long file names, create, delete, rename and move, mkdir and rmdir, truncate, FSInfo. DOS drive letters; the boot drive is `C:`. |
+| File systems | FAT12, FAT16 and FAT32, read and write: long file names, create, delete, rename and move, mkdir and rmdir, truncate, FSInfo. DOS drive letters; the boot drive is `C:`. Quick format (FAT12/16/32) from Explorer (right-click a drive) or the `FORMAT` command, with Windows' default cluster sizes. |
+| Unicode | File names and text are UTF-8 throughout; FAT long names are stored as UTF-16 (including characters outside the BMP), with Unicode case-insensitive lookup. The fonts cover Latin, Greek, Cyrillic and common symbols; other characters are kept and drawn as a replacement box. |
 | GUI | Compositing window manager (move, resize, minimize, maximize), menus, dialogs, widgets, three colour themes, four procedural wallpapers. |
 | Apps | Explorer (My Computer, file management), Notepad, Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Sonar (a mine-hunting puzzle), Control Panel, About. |
 
@@ -128,7 +129,9 @@ tests/host   host-side FAT driver tests
   that shares its line with a device that has no driver may stay polled.
 - x2APIC mode is written to spec but QEMU 8.2's emulator cannot run it.
 - No networking, audio or isochronous USB.
-- Keyboard layout is US only.
+- Keyboard layout is US only, so non-ASCII characters can be displayed and kept in
+  names but not typed.
+- No CJK glyphs: Chinese, Japanese and Korean text shows as replacement boxes.
 - Some code paths are written to spec but can't be exercised in QEMU:
   - EHCI split transactions
   - xHCI SuperSpeed hubs and Transaction Translators
