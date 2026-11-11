@@ -955,6 +955,8 @@ static int run_jobs(void) {
 
 /* ---------------- main loop ---------------- */
 static u64 last_tick;
+static u32 idle_gen;
+static int gui_wanted(void *arg) { (void)arg; return irq_generation() != idle_gen || jobs_head || ndirty; }
 
 /* One iteration: poll devices, handle input, run ticks, redraw. When none of
  * that found anything to do, the CPU halts until the next interrupt or the
@@ -989,7 +991,12 @@ void gui_step(void) {
     /* windows with on_tick want ~10 Hz; the shell (clock, balloons) 1 Hz */
     u64 tick = last_tick + (ticking ? 100 : 1000);
     if (tick < deadline) deadline = tick;
-    idle_wait(gen, deadline);
+    if (!irq_enabled_now()) { idle_wait(gen, deadline); return; }
+    /* also wake for work from other threads: a program's gui_call job or a
+     * window it invalidated (otherwise they wait for the next tick) */
+    irq_service();
+    idle_gen = gen;
+    if (!gui_wanted(NULL)) thread_wait(gui_wanted, NULL, time_ms_to_tsc(deadline));
 }
 
 void gui_run_until(volatile int *flag) {
