@@ -8,8 +8,7 @@ SECTIONS
     . = ALIGN(4096);
     .rodata : { *(.rodata .rodata.*) }
     . = ALIGN(4096);
-    .data : { *(.data .data.*) }
-    . = ALIGN(16);
+    .data : { *(.data .data.*) . = ALIGN(16); }
     _file_end = .;
     _kernel_file_size = _file_end - 0x100000;
     .bss (NOLOAD) : { *(.bss .bss.*) *(COMMON) }
