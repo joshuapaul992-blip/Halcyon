@@ -17,13 +17,13 @@
    on QEMU/Bochs/VirtualBox, otherwise at the next start), write-combining frame
    buffer, settings kept in `C:\HALCYON\SETTINGS.INI`. Not done: I2C touchpads
    (optional; no test machine needs them yet).
+9. **Program platform:** threads (futexes, mutexes, condition variables, TLS),
+   named shared memory and the window's pixels mapped into programs, menus,
+   scroll bars, toolbars and status bars for programs, BSD sockets (local) and
+   `poll`, permission to end other programs only with the user's OK. Notepad,
+   Paint and Explorer are user programs. See docs/DESIGN-M9.md.
 
 ## Planned (in recommended order)
-
-### M9: Program platform
-- Threads, menus and a sockets API for programs.
-- Notepad, Paint and Explorer move from the kernel to user mode.
-- Permissions, at least: a program may end only programs it started.
 
 ### M6: Networking
 - Network card drivers: Intel e1000, Realtek, virtio-net.
