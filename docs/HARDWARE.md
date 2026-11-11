@@ -73,6 +73,10 @@ works.
   Halcyon leaves CPU idle off and polls as before.
 - **Laptop touchpads** are usually I2C devices and are not supported. Use a USB
   mouse.
+- **CD/DVD drives** are supported on SATA (AHCI) only, tested with QEMU's
+  `ide-cd`: data discs (ISO 9660 / Joliet / Rock Ridge) are read-only, disc
+  changes are detected by polling every 2 s. UDF-only and audio discs, and USB or
+  IDE (non-AHCI) optical drives, are not supported.
 - **NVMe SSDs** are tested in QEMU only (512- and 4096-byte blocks; MSI-X, INTx
   and polled). If an NVMe disk is missing, check the `nvme:` lines in BOOT.LOG and
   try F8 "Disable MSI"; "Disable NVMe controllers" turns the driver off.
