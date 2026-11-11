@@ -420,7 +420,7 @@ def run(cfg):
     print("%-22s %5.1fs%s  %s" % (cfg, elapsed, cpu, status), flush=True)
     if net:
         for line in text.splitlines():
-            if "nettest: " in line and any(k in line for k in ("MB/s", "parallel", "ping 10", "loopback 4",
+            if "nettest: " in line and any(k in line for k in ("MB/s", "KB/s", "parallel", "ping 10", "loopback 4",
                                                                        "retransmitted", "DNS:")):
                 print("    " + line[line.index("nettest: "):].strip())
     if failures:
