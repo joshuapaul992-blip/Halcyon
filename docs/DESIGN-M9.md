@@ -1,5 +1,87 @@
 # Milestone 9 design: program platform
 
+Milestone 9 makes user programs capable enough to carry the desktop's own
+applications: threads, shared memory, direct access to window pixels, menus
+and the other window controls, sockets, and a first permission rule. Notepad,
+Paint and Explorer then moved out of the kernel into `C:\PROGRAMS` (the
+built-in versions remain only as a fallback, see "The shell" below).
+
+## Threads
+
+- Up to 32 threads per program (`thread_create`, `thread_join`,
+  `thread_detach`, `thread_exit`; slot 0 is the main thread). Each kernel
+  thread of a program has its own kernel stack, as before; the user stack of
+  thread slot *i* is the 1 MiB below `USER_STACK_TOP - i * 4 MiB`, and the
+  rest of the 4 MiB slot stays unmapped, so a stack overflow faults instead of
+  running into the next thread's stack.
+- `exit()` (and a crash in any thread, or being ended) ends the whole program:
+  the other threads stop at their next return to user mode or blocking wait
+  (`proc_wait` returns `E_CANCELED`). The last thread to stop releases the
+  process. `thread_exit` ends only the calling thread and frees its stack.
+- Preemption is per thread (10 ms slices), as it was per program.
+- Futexes (`SYS_FUTEX_WAIT/WAKE`) are per process, keyed by address: a wait
+  compares the 32-bit word and sleeps in one step (system calls run under the
+  big kernel lock until they block, so no wake-up can slip in between). The
+  library builds mutexes (three-state, after Drepper's "Futexes Are Tricky")
+  and condition variables (a sequence number) on them; `malloc` is locked.
+- Thread-local storage: each thread has an FS base (`SYS_SET_TLS`), loaded on
+  every switch to it. The compiler's `__thread` is not supported yet (the
+  loader does not set up a TLS segment); M14 needs the FS base for Linux
+  programs.
+
+## Shared memory and window pixels
+
+- Mappings of memory that a process does not own live in their own region of
+  the address space: 256 slots of 64 MiB from `0x6000_0000_0000`. Their page
+  table entries carry a software bit (`PTE_SHARED`) so tearing down the
+  process never frees those frames.
+- Named shared memory (`shm_open(name, size, SHM_CREATE)`, `shm_map`,
+  `shm_unmap`): page-aligned kernel memory, alive while a handle or mapping
+  refers to it; 64 MiB per object, 128 MiB in all, 64 MiB of kernel heap kept
+  free.
+- `win_canvas(win, &c)` maps the window's canvas into the program: drawing
+  calls and direct pixel writes go to the same memory (canvases are now
+  allocated in whole, page-aligned pages). When the user resizes the window,
+  the kernel allocates the new canvas but keeps the old one alive while the
+  program still has it mapped; the program maps again after `EVT_RESIZE` and
+  only then is the old one freed, so a program drawing at the moment of the
+  resize never touches freed memory.
+
+## Permission to end programs
+
+A program may end itself and its descendants. Ending any other program asks
+the user in a kernel window ("TASKMGR.EXE (process 2) wants to end SONAR.EXE
+(process 1)..."), with No as the default button; the asking thread waits
+(killably), one question per program at a time, and `kill` returns `E_PERM`
+if the answer is no. Programs cannot inject input, so only the user can
+answer. Task Manager's End Process relies on this instead of its own warning.
+There are no other permissions yet: every program can read and write every
+file and bind any socket name.
+
+## The shell
+
+- `shell_open(path)` opens a file the way a double click does (programs by
+  file type, folders in Explorer), `shell_format(drive)` opens the kernel's
+  Format dialog (one at a time; the user decides there), `eject(drive)`,
+  `volume_info(drive)`, `vfs_generation()` (changes when drives come and go)
+  and `datetime()`.
+- The desktop, Start menu, file types and the Command Prompt start
+  NOTEPAD.EXE, PAINT.EXE and EXPLORER.EXE with the file or folder as one
+  quoted argument. If the program cannot start (no `C:\PROGRAMS`, or no timer
+  interrupt in the fully polled mode, where programs are not allowed), the
+  built-in kernel version opens instead. The built-in versions are frozen:
+  new features go into the programs.
+
+## Window API additions
+
+Menus (a flat item array with title entries for a menu bar; popups; enable,
+check; keyboard access with F10, Alt and mnemonics, now for all windows),
+scroll bars, tool buttons with icons and tooltips, a docked status bar, cursor
+shapes, a clip rectangle and origin for drawing calls, font metrics copied to
+the program so text is measured locally, theme colours, drawing helpers
+(gradients, rounded rectangles), control moves and keyboard focus, and a
+clipboard of up to 1 MiB. `GUIDEMO.EXE` exercises all of them.
+
 ## Sockets and poll
 
 Programs get BSD sockets now, with one address family, AF_LOCAL (programs on
