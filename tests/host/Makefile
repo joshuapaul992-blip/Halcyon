@@ -60,7 +60,12 @@ $(SEEDS)/.stamp: fuzz_seeds.sh
 
 seeds: $(SEEDS)/.stamp
 
-test: $(OUT)/fstest
+$(OUT)/displaytest: displaytest.c $(ROOT)/kernel/drivers/edid.c $(ROOT)/kernel/drivers/edid.h $(ROOT)/boot/modesel.h $(ROOT)/boot/bootinfo.h Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) -I$(ROOT)/boot displaytest.c $(ROOT)/kernel/drivers/edid.c -o $@
+
+test: $(OUT)/fstest $(OUT)/displaytest
+	$(OUT)/displaytest
 	@rm -rf $(OUT)/work && mkdir -p $(OUT)/work
 	$(OUT)/fstest $(OUT)/work $(ARGS)
 

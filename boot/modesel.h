@@ -63,9 +63,15 @@ static int modesel_find(const struct bootinfo *bi, int w, int h) {
     return best;
 }
 
-/* largest mode of the same shape no bigger than the cap (a 3840 x 2160 panel
- * gets 1920 x 1080, which it scales by exactly two) */
+/* a native mode above the cap: an exact fraction of it if offered (a
+ * 3840 x 2160 panel gets 1920 x 1080, which it scales by exactly two and shows
+ * sharply), else the largest mode of the same shape under the cap */
 static int modesel_scaled(const struct bootinfo *bi, int nw, int nh) {
+    for (int k = 2; k <= 4; k++) {
+        int i;
+        if (nw % k || nh % k || nw / k > MODESEL_AUTO_MAX_W || nh / k > MODESEL_AUTO_MAX_H) continue;
+        if ((i = modesel_find(bi, nw / k, nh / k)) >= 0) return i;
+    }
     int best = -1;
     unsigned long barea = 0;
     for (unsigned i = 0; i < bi->mode_count; i++) {
