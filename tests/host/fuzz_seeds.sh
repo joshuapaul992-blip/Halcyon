@@ -14,13 +14,17 @@
 # data area) and then truncated: the device is smaller than the file system,
 # which the driver has to cope with anyway.
 #
-# Needs: mkfs.fat, mtools, sfdisk, truncate, dd; xorriso for the ISO 9660 seeds.
+# Needs: mkfs.fat, mtools, sfdisk, truncate, dd; xorriso for the ISO 9660 seeds;
+# mkfs.exfat, python3 (exfat_tool.py populates them) and gcc (4K sectors) for
+# the exFAT seeds.
 set -e
 OUT=${1:?usage: $0 OUTDIR}
 mkdir -p "$OUT"
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 export MTOOLS_SKIP_CHECK=1
+export LC_ALL=C.UTF-8
+XT="python3 $(cd "$(dirname "$0")" && pwd)/exfat_tool.py"
 export MTOOLS_NO_VFAT=
 unset MTOOLS_NO_VFAT
 
@@ -39,6 +43,26 @@ populate() {
     mcopy -i "$i" "$T/small.txt" ::/"Long Directory Name/Mixed.Case"
     mcopy -i "$i" "$T/small.txt" ::/DELETED.TXT
     mdel -i "$i" ::/DELETED.TXT
+}
+
+# the same for exFAT (exfat_tool.py), plus a FAT-chained file, a file
+# whose ValidDataLength is below its size and a Vendor Extension entry
+xpopulate() {
+    i="$1"
+    printf 'hello from a seed\r\n' > "$T/small.txt"
+    seq -w 1 999999 | head -c $(( ${2:-5} * 1024 )) > "$T/multi.bin"
+    : > "$T/empty"
+    $XT "$i" mkdir SUBDIR
+    $XT "$i" mkdir -p "Long Directory Name/Nested"
+    $XT "$i" put "$T/small.txt" README.TXT
+    $XT "$i" put "$T/small.txt" "A long file name.text"
+    $XT "$i" put "$T/multi.bin" SUBDIR/MULTI.BIN --frag
+    $XT "$i" put "$T/empty" SUBDIR/empty
+    $XT "$i" put "$T/small.txt" "Long Directory Name/Nested/deep file.txt"
+    $XT "$i" put "$T/multi.bin" "Long Directory Name/Mixed.Case" --vdl 100
+    $XT "$i" put "$T/small.txt" "Ünïcödé ñame.txt" --benign
+    $XT "$i" put "$T/small.txt" DELETED.TXT
+    $XT "$i" rm DELETED.TXT
 }
 
 # seed NAME CONFIGBYTE IMAGE [TRUNCATE_BYTES]
@@ -172,6 +196,48 @@ if command -v xorriso >/dev/null; then
     seed iso_rr_4k 1 "$T/rr.iso"
     xorriso -as mkisofs -quiet --norock -V PLAINSEED -o "$T/p.iso" "$T/iso" >/dev/null 2>&1
     seed iso_plain $((5 << 2)) "$T/p.iso"
+fi
+
+# --- exFAT ---------------------------------------------------------------
+if command -v mkfs.exfat >/dev/null && command -v python3 >/dev/null; then
+    MKX="mkfs.exfat -q -b 4K"
+    # 4 KiB clusters, superfloppy
+    truncate -s 800K "$T/x4kc.img"
+    $MKX -c 4K -L EXSEED "$T/x4kc.img"
+    xpopulate "$T/x4kc.img"
+    seed exfat_4kc 0 "$T/x4kc.img"
+    seed exfat_4kc_ro 2 "$T/x4kc.img"
+    seed exfat_4kc_faults $((0x80 | 7 << 2)) "$T/x4kc.img"
+    # 512-byte clusters: multi-cluster directories, longer FAT chains
+    truncate -s 600K "$T/x512.img"
+    $MKX -c 512 -L EX512 "$T/x512.img"
+    xpopulate "$T/x512.img" 3
+    seed exfat_512c 8 "$T/x512.img"
+    # a larger volume truncated: the device is smaller than the file system
+    truncate -s 8M "$T/xtr.img"
+    $MKX -c 1K -L EXTRUNC "$T/xtr.img"
+    xpopulate "$T/xtr.img" 20
+    seed exfat_trunc 12 "$T/xtr.img" 700K
+    # 4096-byte sectors (mkfs.exfat takes the sector size from BLKSSZGET)
+    printf '#define _GNU_SOURCE\n#include <dlfcn.h>\n#include <stdarg.h>\n#include <linux/fs.h>\nint ioctl(int fd, unsigned long req, ...) { va_list ap; va_start(ap, req); void *arg = va_arg(ap, void *); va_end(ap); if (req == BLKSSZGET) { *(int *)arg = 4096; return 0; } static int (*real)(int, unsigned long, ...); if (!real) real = (int (*)(int, unsigned long, ...))dlsym(RTLD_NEXT, "ioctl"); return real(fd, req, arg); }\n' > "$T/ss4k.c"
+    if gcc -shared -fPIC -o "$T/ss4k.so" "$T/ss4k.c" -ldl 2>/dev/null; then
+        truncate -s 1200K "$T/x4ks.img"
+        LD_PRELOAD="$T/ss4k.so" $MKX -c 4K -L EX4KSECT "$T/x4ks.img"
+        xpopulate "$T/x4ks.img"
+        seed exfat_4ks 1 "$T/x4ks.img"
+        seed exfat_4ks_on512 16 "$T/x4ks.img"
+    fi
+    # MBR: an exFAT partition (type 7) and a FAT12 one
+    truncate -s 1600K "$T/xmbr.img"
+    printf 'label: dos\nlabel-id: 0x0e0fa700\nstart=8, size=2048, type=7\nstart=2100, size=1000, type=1\n' \
+        | sfdisk -q --no-reread --no-tell-kernel "$T/xmbr.img" >/dev/null 2>&1
+    truncate -s 1M "$T/xpart.img"
+    $MKX -c 2K -L EXPART "$T/xpart.img"
+    xpopulate "$T/xpart.img"
+    dd if="$T/xpart.img" of="$T/xmbr.img" bs=512 seek=8 conv=notrunc 2>/dev/null
+    $MKFS --offset=2100 -F 12 -n FATPART "$T/xmbr.img" 500 >/dev/null
+    populate "$T/xmbr.img@@1075200" 2
+    seed exfat_mbr $((0x40 | 6 << 2)) "$T/xmbr.img"
 fi
 
 ls -l "$OUT"

@@ -1,9 +1,12 @@
-/* Host tests for the Halcyon storage stack (kernel/fs/block.c, vfs.c, fat.c).
+/* Host tests for the Halcyon storage stack (kernel/fs/block.c, vfs.c, fat.c,
+ * exfat.c).
  *
  * The kernel sources are compiled unmodified against a small libc shim
- * (shim.c). Disk images are created with mkfs.fat / sfdisk / mtools, the
- * kernel code mounts them through a file-backed blockdev, and after every
- * scenario the result is verified with fsck.fat -n and mtools.
+ * (shim.c). Disk images are created with mkfs.fat / mkfs.exfat / sfdisk /
+ * mtools, the kernel code mounts them through a file-backed blockdev, and
+ * after every scenario the result is verified independently: FAT with
+ * fsck.fat -n and mtools, exFAT with fsck.exfat -n and exfat_tool.py (a
+ * separate Python implementation written from the exFAT specification).
  *
  * ISO 9660 tests (scenario "iso") are in isotest.c.
  *
@@ -21,6 +24,7 @@
 #include "core/unicode.h"
 #include "fs/block.h"
 #include "fs/vfs.h"
+#include "fs/exfat.h"
 #include "fuzz_fs.h"
 
 extern int shim_verbose;
@@ -146,11 +150,28 @@ static u8 *host_read(const char *path, size_t *n) {
 /* ------------------------------------------------------------------ */
 /* images                                                               */
 
+enum { FS_FAT = 0, FS_EXFAT };
+
 typedef struct {
     char path[1024];
     u64 off;            /* byte offset of the file system */
     u64 len;            /* byte length of the file system */
+    int fs;             /* FS_FAT (default) or FS_EXFAT: selects the cross-check tools */
 } img_t;
+
+#define EXFAT_TOOL "python3 exfat_tool.py"
+
+/* exfat_tool.py image argument (file@@offset) */
+static const char *xt(const img_t *im) {
+    static char bufs[4][1200];
+    static int i;
+    char *b = bufs[i++ & 3];
+    char tmp[1100];
+    if (im->off) snprintf(tmp, sizeof tmp, "%s@@%lu", im->path, (unsigned long)im->off);
+    else snprintf(tmp, sizeof tmp, "%s", im->path);
+    snprintf(b, 1200, "%s", q(tmp));
+    return b;
+}
 
 static const char *mt(const img_t *im) {
     static char bufs[4][1200];
@@ -196,7 +217,51 @@ static void img_gpt(img_t *im, const char *name, u32 mb, const char *label) {
     im->len = (u64)size * 512;
 }
 
-/* fsck.fat -n on the file system of im (extracted if partitioned) */
+/* LD_PRELOAD shim: mkfs.exfat asks the device for its sector size with
+ * BLKSSZGET (512 for image files); answer 4096 to get 4K-sector volumes */
+static const char *ss4k_preload(void) {
+    static char so[1100];
+    if (so[0]) return so;
+    const char *src = "#define _GNU_SOURCE\n#include <dlfcn.h>\n#include <stdarg.h>\n#include <linux/fs.h>\n"
+        "int ioctl(int fd, unsigned long req, ...) {\n"
+        "    va_list ap; va_start(ap, req); void *arg = va_arg(ap, void *); va_end(ap);\n"
+        "    if (req == BLKSSZGET) { *(int *)arg = 4096; return 0; }\n"
+        "    static int (*real)(int, unsigned long, ...);\n"
+        "    if (!real) real = (int (*)(int, unsigned long, ...))dlsym(RTLD_NEXT, \"ioctl\");\n"
+        "    return real(fd, req, arg);\n}\n";
+    host_write(wpath("ss4k.c"), src, strlen(src));
+    snprintf(so, sizeof so, "%s", wpath("ss4k.so"));
+    int r = sh("gcc -shared -fPIC -o '%s' '%s' -ldl", so, wpath("ss4k.c"));
+    CHECK(r == 0, "building the 4K-sector preload shim failed");
+    return so;
+}
+
+/* exFAT image made by mkfs.exfat: a superfloppy, or (part) an MBR disk with
+ * one partition of type 7 at 1 MiB. sect4k: 4096-byte sectors. */
+static void img_exfat(img_t *im, const char *name, u32 mb, u32 cluster, const char *label, int part, int sect4k) {
+    snprintf(im->path, sizeof im->path, "%s", wpath(name));
+    unlink(im->path);
+    im->fs = FS_EXFAT;
+    u64 total = (u64)mb << 20, start = part ? 1 << 20 : 0;
+    char pre[1200] = "";
+    if (sect4k) snprintf(pre, sizeof pre, "LD_PRELOAD='%s' ", ss4k_preload());
+    const char *target = part ? wpath("exfat_part.tmp") : im->path;
+    unlink(target);
+    int r = sh("truncate -s %lu '%s' && %smkfs.exfat -q -b 128K -c %u -L %s '%s'", (unsigned long)(total - start), target,
+               pre, cluster, q(label), target);
+    if (part && !r)
+        r = sh("truncate -s %uM '%s' && printf 'label: dos\\nlabel-id: 0x%08x\\nstart=2048, type=7\\n' | sfdisk -q '%s'"
+               " && dd if='%s' of='%s' bs=1M seek=1 conv=notrunc && rm -f '%s'",
+               mb, im->path, 0xE8FA7000u + mb, im->path, target, im->path, target);
+    CHECK(r == 0, "exFAT image creation failed for %s", name);
+    im->off = start;
+    im->len = total - start;
+}
+
+static int g_benign_on_disk;     /* see fsck() */
+
+/* fsck.fat -n / fsck.exfat -n + exfat_tool.py check on the file system of
+ * im (extracted if partitioned) */
 static void fsck(const img_t *im, const char *what) {
     char target[1100];
     if (im->off) {
@@ -205,6 +270,26 @@ static void fsck(const img_t *im, const char *what) {
            (unsigned long)(im->off / 512), (unsigned long)(im->len / 512));
     } else {
         snprintf(target, sizeof target, "%s", im->path);
+    }
+    if (im->fs == FS_EXFAT) {
+        /* fsck.exfat 1.2.2 rejects benign secondaries (Vendor Extension
+         * entries) in file entry sets, which the specification allows */
+        int r = g_benign_on_disk ? 0 : sh("fsck.exfat -n '%s'", target);
+        CHECK(r == 0, "fsck.exfat reports errors after '%s'", what);
+        if (r) {
+            char cmd[2400];
+            snprintf(cmd, sizeof cmd, "fsck.exfat -n -v '%s' 2>&1 | head -40", target);
+            system(cmd);
+        }
+        r = sh(EXFAT_TOOL " '%s' check", target);
+        CHECK(r == 0, "exfat_tool.py check reports errors after '%s'", what);
+        if (r) {
+            char cmd[2400];
+            snprintf(cmd, sizeof cmd, EXFAT_TOOL " '%s' check 2>&1 | head -20", target);
+            system(cmd);
+        }
+        if (im->off) unlink(target);
+        return;
     }
     int r = sh("fsck.fat -n '%s'", target);
     CHECK(r == 0, "fsck.fat reports errors after '%s'", what);
@@ -220,8 +305,9 @@ static void fsck(const img_t *im, const char *what) {
 static void mt_cmp(const img_t *im, const char *mpath, const u8 *data, size_t n) {
     const char *out = wpath("mt.out");
     unlink(out);
-    int r = sh("mcopy -n -o -i %s %s '%s'", mt(im), mp(mpath), out);
-    CHECK(r == 0, "mcopy of '%s' failed", mpath);
+    int r = im->fs == FS_EXFAT ? sh(EXFAT_TOOL " %s get %s '%s'", xt(im), q(mpath), out)
+                               : sh("mcopy -n -o -i %s %s '%s'", mt(im), mp(mpath), out);
+    CHECK(r == 0, "%s of '%s' failed", im->fs == FS_EXFAT ? "exfat_tool get" : "mcopy", mpath);
     if (r) return;
     size_t got;
     u8 *b = host_read(out, &got);
@@ -233,13 +319,51 @@ static void mt_cmp(const img_t *im, const char *mpath, const u8 *data, size_t n)
 static void mt_put(const img_t *im, const char *mpath, const u8 *data, size_t n) {
     const char *in = wpath("mt.in");
     host_write(in, data, n);
-    int r = sh("mcopy -o -i %s '%s' %s", mt(im), in, mpx(mpath, 0));
-    CHECK(r == 0, "mcopy to '%s' failed", mpath);
+    int r = im->fs == FS_EXFAT ? sh(EXFAT_TOOL " %s put '%s' %s", xt(im), in, q(mpath))
+                               : sh("mcopy -o -i %s '%s' %s", mt(im), in, mpx(mpath, 0));
+    CHECK(r == 0, "%s to '%s' failed", im->fs == FS_EXFAT ? "exfat_tool put" : "mcopy", mpath);
+}
+
+/* create directories (each argument a path, parents first) */
+static void mt_mkdir(const img_t *im, const char *path) {
+    int r = im->fs == FS_EXFAT ? sh(EXFAT_TOOL " %s mkdir %s", xt(im), q(path))
+                               : sh("mmd -i %s %s", mt(im), mp(path));
+    CHECK(r == 0, "mkdir '%s' with the cross-check tool failed", path);
+}
+
+static void mt_del(const img_t *im, const char *path) {
+    int r = im->fs == FS_EXFAT ? sh(EXFAT_TOOL " %s rm %s", xt(im), q(path))
+                               : sh("mdel -i %s %s", mt(im), mp(path));
+    CHECK(r == 0, "delete '%s' with the cross-check tool failed", path);
 }
 
 /* does mdir -b list exactly this (long) path? */
 static int mt_listed(const img_t *im, const char *mdirpath, const char *fullname) {
     const char *out = wpath("mdir.out");
+    if (im->fs == FS_EXFAT) {
+        /* exfat_tool ls: "D path" / "F size path", recursive */
+        g_sh_keep_stdout = 1;
+        sh(EXFAT_TOOL " %s ls %s > '%s'", xt(im), q(mdirpath), out);
+        g_sh_keep_stdout = 0;
+        size_t n;
+        u8 *b = host_read(out, &n);
+        if (!b) return 0;
+        b[n] = 0;
+        char want[1200];
+        snprintf(want, sizeof want, "%s%s%s", mdirpath, *mdirpath ? "/" : "", fullname);
+        int found = 0;
+        for (char *line = (char *)b; *line && !found;) {
+            char *nl = strchr(line, '\n');
+            if (nl) *nl = 0;
+            char *sp = line[0] == 'F' ? strchr(line + 2, ' ') : line[0] == 'D' ? line + 1 : NULL;
+            if (sp && !strcmp(sp + 1, want)) found = 1;
+            if (!nl) break;
+            line = nl + 1;
+        }
+        if (!found) printf("    exfat_tool listing of '%s' lacks '%s'\n", mdirpath, want);
+        free(b);
+        return found;
+    }
     g_sh_keep_stdout = 1;
     sh("mdir -b -i %s %s > '%s'", mt(im), mp(mdirpath), out);
     g_sh_keep_stdout = 0;
@@ -261,6 +385,7 @@ static u32 img_cluster_size(const img_t *im) {
     u8 bs[512];
     pread(fd, bs, 512, im->off);
     close(fd);
+    if (!memcmp(bs + 3, "EXFAT   ", 8)) return 1u << (bs[108] + bs[109]);
     return (u32)(bs[11] | (bs[12] << 8)) * bs[13];
 }
 
@@ -441,7 +566,11 @@ static void t_read_mtools(const char *tag, img_t *im, u32 ss, const char *label)
     u8 *lfn = pat_alloc(5000, 1), *data = pat_alloc(100000, 2), *big = pat_alloc(bigsz, 3);
     u8 *frag = pat_alloc(3000, 4);
 
-    sh("mmd -i %s '::/Docs' '::/Docs/Nested Dir' '::/Docs/Nested Dir/deeper' '::/frag'", mt(im));
+    int fat = im->fs == FS_FAT;
+    mt_mkdir(im, "Docs");
+    mt_mkdir(im, "Docs/Nested Dir");
+    mt_mkdir(im, "Docs/Nested Dir/deeper");
+    mt_mkdir(im, "frag");
     mt_put(im, "readme.txt", readme, strlen((char *)readme));
     mt_put(im, "A Long File Name.text", lfn, 5000);
     mt_put(im, "UPPER.TXT", readme, 5);
@@ -453,8 +582,8 @@ static void t_read_mtools(const char *tag, img_t *im, u32 ss, const char *label)
         mt_put(im, name, frag, 3000);
     }
     for (int i = 0; i < 20; i += 2) {
-        snprintf(name, sizeof name, "::/frag/small file %02d.bin", i);
-        sh("mdel -i %s '%s'", mt(im), name);
+        snprintf(name, sizeof name, "frag/small file %02d.bin", i);
+        mt_del(im, name);
     }
     mt_put(im, "frag/big fragmented file.bin", big, bigsz);
 
@@ -466,7 +595,8 @@ static void t_read_mtools(const char *tag, img_t *im, u32 ss, const char *label)
         CHECK(!strcmp(v->label, label), "[%s] label '%s', want '%s'", tag, v->label, label);
         vfs_dirent_t e;
         CHECK(v_listed(P(L, ""), "readme.txt", &e), "[%s] readme.txt not listed", tag);
-        CHECK(!strcmp(e.short_name, "README.TXT"), "short name %s", e.short_name);
+        if (fat) CHECK(!strcmp(e.short_name, "README.TXT"), "short name %s", e.short_name);
+        else CHECK(!e.short_name[0], "exFAT short name '%s'", e.short_name);
         CHECK(v_listed(P(L, ""), "A Long File Name.text", &e), "[%s] LFN not listed", tag);
         CHECK(e.size == 5000 && !e.is_dir, "LFN entry size %lu", (unsigned long)e.size);
         char alias[32];
@@ -477,7 +607,7 @@ static void t_read_mtools(const char *tag, img_t *im, u32 ss, const char *label)
         CHECK(v_count(P(L, "")) == 6, "[%s] root count %d", tag, v_count(P(L, "")));
         v_cmp(P(L, "readme.txt"), readme, strlen((char *)readme));
         v_cmp(P(L, "A Long File Name.text"), lfn, 5000);
-        v_cmp(P(L, alias), lfn, 5000);                       /* open by 8.3 alias */
+        if (fat) v_cmp(P(L, alias), lfn, 5000);              /* open by 8.3 alias */
         v_cmp(P(L, "a long file NAME.TEXT"), lfn, 5000);     /* case-insensitive */
         v_cmp(P(L, "empty.dat"), readme, 0);
         disk_stats_reset(h);
@@ -564,15 +694,17 @@ static void t_write(const char *tag, img_t *im, u32 ss) {
     CHECK(vfs_write_file(P(L, toolong), lbuf, 1) < 0, "256-char name accepted");
 
     vfs_dirent_t e;
+    int fat = im->fs == FS_FAT;
+    /* exFAT has no 8.3 names: short_name stays empty */
     CHECK(vfs_stat(P(L, "Projects/Halcyon OS/src/MAIN.C"), &e) == 0 && !strcmp(e.name, "MAIN.C") &&
-          !strcmp(e.short_name, "MAIN.C"), "MAIN.C stat: %s / %s", e.name, e.short_name);
+          !strcmp(e.short_name, fat ? "MAIN.C" : ""), "MAIN.C stat: %s / %s", e.name, e.short_name);
     CHECK(vfs_stat(P(L, "readme.txt"), &e) == 0 && !strcmp(e.name, "readme.txt") &&
-          !strcmp(e.short_name, "README.TXT"), "readme stat: %s / %s", e.name, e.short_name);
-    CHECK(vfs_stat(P(L, "mixed Case.Name.With.Dots.txt"), &e) == 0 && !strcmp(e.short_name, "MIXEDC~1.TXT"),
+          !strcmp(e.short_name, fat ? "README.TXT" : ""), "readme stat: %s / %s", e.name, e.short_name);
+    CHECK(vfs_stat(P(L, "mixed Case.Name.With.Dots.txt"), &e) == 0 && !strcmp(e.short_name, fat ? "MIXEDC~1.TXT" : ""),
           "alias %s", e.short_name);
     CHECK(e.mtime.year >= 2024 && e.ctime.year >= 2024, "timestamps %u", e.mtime.year);
     CHECK(e.attr & VFS_ATTR_ARCHIVE, "archive bit");
-    CHECK(vfs_stat(P(L, ".hidden"), &e) == 0 && !strcmp(e.short_name, "HIDDEN~1"), "alias %s", e.short_name);
+    CHECK(vfs_stat(P(L, ".hidden"), &e) == 0 && !strcmp(e.short_name, fat ? "HIDDEN~1" : ""), "alias %s", e.short_name);
 
     /* overwrite (O_TRUNC) with smaller content */
     u8 *ow = pat_alloc(700, 555);
@@ -656,7 +788,8 @@ static void t_write(const char *tag, img_t *im, u32 ss) {
     OK(vfs_unlink(P(L, "Projects/Halcyon OS")));
     OK(vfs_unlink(P(L, "Projects")));
     /* FAT32: the root directory is a cluster chain that grew and never shrinks */
-    u64 slack = !strcmp(vfs_volume_by_letter(L)->fs_name, "FAT32") ? 4 * csize : 0;
+    const char *fsn = vfs_volume_by_letter(L)->fs_name;
+    u64 slack = !strcmp(fsn, "FAT32") || !strcmp(fsn, "exFAT") ? 4 * csize : 0;
     CHECK(v_free(L) <= free0 && v_free(L) + slack >= free0, "[%s] free %lu after cleanup, want %lu",
           tag, (unsigned long)v_free(L), (unsigned long)free0);
     CHECK(v_count(P(L, "")) == 0, "root not empty: %d", v_count(P(L, "")));
@@ -754,17 +887,19 @@ static void t_many(const char *tag, img_t *im, u32 ss, int nfiles) {
     vfs_dirent_t *ents;
     int n = vfs_list(P(L, "Many Files"), &ents);
     EXPECT(n, nfiles);
-    int dup = 0;
-    for (int i = 0; i < n; i++)
-        for (int j = i + 1; j < n; j++)
-            if (!strcmp(ents[i].short_name, ents[j].short_name)) dup++;
-    CHECK(dup == 0, "%d duplicate short names", dup);
-    int found1 = 0, found5 = 0;
-    for (int i = 0; i < n; i++) {
-        if (!strcmp(ents[i].name, "Long Name 1.txt")) found1 = !strcmp(ents[i].short_name, "LONGNA~1.TXT");
-        if (!strcmp(ents[i].name, "Long Name 5.txt")) found5 = !strcmp(ents[i].short_name, "LONGNA~5.TXT");
+    if (im->fs == FS_FAT) {
+        int dup = 0;
+        for (int i = 0; i < n; i++)
+            for (int j = i + 1; j < n; j++)
+                if (!strcmp(ents[i].short_name, ents[j].short_name)) dup++;
+        CHECK(dup == 0, "%d duplicate short names", dup);
+        int found1 = 0, found5 = 0;
+        for (int i = 0; i < n; i++) {
+            if (!strcmp(ents[i].name, "Long Name 1.txt")) found1 = !strcmp(ents[i].short_name, "LONGNA~1.TXT");
+            if (!strcmp(ents[i].name, "Long Name 5.txt")) found5 = !strcmp(ents[i].short_name, "LONGNA~5.TXT");
+        }
+        CHECK(found1 && found5, "alias numbering");
     }
-    CHECK(found1 && found5, "alias numbering");
     if (n >= 0) kfree(ents);
     for (int i = 1; i <= nfiles; i += 37) {
         snprintf(name, sizeof name, "Many Files/long name %d.TXT", i);
@@ -828,6 +963,7 @@ static void t_rename(const char *tag, img_t *im, u32 ss) {
     CHECK(L, "not mounted");
     if (!L) { disk_detach(h); return; }
     u8 *d1 = pat_alloc(5000, 11), *d2 = pat_alloc(7000, 12), *d3 = pat_alloc(100, 13);
+    char name[96];
     OK(vfs_mkdir(P(L, "dir1")));
     OK(vfs_mkdir(P(L, "dir1/inner")));
     OK(vfs_mkdir(P(L, "y")));
@@ -856,17 +992,23 @@ static void t_rename(const char *tag, img_t *im, u32 ss) {
     v_cmp(P(L, "Dir Renamed/inner/deep file.txt"), d2, 7000);
     OK(vfs_rename(P(L, "Dir Renamed"), P(L, "y/sub/Moved Dir")));
     v_cmp(P(L, "y/sub/Moved Dir/inner/deep file.txt"), d2, 7000);
-    /* into itself: by path and via an alias the VFS cannot see through */
+    /* into itself: by path and via a name the VFS cannot see through (an
+     * 8.3 alias on FAT, non-ASCII case folding on exFAT) */
+    int fat = im->fs == FS_FAT;
+    const char *pd = fat ? "Parent Dir" : "Ärger Dir", *alias = fat ? "PARENT~1" : "ÄRGER DIR";
+    char sub[64];
+    snprintf(sub, sizeof sub, "%s/child/x", fat ? alias : "äRGER dIR");
     EXPECT(vfs_rename(P(L, "y"), P(L, "y/sub/x")), E_INVAL);
-    OK(vfs_mkdir(P(L, "Parent Dir")));
-    OK(vfs_mkdir(P(L, "Parent Dir/child")));
-    EXPECT(vfs_rename(P(L, "Parent Dir"), P(L, "PARENT~1/child/x")), E_INVAL);
-    EXPECT(vfs_rename(P(L, "Parent Dir"), P(L, "PARENT~1")), 0);   /* to its own alias: allowed */
+    OK(vfs_mkdir(P(L, pd)));
+    snprintf(name, sizeof name, "%s/child", pd);
+    OK(vfs_mkdir(P(L, name)));
+    EXPECT(vfs_rename(P(L, pd), P(L, sub)), E_INVAL);
+    EXPECT(vfs_rename(P(L, pd), P(L, alias)), 0);   /* to its own alias / case-only: allowed */
     /* move a subdirectory up to the root ('..' must become 0) */
     OK(vfs_rename(P(L, "y/sub/Moved Dir/inner"), P(L, "inner at root")));
     v_cmp(P(L, "inner at root/deep file.txt"), d2, 7000);
     /* move a directory from the root down */
-    OK(vfs_rename(P(L, "PARENT~1"), P(L, "y/sub/Moved Dir/parent")));
+    OK(vfs_rename(P(L, alias), P(L, "y/sub/Moved Dir/parent")));
     /* rename an open file, keep writing through the handle */
     vfs_file_t *f;
     OK(vfs_open(P(L, "y/f moved.txt"), VFS_O_RDWR, &f));
@@ -911,7 +1053,7 @@ static void t_delete(const char *tag, img_t *im, u32 ss) {
     EXPECT(vfs_unlink(P(L, "D/two.bin")), E_BUSY);
     if (f) vfs_close(f);
     OK(vfs_unlink(P(L, "D/two.bin")));
-    OK(vfs_unlink(P(L, "D/E/FILEON~1.BIN")));
+    OK(vfs_unlink(P(L, im->fs == FS_FAT ? "D/E/FILEON~1.BIN" : "d/e/FILE ONE.BIN")));
     OK(vfs_unlink(P(L, "D/E")));
     OK(vfs_unlink(P(L, "D")));
     CHECK(!v_exists(P(L, "D")), "D still exists");
@@ -1008,7 +1150,7 @@ static void t_unplug(const char *tag, img_t *im, u32 ss) {
 }
 
 static void t_letters(void) {
-    img_t a, b, c;
+    img_t a = { 0 }, b = { 0 }, c = { 0 };
     img_super(&a, "letters_a.img", 12, 1440, "DATA", NULL);
     img_super(&b, "letters_b.img", 12, 1440, "HALCYON", NULL);
     img_mbr(&c, "letters_c.img", 16, 20, "BOOTED", 0x1234ABCD);
@@ -1094,7 +1236,7 @@ static void t_letters(void) {
 
 /* MBR with an extended partition holding two logical partitions */
 static void t_extended(void) {
-    img_t im;
+    img_t im = { 0 };
     snprintf(im.path, sizeof im.path, "%s", wpath("ext.img"));
     unlink(im.path);
     int r = sh("truncate -s 64M '%s' && printf 'label: dos\\nstart=2048, size=20480, type=6\\n"
@@ -1140,7 +1282,7 @@ static void t_extended(void) {
 /* superfloppy whose boot code happens to contain a plausible partition entry,
  * and a GPT disk with a destroyed primary header */
 static void t_detect(void) {
-    img_t im;
+    img_t im = { 0 };
     img_super(&im, "fakembr.img", 16, 16384, "FAKEMBR", NULL);
     int fd = open(im.path, O_RDWR);
     u8 ent[16] = { 0x80, 0, 0, 0, 0x06, 0, 0, 0, 1, 0, 0, 0, 100, 0, 0, 0 };   /* start 1, 100 sectors */
@@ -1163,7 +1305,7 @@ static void t_detect(void) {
     disk_detach(h);
 
     /* garbage disk: nothing mounted, no crash */
-    img_t g;
+    img_t g = { 0 };
     snprintf(g.path, sizeof g.path, "%s", wpath("garbage.img"));
     u8 *junk = pat_alloc(1024 * 1024, 77);
     host_write(g.path, junk, 1024 * 1024);
@@ -1364,7 +1506,7 @@ static void t_random(const char *tag, img_t *im, u32 ss, u32 seed, int ops, u32 
 }
 
 static void s_random(void) {
-    img_t im;
+    img_t im = { 0 };
     const char *only = getenv("FSTEST_RANDOM_ONLY");
     if (only && !strcmp(only, "32")) {
         img_mbr(&im, "rnd32.img", 32, 40, "RND32", 2);
@@ -1391,12 +1533,13 @@ static void s_testdisks(void) {
     CHECK(r == 0, "mktestdisks.sh failed");
     if (r) return;
     struct { const char *file, *label, *fs; } d[] = {
-        { "fat12.img", "FLOPPY", "FAT12" }, { "fat16.img", "DATA16", "FAT16" }, { "fat32gpt.img", "GPTDISK", "FAT32" } };
+        { "fat12.img", "FLOPPY", "FAT12" }, { "fat16.img", "DATA16", "FAT16" }, { "fat32gpt.img", "GPTDISK", "FAT32" },
+        { "exfat.img", "EXFATDISK", "exFAT" } };
     u8 pat[32768];
     for (int i = 0; i < 32768; i++) pat[i] = (u8)i;
     const char *readme = "Halcyon test disk.\r\nThis file has an 8.3 name.\r\n";
     for (size_t i = 0; i < ARRAY_SIZE(d); i++) {
-        img_t im;
+        img_t im = { 0 };
         snprintf(im.path, sizeof im.path, "%s/%s", dir, d[i].file);
         im.off = 0;
         hdisk_t *h = disk_attach(&im, 512);
@@ -1970,6 +2113,477 @@ static void t_hostile_gpt(void) {
 }
 #undef CASE
 
+/* exFAT geometry and entry helpers for the hostile cases (written from the
+ * specification, independent of exfat.c) */
+typedef struct { size_t off; u32 ss, cs, fatoff, heap, nclus, root; } xg_t;
+
+static void xg_load(const himg_t *h, size_t off, xg_t *g) {
+    const u8 *b = h->b + off;
+    g->off = off;
+    g->ss = 1u << b[108];
+    g->cs = g->ss << b[109];
+    g->fatoff = g32(b + 80);
+    g->heap = g32(b + 88);
+    g->nclus = g32(b + 92);
+    g->root = g32(b + 96);
+}
+
+static u8 *xg_clus(himg_t *h, xg_t *g, u32 c) { return h->b + g->off + (size_t)g->heap * g->ss + (size_t)(c - 2) * g->cs; }
+static u8 *xg_fatp(himg_t *h, xg_t *g, u32 c) { return h->b + g->off + (size_t)g->fatoff * g->ss + 4 * (size_t)c; }
+
+/* recompute the boot checksum of the main (0) or backup (1) boot region */
+static void xg_boot_fix(himg_t *h, xg_t *g, int backup) {
+    u8 *r = h->b + g->off + (backup ? 12 * (size_t)g->ss : 0);
+    u32 c = 0;
+    for (u32 i = 0; i < 11 * g->ss; i++) {
+        if (i == 106 || i == 107 || i == 112) continue;
+        c = ((c & 1) ? 0x80000000u : 0) + (c >> 1) + r[i];
+    }
+    for (u32 i = 0; i < g->ss; i += 4) s32(r + 11 * g->ss + i, c);
+}
+
+/* first primary entry of a type in the root directory's first cluster */
+static u8 *xg_root_type(himg_t *h, xg_t *g, u8 type) {
+    u8 *d = xg_clus(h, g, g->root);
+    for (u32 i = 0; i < g->cs / 32; i++) if (d[32 * i] == type) return d + 32 * i;
+    return NULL;
+}
+
+static void xg_set_fix(u8 *fe) {
+    u32 n = (fe[1] + 1u) * 32;
+    u16 c = 0;
+    for (u32 i = 0; i < n; i++) {
+        if (i == 2 || i == 3) continue;
+        c = (u16)(((c & 1) ? 0x8000 : 0) + (c >> 1) + fe[i]);
+    }
+    s16(fe + 2, c);
+}
+
+static u16 xg_hash(const u16 *u, int n) {
+    u16 hsh = 0;
+    for (int i = 0; i < n; i++) {
+        u16 c = (u[i] >= 'a' && u[i] <= 'z') ? u[i] - 32 : u[i];
+        hsh = (u16)(((hsh & 1) ? 0x8000 : 0) + (hsh >> 1) + (c & 0xFF));
+        hsh = (u16)(((hsh & 1) ? 0x8000 : 0) + (hsh >> 1) + (c >> 8));
+    }
+    return hsh;
+}
+
+/* the File entry of an ASCII name in the first cluster of a directory */
+static u8 *xg_find(himg_t *h, xg_t *g, u32 dirclus, const char *name) {
+    u8 *d = xg_clus(h, g, dirclus);
+    int len = (int)strlen(name);
+    for (u32 i = 0; i + 2 < g->cs / 32; i++) {
+        u8 *e = d + 32 * i;
+        if (e[0] != 0x85 || e[32] != 0xC0 || e[32 + 3] != len) continue;
+        int ok = 1;
+        for (int k = 0; k < len && ok; k++) ok = g16(e + 64 + 32 * (k / 15) + 2 + 2 * (k % 15)) == (u8)name[k];
+        if (ok) return e;
+    }
+    CHECK(0, "exFAT entry '%s' not found", name);
+    return NULL;
+}
+
+static u32 xg_first(const u8 *fe) { return g32(fe + 32 + 20); }
+
+/* replace the name of a set in place (it must fit the existing name entries) */
+static void xg_rename(u8 *fe, const u16 *u, int n) {
+    int nn = 0;
+    while (nn + 2 <= fe[1] && fe[64 + 32 * nn] == 0xC1) nn++;
+    CHECK(n <= nn * 15, "name does not fit");
+    for (int i = 0; i < nn * 15; i++) s16(fe + 64 + 32 * (i / 15) + 2 + 2 * (i % 15), i < n ? u[i] : 0);
+    /* surplus name entries: drop them from the set (no benign entries here) */
+    int need = (n + 14) / 15;
+    if (need < nn && fe[1] == 1 + nn) {
+        for (int k = need; k < nn; k++) fe[64 + 32 * k] &= 0x7F;
+        fe[1] = (u8)(1 + need);
+    }
+    fe[32 + 3] = (u8)n;
+    s16(fe + 32 + 4, xg_hash(u, n));
+    xg_set_fix(fe);
+}
+
+/* a new set (empty file or directory) at the end-of-directory marker */
+static void xg_append(himg_t *h, xg_t *g, u32 dirclus, const u16 *u, int n, u16 attr, u32 first, u64 size) {
+    u8 *d = xg_clus(h, g, dirclus);
+    u32 i = 0;
+    while (i < g->cs / 32 && d[32 * i]) i++;
+    int nn = (n + 14) / 15, cnt = 2 + nn;
+    CHECK(i + cnt < g->cs / 32, "no room for a set");
+    if (i + cnt >= g->cs / 32) return;
+    u8 *e = d + 32 * i;
+    memset(e, 0, 32 * (size_t)cnt);
+    e[0] = 0x85; e[1] = (u8)(cnt - 1); s16(e + 4, attr);
+    e[32] = 0xC0; e[33] = (u8)(1 | (first ? 2 : 0)); e[35] = (u8)n;
+    s64(e + 32 + 8, size); s32(e + 32 + 20, first); s64(e + 32 + 24, size);
+    for (int k = 0; k < nn; k++) e[64 + 32 * k] = 0xC1;
+    xg_rename(e, u, n);
+}
+
+static int u16s(const char *s, u16 *u) { int n = 0; while (*s) u[n++] = (u8)*s++; return n; }
+
+#define CASE(desc) for (int _once = (h = h_copy(&base), snprintf(what, sizeof what, "%s: %s", tag, desc), 1); \
+                        _once; _once = 0, h_free(&h))
+
+/* boot region fields: on every exFAT seed */
+static void t_hostile_exfat_boot(const char *tag) {
+    himg_t base = h_seed(tag), h;
+    if (!base.b) return;
+    xg_t g;
+    xg_load(&base, 0, &g);
+    char what[200];
+    CASE("unmodified") h_run(what, &h, 1);
+    struct { const char *d; int off, width; u64 val; int want; } f[] = {
+        { "BytesPerSectorShift 8", 108, 1, 8, 0 }, { "BytesPerSectorShift 13", 108, 1, 13, 0 },
+        { "SectorsPerClusterShift 26", 109, 1, 26, 0 }, { "NumberOfFats 0", 110, 1, 0, 0 },
+        { "NumberOfFats 3", 110, 1, 3, 0 }, { "FatOffset 0", 80, 4, 0, 0 }, { "FatOffset 23", 80, 4, 23, 0 },
+        { "FatOffset 0xFFFFFFF0", 80, 4, 0xFFFFFFF0, 0 }, { "FatLength 0", 84, 4, 0, 0 },
+        { "FatLength 0xFFFFFFFF", 84, 4, 0xFFFFFFFF, 0 }, { "ClusterHeapOffset 0", 88, 4, 0, 0 },
+        { "ClusterHeapOffset 0xFFFFFF00", 88, 4, 0xFFFFFF00, 0 }, { "ClusterCount 0", 92, 4, 0, 0 },
+        { "ClusterCount 0xFFFFFFFF", 92, 4, 0xFFFFFFFF, 0 }, { "VolumeLength 1", 72, 8, 1, 0 },
+        { "VolumeLength 2^48 (device smaller)", 72, 8, 1ull << 48, 1 },
+        { "VolumeLength 2^64-1", 72, 8, ~0ull, 1 },
+        { "root cluster 0", 96, 4, 0, 0 }, { "root cluster 1", 96, 4, 1, 0 },
+        { "root cluster 0xFFFFFFFF", 96, 4, 0xFFFFFFFF, 0 }, { "FileSystemRevision 2.0", 104, 2, 0x200, 0 },
+        { "MustBeZero not zero", 40, 1, 1, 0 }, { "VolumeDirty set", 106, 2, 2, 1 },
+        { "ActiveFat 1 with one FAT", 106, 2, 1, 1 }, { "PercentInUse 250", 112, 1, 250, 1 },
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(f); i++) {
+        CASE(f[i].d) {
+            u8 *p = h.b + f[i].off;
+            if (f[i].width == 1) *p = (u8)f[i].val;
+            else if (f[i].width == 2) s16(p, (u32)f[i].val);
+            else if (f[i].width == 4) s32(p, (u32)f[i].val);
+            else s64(p, f[i].val);
+            xg_boot_fix(&h, &g, 0);
+            h_run(what, &h, f[i].want);
+        }
+    }
+    CASE("root cluster past the clusters") { s32(h.b + 96, g.nclus + 2); xg_boot_fix(&h, &g, 0); h_run(what, &h, 0); }
+    CASE("ClusterCount beyond FatLength") { s32(h.b + 92, g32(h.b + 84) * g.ss / 4 + 10); s64(h.b + 72, ~0ull >> 8); xg_boot_fix(&h, &g, 0); h_run(what, &h, 0); }
+    CASE("ClusterCount beyond VolumeLength") { s32(h.b + 92, g.nclus * 4); xg_boot_fix(&h, &g, 0); h_run(what, &h, 0); }
+    CASE("ClusterCount and VolumeLength beyond the device") {
+        s32(h.b + 92, MIN(g.nclus * 3, g32(h.b + 84) * g.ss / 4 - 2));
+        s64(h.b + 72, 1ull << 40);
+        xg_boot_fix(&h, &g, 0);
+        h_run(what, &h, 1);
+    }
+    CASE("two FATs, ActiveFat 1") { h.b[110] = 2; s16(h.b + 106, 1); xg_boot_fix(&h, &g, 0); h_run(what, &h, -1); }
+    CASE("main boot checksum wrong: backup used, read-only") {
+        h.b[300] ^= 0x5A;
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        char L = letter_of(d);
+        CHECK(L, "%s: not mounted", what);
+        if (L) {
+            EXPECT(vfs_write_file(P(L, "x.txt"), "x", 1), E_ROFS);
+            CHECK(v_exists(P(L, "README.TXT")), "%s: README.TXT", what);
+        }
+        disk_detach(d);
+    }
+    CASE("main and backup boot checksums wrong") {
+        h.b[300] ^= 0x5A;
+        h.b[12 * g.ss + 300] ^= 0x5A;
+        h_run(what, &h, 0);
+    }
+    CASE("main boot sector zeroed") { memset(h.b, 0, 512); h_run(what, &h, 0); }
+    h_free(&base);
+}
+
+static void t_hostile_exfat(const char *tag) {
+    himg_t base = h_seed(tag), h;
+    if (!base.b) return;
+    xg_t g;
+    xg_load(&base, 0, &g);
+    char what[200];
+    u8 *e;
+    u16 u[300];
+    int n;
+    /* ---- root directory metadata ---- */
+    CASE("no allocation bitmap entry") { e = xg_root_type(&h, &g, 0x81); if (e) e[0] = 0x01; h_run(what, &h, 0); }
+    CASE("bitmap cluster out of range") { e = xg_root_type(&h, &g, 0x81); if (e) s32(e + 20, g.nclus + 2); h_run(what, &h, 0); }
+    CASE("bitmap too small") { e = xg_root_type(&h, &g, 0x81); if (e) s64(e + 24, 1); h_run(what, &h, 0); }
+    CASE("bitmap chain loops") {
+        e = xg_root_type(&h, &g, 0x81);
+        if (e) { u32 c = g32(e + 20); s32(xg_fatp(&h, &g, c), c); s64(e + 24, 4ull * g.cs + 1); }
+        h_run(what, &h, -1);
+    }
+    CASE("bitmap marks its own clusters free: read-only") {
+        e = xg_root_type(&h, &g, 0x81);
+        if (e) memset(xg_clus(&h, &g, g32(e + 20)), 0, (g.nclus + 7) / 8);
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        EXPECT(vfs_write_file(P(letter_of(d), "x.txt"), "x", 1), E_ROFS);
+        disk_detach(d);
+    }
+    CASE("bitmap all ones: disk full") {
+        e = xg_root_type(&h, &g, 0x81);
+        if (e) memset(xg_clus(&h, &g, g32(e + 20)), 0xFF, (g.nclus + 7) / 8);
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        char L = letter_of(d);
+        u64 t = 0, fr = 1;
+        OK(vfs_statfs(L, &t, &fr));
+        EXPECT(fr, 0);
+        EXPECT(vfs_mkdir(P(L, "no room")), E_NOSPC);
+        EXPECT(vfs_write_file(P(L, "README.TXT"), "longer than before, needs a cluster? no", 10), 10);
+        disk_detach(d);
+    }
+    struct { const char *d; int kind; } uc[] = {
+        { "no up-case table", 0 }, { "up-case checksum wrong", 1 }, { "up-case cluster out of range", 2 },
+        { "up-case size 2^40", 3 }, { "up-case table maps nothing", 4 }, { "up-case size odd", 5 } };
+    for (size_t i = 0; i < ARRAY_SIZE(uc); i++) {
+        CASE(uc[i].d) {
+            e = xg_root_type(&h, &g, 0x82);
+            if (e) {
+                switch (uc[i].kind) {
+                case 0: e[0] = 0x02; break;
+                case 1: s32(e + 4, g32(e + 4) ^ 1); break;
+                case 2: s32(e + 20, 0xFFFFFFF0); break;
+                case 3: s64(e + 24, 1ull << 40); break;
+                case 4: {
+                    u8 *t = xg_clus(&h, &g, g32(e + 20));
+                    s16(t, 0xFFFF); s16(t + 2, 0xFFFF); s16(t + 4, 0xFFFF); s16(t + 6, 1);
+                    s64(e + 24, 8);
+                    u32 c = 0;
+                    for (int k = 0; k < 8; k++) c = ((c & 1) ? 0x80000000u : 0) + (c >> 1) + t[k];
+                    s32(e + 4, c);
+                    break;
+                }
+                default: s64(e + 24, 101); break;
+                }
+            }
+            h_run(what, &h, 1);
+            /* the built-in mapping still matches ASCII names case-insensitively */
+            hdisk_t *d = h_attach(&h, 0);
+            char L = letter_of(d);
+            CHECK(v_exists(P(L, "readme.txt")), "%s: case-insensitive lookup", what);
+            OK(vfs_write_file(P(L, "New File.txt"), "x", 1));
+            CHECK(v_exists(P(L, "NEW FILE.TXT")), "%s: new file", what);
+            disk_detach(d);
+        }
+    }
+    CASE("label length 200") {
+        e = xg_root_type(&h, &g, 0x83);
+        if (e) { e[1] = 200; for (int k = 0; k < 11; k++) s16(e + 2 + 2 * k, 0x00C4); }
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        volume_t *v = vfs_volume_by_letter(letter_of(d));
+        CHECK(v && strlen(v->label) <= 15 && utf8_valid(v->label), "%s: label '%s'", what, v ? v->label : "");
+        disk_detach(d);
+    }
+    CASE("label with control characters and surrogates") {
+        e = xg_root_type(&h, &g, 0x83);
+        if (e) { e[1] = 4; s16(e + 2, 1); s16(e + 4, 0xD800); s16(e + 6, '/'); s16(e + 8, 'x'); }
+        h_run(what, &h, 1);
+    }
+    CASE("root directory chain loops") { s32(xg_fatp(&h, &g, g.root), g.root); h_run(what, &h, 1); }
+    CASE("root directory chain into a free cluster") { s32(xg_fatp(&h, &g, g.root), g.nclus + 1); h_run(what, &h, 1); }
+    CASE("unknown primary entries in the root") {
+        e = xg_root_type(&h, &g, 0x00);
+        if (e) { e[0] = 0x86; e[32] = 0xE5; e[64] = 0x00; }
+        h_run(what, &h, 1);
+    }
+
+    /* ---- entry sets ---- */
+    CASE("set checksum wrong") {
+        if ((e = xg_find(&h, &g, g.root, "README.TXT"))) e[2] ^= 1;
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        char L = letter_of(d);
+        CHECK(!v_exists(P(L, "README.TXT")), "%s: listed", what);
+        CHECK(v_exists(P(L, "A long file name.text")), "%s: other entries lost", what);
+        disk_detach(d);
+    }
+    int scs[] = { 0, 1, 30, 18 };
+    for (size_t i = 0; i < ARRAY_SIZE(scs); i++) {
+        char desc[64];
+        snprintf(desc, sizeof desc, "SecondaryCount %d", scs[i]);
+        CASE(desc) {
+            if ((e = xg_find(&h, &g, g.root, "A long file name.text"))) { e[1] = (u8)scs[i]; xg_set_fix(e); }
+            h_run(what, &h, 1);
+        }
+    }
+    struct { const char *d; int len; } nl[] = { { "NameLength 0", 0 }, { "NameLength beyond the entries", 200 },
+                                                 { "NameLength 255", 255 }, { "NameLength 16 with one name entry", 16 } };
+    for (size_t i = 0; i < ARRAY_SIZE(nl); i++) {
+        CASE(nl[i].d) {
+            if ((e = xg_find(&h, &g, g.root, "README.TXT"))) { e[32 + 3] = (u8)nl[i].len; xg_set_fix(e); }
+            h_run(what, &h, 1);
+            hdisk_t *d = h_attach(&h, 0);
+            CHECK(!v_exists(P(letter_of(d), "README.TXT")), "%s: listed", what);
+            disk_detach(d);
+        }
+    }
+    CASE("unknown critical secondary") {
+        n = 0;
+        u8 *d0 = xg_clus(&h, &g, g.root);
+        for (u32 i = 0; i < g.cs / 32; i++) if (d0[32 * i] == 0xE0) { d0[32 * i] = 0xC5; n++; }
+        CHECK(n == 1, "vendor entry not found");
+        for (u32 i = 0; i < g.cs / 32; i++) if (d0[32 * i] == 0x85) xg_set_fix(d0 + 32 * i);
+        h_run(what, &h, 1);
+    }
+    CASE("missing name entry inside a set") {
+        if ((e = xg_find(&h, &g, g.root, "A long file name.text"))) { e[96] = 0x41; }
+        h_run(what, &h, 1);
+    }
+    CASE("hostile names: path characters, '..', control characters, surrogates") {
+        u32 sub = 0;
+        if ((e = xg_find(&h, &g, g.root, "SUBDIR"))) sub = xg_first(e);
+        if ((e = xg_find(&h, &g, g.root, "README.TXT"))) { n = u16s("a/b:c\\d", u); xg_rename(e, u, n); }
+        if ((e = xg_find(&h, &g, g.root, "A long file name.text"))) { n = u16s("..", u); xg_rename(e, u, n); }
+        if (sub && (e = xg_find(&h, &g, sub, "empty"))) { u[0] = 'x'; u[1] = 0xD800; u[2] = 'y'; u[3] = 1; xg_rename(e, u, 4); }
+        /* new sets: ".", trailing dot and space, a 255-unit CJK name (765 bytes of UTF-8) */
+        n = u16s(".", u);
+        xg_append(&h, &g, g.root, u, n, 0x20, 0, 0);
+        n = u16s("trail. ", u);
+        xg_append(&h, &g, g.root, u, n, 0x20, 0, 0);
+        for (n = 0; n < 255; n++) u[n] = (u16)(0x4E00 + n);
+        xg_append(&h, &g, g.root, u, n, 0x20, 0, 0);
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        char L = letter_of(d);
+        CHECK(v_listed(P(L, ""), "a_b_c_d", NULL), "path characters not replaced");
+        CHECK(v_listed(P(L, ""), ".._", NULL), "'..' not made safe");
+        CHECK(v_listed(P(L, ""), "._", NULL), "'.' not made safe");
+        CHECK(v_listed(P(L, ""), "trail. _", NULL), "trailing dot / space not made safe");
+        CHECK(v_listed(P(L, "SUBDIR"), "x\xEF\xBF\xBDy_", NULL), "surrogate / control character not replaced");
+        vfs_dirent_t *ents;
+        int cnt = vfs_list(P(L, ""), &ents), longest = 0;
+        for (int i = 0; i < cnt; i++) if ((int)strlen(ents[i].name) > longest) longest = (int)strlen(ents[i].name);
+        if (cnt >= 0) kfree(ents);
+        CHECK(longest > 240 && longest <= 255, "long CJK name: %d bytes", longest);
+        /* usable under the safe names */
+        u8 hello[] = "hello from a seed\r\n";
+        v_cmp(P(L, "A_B_C_D"), hello, sizeof hello - 1);
+        OK(vfs_unlink(P(L, ".._")));
+        OK(vfs_rename(P(L, "trail. _"), P(L, "fixed")));
+        OK(vfs_unlink(P(L, "SUBDIR/x\xEF\xBF\xBDy_")));
+        disk_detach(d);
+    }
+    CASE("file cluster out of range") {
+        if ((e = xg_find(&h, &g, g.root, "README.TXT"))) { s32(e + 32 + 20, g.nclus + 5); xg_set_fix(e); }
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        u64 got;
+        EXPECT(h_read_all(P(letter_of(d), "README.TXT"), &got), E_IO);
+        disk_detach(d);
+    }
+    CASE("NoFatChain file past the cluster heap") {
+        if ((e = xg_find(&h, &g, g.root, "README.TXT"))) { s32(e + 32 + 20, g.nclus + 1); s64(e + 32 + 8, 3ull * g.cs); s64(e + 32 + 24, 3ull * g.cs); xg_set_fix(e); }
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        u64 got;
+        EXPECT(h_read_all(P(letter_of(d), "README.TXT"), &got), E_IO);
+        disk_detach(d);
+    }
+    CASE("huge DataLength (NoFatChain)") {
+        if ((e = xg_find(&h, &g, g.root, "README.TXT"))) { s64(e + 32 + 8, ~0ull >> 1); s64(e + 32 + 24, ~0ull >> 1); xg_set_fix(e); }
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        u64 got;
+        char L = letter_of(d);
+        EXPECT(h_read_all(P(L, "README.TXT"), &got), E_IO);
+        CHECK(got <= h.n, "%s: read %lu bytes", what, (unsigned long)got);
+        vfs_file_t *f;
+        if (vfs_open(P(L, "README.TXT"), VFS_O_RDWR, &f) == 0) {
+            vfs_seek(f, 1ull << 61);
+            CHECK(vfs_write(f, "x", 1) < 0, "write at 2^61 succeeded");
+            EXPECT(vfs_truncate(f, 5), E_IO);       /* would free other files' clusters */
+            vfs_close(f);
+        }
+        disk_detach(d);
+    }
+    CASE("ValidDataLength beyond DataLength") {
+        if ((e = xg_find(&h, &g, g.root, "README.TXT"))) { s64(e + 32 + 8, 1ull << 40); xg_set_fix(e); }
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        u8 hello[] = "hello from a seed\r\n";
+        v_cmp(P(letter_of(d), "README.TXT"), hello, sizeof hello - 1);
+        disk_detach(d);
+    }
+    struct { const char *d; int kind; } ch[] = {
+        { "chain ends in a self loop", 0 }, { "chain points to cluster 1", 1 }, { "chain points past the clusters", 2 },
+        { "chain points to a bad cluster", 3 }, { "chain loops back to its start", 4 }, { "chain ends early", 5 } };
+    for (size_t i = 0; i < ARRAY_SIZE(ch); i++) {
+        CASE(ch[i].d) {
+            u32 sub = 0;
+            if ((e = xg_find(&h, &g, g.root, "SUBDIR"))) sub = xg_first(e);
+            e = sub ? xg_find(&h, &g, sub, "MULTI.BIN") : NULL;
+            if (e) {
+                CHECK(!(e[33] & 2), "MULTI.BIN is not FAT-chained");
+                u32 first = xg_first(e), c = first;
+                for (int k = 0; k < 64 && g32(xg_fatp(&h, &g, c)) != 0xFFFFFFFF; k++) c = g32(xg_fatp(&h, &g, c));
+                u32 v = ch[i].kind == 0 ? c : ch[i].kind == 1 ? 1 : ch[i].kind == 2 ? g.nclus + 2 :
+                        ch[i].kind == 3 ? 0xFFFFFFF7 : ch[i].kind == 4 ? first : 0xFFFFFFFF;
+                s32(xg_fatp(&h, &g, c), v);
+                s64(e + 32 + 24, ch[i].kind == 5 ? 64ull * g.cs : 0xFFFFFFFFFull);
+                s64(e + 32 + 8, ch[i].kind == 5 ? 64ull * g.cs : 0xFFFFFFFFFull);
+                xg_set_fix(e);
+            }
+            if (h_run(what, &h, 1) == 1) {
+                hdisk_t *d = h_attach(&h, 0);
+                u64 got;
+                int r = h_read_all(P(letter_of(d), "SUBDIR/MULTI.BIN"), &got);
+                EXPECT(r, E_IO);
+                CHECK(got <= h.n, "%s: read %lu bytes from a %lu byte disk", what, (unsigned long)got, (unsigned long)h.n);
+                disk_detach(d);
+            }
+        }
+    }
+    struct { const char *d; u64 size; u32 first; int nofat, want; } ds[] = {
+        { "directory DataLength 0", 0, 0, -1, E_IO }, { "directory DataLength 2^40", 1ull << 40, 0, -1, E_IO },
+        { "directory DataLength not a cluster multiple", 100, 0, -1, 0 },
+        { "directory FirstCluster 0", 0, 1, -1, E_IO },
+        { "NoFatChain directory past the heap", 4, 2, 1, -2 } };
+    for (size_t i = 0; i < ARRAY_SIZE(ds); i++) {
+        CASE(ds[i].d) {
+            if ((e = xg_find(&h, &g, g.root, "SUBDIR"))) {
+                if (ds[i].first == 1) s32(e + 32 + 20, 0);
+                else if (ds[i].first == 2) s32(e + 32 + 20, g.nclus + 1);
+                if (ds[i].nofat >= 0) e[33] = (u8)(1 | (ds[i].nofat ? 2 : 0));
+                u64 sz = ds[i].first == 2 ? ds[i].size * g.cs : ds[i].size;
+                if (ds[i].first != 1) { s64(e + 32 + 24, sz); s64(e + 32 + 8, sz); }
+                xg_set_fix(e);
+            }
+            h_run(what, &h, 1);
+            hdisk_t *d = h_attach(&h, 0);
+            char L = letter_of(d);
+            vfs_dirent_t *ents;
+            int r = vfs_list(P(L, "SUBDIR"), &ents);
+            if (r >= 0) kfree(ents);
+            if (ds[i].want == E_IO) EXPECT(r, E_IO);
+            else if (ds[i].want == 0) CHECK(r >= 0, "%s: list = %d", what, r);
+            r = vfs_mkdir(P(L, "SUBDIR/new dir"));
+            CHECK(r == 0 || r == E_IO || r == E_NOSPC, "%s: mkdir = %d", what, r);
+            disk_detach(d);
+        }
+    }
+    CASE("entries in use after the end-of-directory marker") {
+        if ((e = xg_find(&h, &g, g.root, "A long file name.text"))) memset(e, 0, 32 * (e[1] + 1u));
+        h_run(what, &h, 1);
+        hdisk_t *d = h_attach(&h, 0);
+        char L = letter_of(d);
+        int before = v_count(P(L, ""));
+        CHECK(!v_listed(P(L, ""), "Ünïcödé ñame.txt", NULL), "%s: entry after the marker listed", what);
+        OK(vfs_write_file(P(L, "new.txt"), "new", 3));
+        OK(vfs_write_file(P(L, "a second new file with a longer name.txt"), "2nd", 3));
+        OK(vfs_write_file(P(L, "x"), "3", 1));
+        EXPECT(v_count(P(L, "")), before + 3);
+        CHECK(!v_listed(P(L, ""), "Ünïcödé ñame.txt", NULL), "%s: old entry resurrected", what);
+        disk_detach(d);
+        /* and a fresh mount sees exactly that */
+        free(h.b);
+        h.b = host_read(wpath("hostile.img"), &h.n);
+        d = h_attach(&h, 0);
+        EXPECT(v_count(P(letter_of(d), "")), before + 3);
+        v_cmp(P(letter_of(d), "new.txt"), (const u8 *)"new", 3);
+        disk_detach(d);
+    }
+    h_free(&base);
+}
+#undef CASE
+
 /* minimized fuzzer crash inputs (fuzz_regress/NAME.gz: config byte + image) */
 static void t_fuzz_regress(void) {
     char path[1300];
@@ -2008,6 +2622,19 @@ static void s_hostile(void) {
     t_hostile_fat("super_fat32");
     t_hostile_mbr();
     t_hostile_gpt();
+    t_hostile_exfat_boot("exfat_4kc");
+    t_hostile_exfat_boot("exfat_512c");
+    t_hostile_exfat_boot("exfat_4ks");
+    t_hostile_exfat("exfat_4kc");
+    t_hostile_exfat("exfat_4ks");
+    {
+        himg_t m = h_seed("exfat_mbr");
+        if (m.b) h_run("exfat_mbr: unmodified (exFAT + FAT12)", &m, 2);
+        h_free(&m);
+        m = h_seed("exfat_trunc");
+        if (m.b) h_run("exfat_trunc: unmodified", &m, 1);
+        h_free(&m);
+    }
     t_fuzz_regress();
 }
 
@@ -2018,7 +2645,7 @@ typedef struct { const char *name; void (*fn)(void); } scen_t;
 static void s_paths(void) { t_paths(); }
 
 static void s_fat12(void) {
-    img_t im;
+    img_t im = { 0 };
     img_super(&im, "fat12_read.img", 12, 1440, "FLOPPY", NULL);
     t_read_mtools("fat12 read", &im, 512, "FLOPPY");
     img_super(&im, "fat12_write.img", 12, 1440, "FLOPPY", NULL);
@@ -2045,7 +2672,7 @@ static void t_unicode(const char *tag, img_t *im, u32 ss) {
     u8 *d1 = pat_alloc(3000, 41), *d2 = pat_alloc(70000, 42), *d3 = pat_alloc(10, 43);
     /* written by mtools, read by the driver */
     mt_put(im, "Café.txt", d1, 3000);
-    sh("mmd -i %s %s", mt(im), mp("Ünïcödé Dir"));
+    mt_mkdir(im, "Ünïcödé Dir");
     mt_put(im, "Ünïcödé Dir/Привет мир.txt", d2, 70000);
     mt_put(im, "日本語のファイル.txt", d3, 10);
     hdisk_t *h = disk_attach(im, ss);
@@ -2099,7 +2726,7 @@ static void t_unicode(const char *tag, img_t *im, u32 ss) {
     L = letter_of(h);
     vfs_dirent_t de;
     CHECK(L && v_listed(P(L, ""), "😀 smile.txt", &de), "emoji name lost after remount");
-    if (L) CHECK(de.short_name[0] && (u8)de.short_name[0] < 0x80, "short name of the emoji file: '%s'", de.short_name);
+    if (L && im->fs == FS_FAT) CHECK(de.short_name[0] && (u8)de.short_name[0] < 0x80, "short name of the emoji file: '%s'", de.short_name);
     disk_detach(h);
     free(d1); free(d2); free(d3);
 }
@@ -2139,7 +2766,7 @@ static void t_utf8(void) {
 }
 
 static void s_unicode(void) {
-    img_t im;
+    img_t im = { 0 };
     t_utf8();
     img_mbr(&im, "unicode16.img", 16, 32, "UNI16", 0xCAFE0116);
     t_unicode("fat16 unicode", &im, 512);
@@ -2190,7 +2817,7 @@ static int fsck_type(const img_t *im) {
 
 static void t_format(const char *tag, u32 mb, int part, u32 ss, const char *fs, int want_type, u32 cluster) {
     printf("  %s\n", tag);
-    img_t im;
+    img_t im = { 0 };
     char nm[64];
     snprintf(nm, sizeof nm, "fmt_%s_%u_%u.img", fs, mb, ss);
     img_blank(&im, nm, mb, part, ss);
@@ -2250,7 +2877,7 @@ static void s_format(void) {
     t_format("4K sectors 300 MB FAT32", 300, 1, 4096, "FAT32", 32, 0);
     t_format("4K sectors 64 MB FAT16", 64, 0, 4096, "FAT16", 16, 0);
     /* refusals */
-    img_t im;
+    img_t im = { 0 };
     img_blank(&im, "fmt_refuse.img", 20, 1, 512);
     hdisk_t *h = disk_attach(&im, 512);
     EXPECT(vfs_format(&h->bd, "FAT", "X", 0), E_BUSY);           /* partitioned disk */
@@ -2268,8 +2895,512 @@ static void s_format(void) {
     disk_detach(h);
 }
 
+/* ------------------------------------------------------------------ */
+/* exFAT specifics, cross-checked with exfat_tool.py and fsck.exfat     */
+
+typedef struct { int found, dir, nofat; u64 size, vdl; u32 first; char benign[160]; } xinfo_t;
+
+/* what exfat_tool.py says about one path (ls -l) */
+static xinfo_t xt_info(const img_t *im, const char *path) {
+    xinfo_t xi;
+    memset(&xi, 0, sizeof xi);
+    const char *out = wpath("xt.out");
+    g_sh_keep_stdout = 1;
+    sh(EXFAT_TOOL " %s ls -l > '%s'", xt(im), out);
+    g_sh_keep_stdout = 0;
+    size_t n;
+    char *b = (char *)host_read(out, &n);
+    if (!b) return xi;
+    b[n] = 0;
+    for (char *line = b; *line;) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        char *attr = NULL;
+        for (char *p = strstr(line, " attr="); p; p = strstr(p + 1, " attr=")) attr = p;
+        char *start = line[0] == 'F' ? strchr(line + 2, ' ') : line + 1;
+        if (attr && start && start < attr) {
+            *attr = 0;
+            if (!strcmp(start + 1, path)) {
+                unsigned a, nf, fc;
+                unsigned long long v;
+                xi.found = 1;
+                xi.dir = line[0] == 'D';
+                if (!xi.dir) xi.size = strtoull(line + 2, NULL, 10);
+                if (sscanf(attr + 1, "attr=%x vdl=%llu nofat=%u first=%u benign=%159s", &a, &v, &nf, &fc, xi.benign) >= 4) {
+                    xi.vdl = v;
+                    xi.nofat = (int)nf;
+                    xi.first = fc;
+                }
+            }
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+    free(b);
+    if (!xi.found) printf("    exfat_tool does not list '%s'\n", path);
+    return xi;
+}
+
+static void img_rw(const img_t *im, u64 off, void *buf, size_t n, int write) {
+    int fd = open(im->path, O_RDWR);
+    if (write) pwrite(fd, buf, n, (off_t)(im->off + off));
+    else pread(fd, buf, n, (off_t)(im->off + off));
+    close(fd);
+}
+
+static u16 xvol_flags(const img_t *im) { u8 b[2]; img_rw(im, 106, b, 2, 0); return (u16)(b[0] | (b[1] << 8)); }
+
+/* fragmentation: NoFatChain files and directories converted to FAT chains */
+static void t_exfat_chains(const char *tag, img_t *im, u32 ss) {
+    printf("  %s\n", tag);
+    hdisk_t *h = disk_attach(im, ss);
+    char L = letter_of(h);
+    if (!L) { CHECK(0, "not mounted"); disk_detach(h); return; }
+    u32 cs = img_cluster_size(im);
+    u64 free0 = v_free(L);
+    /* interleaved appends: both files end up FAT-chained */
+    u32 na = 9 * cs + 77, nb = 7 * cs + 5;
+    u8 *a = pat_alloc(na, 501), *b = pat_alloc(nb, 502);
+    vfs_file_t *fa, *fb;
+    OK(vfs_open(P(L, "interleaved A.bin"), VFS_O_RDWR | VFS_O_CREATE, &fa));
+    OK(vfs_open(P(L, "interleaved B.bin"), VFS_O_RDWR | VFS_O_CREATE, &fb));
+    for (u32 pa = 0, pb = 0; pa < na || pb < nb;) {
+        u32 k = MIN(cs, na - pa);
+        if (k) { EXPECT(vfs_write(fa, a + pa, k), k); pa += k; }
+        k = MIN(cs + 3, nb - pb);
+        if (k) { EXPECT(vfs_write(fb, b + pb, k), k); pb += k; }
+    }
+    vfs_close(fa);
+    vfs_close(fb);
+    /* contiguous file, then grow the one before it: converted on growth */
+    u32 nc = 3 * cs, nd = 2 * cs + 1;
+    u8 *c = pat_alloc(nc + cs * 4, 503), *d = pat_alloc(nd, 504);
+    v_put(P(L, "contig C.bin"), c, nc);
+    v_put(P(L, "after C.bin"), d, nd);
+    /* growing into free space stays contiguous */
+    OK(vfs_open(P(L, "after C.bin"), VFS_O_RDWR, &fb));
+    u8 *d2 = pat_alloc(nd + 3 * cs, 504);
+    memcpy(d2, d, nd);
+    vfs_seek(fb, nd);
+    EXPECT(vfs_write(fb, d2 + nd, 3 * cs), 3 * cs);
+    nd += 3 * cs;
+    vfs_close(fb);
+    OK(vfs_open(P(L, "contig C.bin"), VFS_O_RDWR, &fa));
+    vfs_seek(fa, nc);
+    EXPECT(vfs_write(fa, c + nc, cs * 4), cs * 4);
+    nc += cs * 4;
+    vfs_close(fa);
+    /* shrink a chained file, grow it again */
+    OK(vfs_open(P(L, "interleaved A.bin"), VFS_O_RDWR, &fa));
+    OK(vfs_truncate(fa, 2 * cs + 1));
+    vfs_seek(fa, 2 * cs + 1);
+    EXPECT(vfs_write(fa, a + 2 * cs + 1, na - 2 * cs - 1), na - 2 * cs - 1);
+    vfs_close(fa);
+    /* directories: one that grows into a taken cluster, one into free space */
+    OK(vfs_mkdir(P(L, "Grown Dir")));
+    v_put(P(L, "blocker.bin"), d, 1);            /* takes the cluster after it */
+    char name[96];
+    int nfiles = (int)(cs / 32 / 3) * 2 + 5;     /* three entries per file: > 2 clusters */
+    for (int i = 0; i < nfiles; i++) {
+        snprintf(name, sizeof name, "Grown Dir/f%d", i);
+        OK(vfs_write_file(P(L, name), "", 0));
+    }
+    OK(vfs_mkdir(P(L, "Contig Dir")));
+    for (int i = 0; i < nfiles; i++) {
+        snprintf(name, sizeof name, "Contig Dir/f%d", i);
+        OK(vfs_write_file(P(L, name), "", 0));
+    }
+    /* the root directory grows as a FAT chain */
+    for (int i = 0; i < nfiles; i++) {
+        snprintf(name, sizeof name, "root file %d", i);
+        OK(vfs_write_file(P(L, name), "", 0));
+    }
+    EXPECT(v_count(P(L, "Grown Dir")), nfiles);
+    v_cmp(P(L, "interleaved A.bin"), a, na);
+    v_cmp(P(L, "interleaved B.bin"), b, nb);
+    v_cmp(P(L, "contig C.bin"), c, nc);
+    v_cmp(P(L, "after C.bin"), d2, nd);
+    disk_detach(h);
+    fsck(im, tag);
+    xinfo_t xi = xt_info(im, "interleaved A.bin");
+    CHECK(xi.found && !xi.nofat, "interleaved A: nofat %d", xi.nofat);
+    xi = xt_info(im, "interleaved B.bin");
+    CHECK(xi.found && !xi.nofat, "interleaved B: nofat %d", xi.nofat);
+    xi = xt_info(im, "contig C.bin");
+    CHECK(xi.found && !xi.nofat && xi.size == nc, "grown C: nofat %d size %lu", xi.nofat, (unsigned long)xi.size);
+    xi = xt_info(im, "after C.bin");
+    CHECK(xi.found && xi.nofat, "after C: grown in place, nofat %d", xi.nofat);
+    xi = xt_info(im, "Grown Dir");
+    CHECK(xi.found && xi.dir && !xi.nofat, "Grown Dir: nofat %d", xi.nofat);
+    xi = xt_info(im, "Contig Dir");
+    CHECK(xi.found && xi.dir && xi.nofat, "Contig Dir: nofat %d", xi.nofat);
+    mt_cmp(im, "interleaved A.bin", a, na);
+    mt_cmp(im, "interleaved B.bin", b, nb);
+    mt_cmp(im, "contig C.bin", c, nc);
+    mt_cmp(im, "after C.bin", d2, nd);
+    CHECK(mt_listed(im, "Grown Dir", "f7"), "Grown Dir/f7");
+    snprintf(name, sizeof name, "f%d", nfiles - 1);
+    CHECK(mt_listed(im, "Contig Dir", name), "Contig Dir/last");
+    /* delete everything: all clusters come back (the root keeps its growth) */
+    h = disk_attach(im, ss);
+    L = letter_of(h);
+    for (int i = 0; i < nfiles; i++) {
+        snprintf(name, sizeof name, "Grown Dir/f%d", i);
+        OK(vfs_unlink(P(L, name)));
+        snprintf(name, sizeof name, "contig dir/F%d", i);
+        OK(vfs_unlink(P(L, name)));
+        snprintf(name, sizeof name, "root file %d", i);
+        OK(vfs_unlink(P(L, name)));
+    }
+    const char *all[] = { "Grown Dir", "Contig Dir", "blocker.bin", "interleaved A.bin", "interleaved B.bin",
+                          "contig C.bin", "after C.bin" };
+    for (size_t i = 0; i < ARRAY_SIZE(all); i++) OK(vfs_unlink(P(L, all[i])));
+    u64 f = v_free(L);
+    CHECK(f <= free0 && f + 8 * (u64)cs >= free0, "[%s] free %lu after cleanup, want %lu", tag, (unsigned long)f, (unsigned long)free0);
+    disk_detach(h);
+    fsck(im, tag);
+    free(a); free(b); free(c); free(d); free(d2);
+}
+
+/* ValidDataLength < DataLength: written by exfat_tool.py, read and
+ * extended by the driver */
+static void t_exfat_vdl(const char *tag, img_t *im, u32 ss) {
+    printf("  %s\n", tag);
+    u32 n = 100000, vdl = 3000;
+    u8 *d = pat_alloc(n, 601), *want = calloc(1, 300000);
+    host_write(wpath("vdl.in"), d, n);
+    int r = sh(EXFAT_TOOL " %s put '%s' 'vdl file.bin' --vdl %u", xt(im), wpath("vdl.in"), vdl);
+    r |= sh(EXFAT_TOOL " %s put '%s' 'vdl chained.bin' --vdl %u --frag", xt(im), wpath("vdl.in"), vdl + 1);
+    CHECK(r == 0, "exfat_tool put --vdl failed");
+    memcpy(want, d, vdl);                       /* the rest reads as zeros */
+    hdisk_t *h = disk_attach(im, ss);
+    char L = letter_of(h);
+    if (!L) { CHECK(0, "not mounted"); disk_detach(h); return; }
+    v_cmp(P(L, "vdl file.bin"), want, n);
+    memcpy(want + vdl, d + vdl, 1);
+    v_cmp(P(L, "VDL CHAINED.BIN"), want, n);
+    want[vdl] = 0;
+    vfs_file_t *f;
+    OK(vfs_open(P(L, "vdl file.bin"), VFS_O_RDWR, &f));
+    /* a read across ValidDataLength */
+    u8 buf[64];
+    vfs_seek(f, vdl - 32);
+    EXPECT(vfs_read(f, buf, 64), 64);
+    CHECK(!memcmp(buf, d + vdl - 32, 32) && !memcmp(buf + 32, want + vdl, 32), "read across VDL");
+    /* a write past VDL zero-fills the gap */
+    vfs_seek(f, 50000);
+    EXPECT(vfs_write(f, "written", 7), 7);
+    memcpy(want + 50000, "written", 7);
+    /* growing with truncate keeps VDL: the tail reads as zeros */
+    OK(vfs_truncate(f, 250000));
+    vfs_close(f);
+    v_cmp(P(L, "vdl file.bin"), want, 250000);
+    disk_detach(h);
+    fsck(im, tag);
+    xinfo_t xi = xt_info(im, "vdl file.bin");
+    CHECK(xi.size == 250000 && xi.vdl == 50007, "size %lu vdl %lu, want 250000 / 50007", (unsigned long)xi.size, (unsigned long)xi.vdl);
+    mt_cmp(im, "vdl file.bin", want, 250000);
+    h = disk_attach(im, ss);
+    L = letter_of(h);
+    OK(vfs_open(P(L, "vdl file.bin"), VFS_O_RDWR, &f));
+    OK(vfs_truncate(f, 20000));
+    vfs_close(f);
+    OK(vfs_open(P(L, "vdl chained.bin"), VFS_O_RDWR, &f));
+    vfs_seek(f, n);
+    EXPECT(vfs_write(f, "end", 3), 3);           /* appends after a zero-filled gap */
+    vfs_close(f);
+    disk_detach(h);
+    fsck(im, tag);
+    xi = xt_info(im, "vdl file.bin");
+    CHECK(xi.size == 20000 && xi.vdl == 20000, "after shrink: size %lu vdl %lu", (unsigned long)xi.size, (unsigned long)xi.vdl);
+    mt_cmp(im, "vdl file.bin", want, 20000);
+    memcpy(want, d, vdl + 1);
+    memset(want + vdl + 1, 0, n - vdl - 1);
+    memcpy(want + n, "end", 3);
+    mt_cmp(im, "vdl chained.bin", want, n + 3);
+    free(d); free(want);
+}
+
+/* VolumeDirty: set by the first change, cleared by sync / unmount; a
+ * volume that was dirty when mounted stays dirty */
+static void t_exfat_dirty(const char *tag, img_t *im, u32 ss) {
+    printf("  %s\n", tag);
+    CHECK(!(xvol_flags(im) & 2), "fresh volume dirty");
+    hdisk_t *h = disk_attach(im, ss);
+    char L = letter_of(h);
+    if (!L) { CHECK(0, "not mounted"); disk_detach(h); return; }
+    u8 *d = pat_alloc(300000, 701);
+    CHECK(!v_exists(P(L, "nothing.txt")), "nothing.txt");
+    v_count(P(L, ""));
+    u64 tot = 0, fr = 0;
+    OK(vfs_statfs(L, &tot, &fr));
+    CHECK(!(xvol_flags(im) & 2), "dirty after reading");
+    CHECK(h->writes == 0, "%lu writes while only reading", (unsigned long)h->writes);
+    v_put(P(L, "dirty.bin"), d, 300000);
+    CHECK(xvol_flags(im) & 2, "VolumeDirty not set after a write");
+    OK(vfs_sync_all());
+    CHECK(!(xvol_flags(im) & 2), "VolumeDirty not cleared by sync");
+    u8 pct;
+    img_rw(im, 112, &pct, 1, 0);
+    OK(vfs_statfs(L, &tot, &fr));
+    CHECK(pct == (u8)((tot - fr) * 100 / tot), "PercentInUse %u, want %lu", pct, (unsigned long)((tot - fr) * 100 / tot));
+    OK(vfs_mkdir(P(L, "dirty dir")));
+    CHECK(xvol_flags(im) & 2, "VolumeDirty not set after mkdir");
+    disk_detach(h);
+    CHECK(!(xvol_flags(im) & 2), "VolumeDirty not cleared by unmount");
+    fsck(im, tag);
+    /* dirty at mount (e.g. yanked from another system): kept */
+    u16 fl = xvol_flags(im) | 2;
+    u8 fb[2] = { (u8)fl, (u8)(fl >> 8) };
+    img_rw(im, 106, fb, 2, 1);
+    h = disk_attach(im, ss);
+    L = letter_of(h);
+    CHECK(L, "dirty volume not mounted");
+    if (L) {
+        v_put(P(L, "while dirty.bin"), d, 1000);
+        OK(vfs_sync_all());
+    }
+    disk_detach(h);
+    CHECK(xvol_flags(im) & 2, "VolumeDirty of a dirty volume cleared");
+    fl &= (u16)~2;
+    fb[0] = (u8)fl; fb[1] = (u8)(fl >> 8);
+    img_rw(im, 106, fb, 2, 1);
+    fsck(im, tag);
+    /* read-only device: never written */
+    hdisk_t *ro = calloc(1, sizeof *ro);
+    ro->fd = open(im->path, O_RDONLY);
+    snprintf(ro->bd.name, sizeof ro->bd.name, "xro%d", g_disk_no++);
+    ro->bd.sector_size = ss;
+    struct stat st;
+    fstat(ro->fd, &st);
+    ro->bd.sector_count = (u64)st.st_size / ss;
+    ro->bd.readonly = 1;
+    ro->bd.read = hd_read;
+    ro->bd.write = hd_write;
+    OK(blockdev_register(&ro->bd));
+    char R = letter_of(ro);
+    CHECK(R, "read-only exFAT not mounted");
+    if (R) {
+        v_cmp(P(R, "dirty.bin"), d, 300000);
+        EXPECT(vfs_write_file(P(R, "new.txt"), "x", 1), E_ROFS);
+        EXPECT(vfs_mkdir(P(R, "dir")), E_ROFS);
+        EXPECT(vfs_unlink(P(R, "dirty.bin")), E_ROFS);
+        EXPECT(vfs_rename(P(R, "dirty.bin"), P(R, "y.bin")), E_ROFS);
+        vfs_file_t *f;
+        EXPECT(vfs_open(P(R, "dirty.bin"), VFS_O_RDWR, &f), E_ROFS);
+        OK(vfs_statfs(R, &tot, &fr));
+        OK(vfs_sync_all());
+    }
+    EXPECT(ro->writes, 0);
+    disk_detach(ro);
+    free(d);
+}
+
+/* benign secondary entries (here a Vendor Extension) survive renames and
+ * moves; deleting such a file works */
+static void t_exfat_benign(const char *tag, img_t *im, u32 ss) {
+    printf("  %s\n", tag);
+    u8 *d = pat_alloc(5000, 801);
+    host_write(wpath("benign.in"), d, 5000);
+    int r = sh(EXFAT_TOOL " %s mkdir 'Vendor Dir'", xt(im));
+    r |= sh(EXFAT_TOOL " %s put '%s' 'with vendor entry.bin' --benign", xt(im), wpath("benign.in"));
+    r |= sh(EXFAT_TOOL " %s put '%s' 'Vendor Dir/second.bin' --benign", xt(im), wpath("benign.in"));
+    CHECK(r == 0, "exfat_tool put --benign failed");
+    g_benign_on_disk = 1;
+    fsck(im, tag);
+    hdisk_t *h = disk_attach(im, ss);
+    char L = letter_of(h);
+    if (!L) { CHECK(0, "not mounted"); disk_detach(h); return; }
+    v_cmp(P(L, "with vendor entry.bin"), d, 5000);
+    OK(vfs_rename(P(L, "with vendor entry.bin"), P(L, "short.bin")));                       /* in place */
+    OK(vfs_rename(P(L, "short.bin"), P(L, "a much longer name than before, needing more entries.bin")));
+    OK(vfs_rename(P(L, "a much longer name than before, needing more entries.bin"), P(L, "Vendor Dir/moved.bin")));
+    OK(vfs_unlink(P(L, "Vendor Dir/second.bin")));
+    vfs_file_t *f;
+    OK(vfs_open(P(L, "Vendor Dir/moved.bin"), VFS_O_RDWR, &f));
+    vfs_seek(f, 5000);
+    EXPECT(vfs_write(f, "+", 1), 1);
+    vfs_close(f);
+    disk_detach(h);
+    fsck(im, tag);
+    xinfo_t xi = xt_info(im, "Vendor Dir/moved.bin");
+    CHECK(xi.found && strstr(xi.benign, "HalcyonTestGUID!vendor") != NULL, "vendor entry lost: '%s'", xi.benign);
+    u8 *d2 = malloc(5001);
+    memcpy(d2, d, 5000);
+    d2[5000] = '+';
+    mt_cmp(im, "Vendor Dir/moved.bin", d2, 5001);
+    /* deleted: fsck.exfat is happy again */
+    h = disk_attach(im, ss);
+    OK(vfs_unlink(P(letter_of(h), "Vendor Dir/moved.bin")));
+    disk_detach(h);
+    g_benign_on_disk = 0;
+    fsck(im, tag);
+    free(d); free(d2);
+}
+
+/* exfat_format through vfs_format: fsck.exfat, exfat_tool.py, label,
+ * statfs, MBR type */
+static void t_exfat_format(const char *tag, u32 mb, int part, u32 ss, u32 cluster, u32 want_cluster) {
+    printf("  %s\n", tag);
+    img_t im = { 0 };
+    char nm[64];
+    snprintf(nm, sizeof nm, "xfmt_%u_%u_%u.img", mb, ss, cluster);
+    img_blank(&im, nm, mb, part, ss);
+    im.fs = FS_EXFAT;
+    hdisk_t *h = disk_attach(&im, ss);
+    blockdev_t *bd = volume_bd(h);
+    EXPECT(vfs_format(bd, "exFAT", "Fmt Tést", cluster), 0);
+    char L = letter_of(h);
+    CHECK(L, "not mounted after format");
+    u8 *d = pat_alloc(200000, 901);
+    if (L) {
+        volume_t *v = vfs_volume_by_letter(L);
+        CHECK(!strcmp(v->fs_name, "exFAT"), "fs %s", v->fs_name);
+        CHECK(!strcmp(v->label, "Fmt Tést"), "label '%s'", v->label);
+        u64 total = 0, freeb = 0;
+        OK(vfs_statfs(L, &total, &freeb));
+        CHECK(total > im.len * 9 / 10 && freeb > total * 9 / 10 && freeb < total, "statfs %lu/%lu of %lu",
+              (unsigned long)freeb, (unsigned long)total, (unsigned long)im.len);
+        EXPECT(v_count(P(L, "")), 0);
+        v_put(P(L, "after format.bin"), d, 200000);
+        OK(vfs_mkdir(P(L, "Ordner")));
+        v_put(P(L, "Ordner/x.txt"), d, 10);
+        vfs_sync_all();
+    }
+    disk_detach(h);
+    fsck(&im, tag);
+    CHECK(img_cluster_size(&im) == want_cluster, "cluster size %u, want %u", img_cluster_size(&im), want_cluster);
+    u8 bs[512];
+    img_rw(&im, 0, bs, 512, 0);
+    CHECK(bs[108] == (ss == 4096 ? 12 : 9), "sector shift %u", bs[108]);
+    mt_cmp(&im, "after format.bin", d, 200000);
+    mt_cmp(&im, "Ordner/x.txt", d, 10);
+    if (part) {
+        u8 mbr[512];
+        int fd = open(im.path, O_RDONLY);
+        pread(fd, mbr, 512, 0);
+        close(fd);
+        CHECK(mbr[446 + 4] == 0x07, "partition type after format: %02x, want 07", mbr[446 + 4]);
+    }
+    /* the label as the other implementation sees it */
+    CHECK(sh(EXFAT_TOOL " %s info | grep -q '^label: Fmt Tést$'", xt(&im)) == 0, "exfat_tool does not see the label");
+    free(d);
+}
+
+/* the cross-check tool itself, validated by fsck.exfat before it is
+ * trusted to judge the driver: contiguous, chained and fragmented files,
+ * ValidDataLength, growing the root and a subdirectory (NoFatChain
+ * conversion), deletion */
+static void t_exfat_tool_selfcheck(void) {
+    printf("  exfat_tool.py self-check\n");
+    img_t im = { 0 };
+    img_exfat(&im, "xtool.img", 16, 512, "SELFTEST", 1, 0);
+    u8 *d = pat_alloc(40000, 1001);
+    host_write(wpath("xtool.in"), d, 40000);
+    const char *in = wpath("xtool.in");
+    int r = sh(EXFAT_TOOL " %s mkdir -p 'a/b/c'", xt(&im));
+    r |= sh(EXFAT_TOOL " %s put '%s' contiguous.bin", xt(&im), in);
+    r |= sh(EXFAT_TOOL " %s put '%s' 'a/chained.bin' --chain", xt(&im), in);
+    r |= sh(EXFAT_TOOL " %s put '%s' 'a/b/fragmented.bin' --frag", xt(&im), in);
+    r |= sh(EXFAT_TOOL " %s put '%s' 'a/b/c/vdl.bin' --vdl 1234", xt(&im), in);
+    r |= sh(EXFAT_TOOL " %s put '%s' 'blocker.bin'", xt(&im), in);
+    for (int i = 0; i < 40 && !r; i++) {
+        r |= sh(EXFAT_TOOL " %s put '%s' 'a/file with a long name number %d.txt'", xt(&im), wpath("xtool.in"), i);
+        r |= sh(EXFAT_TOOL " %s mkdir 'root dir %d'", xt(&im), i);
+    }
+    r |= sh(EXFAT_TOOL " %s rm contiguous.bin", xt(&im));
+    r |= sh(EXFAT_TOOL " %s rm 'root dir 7'", xt(&im));
+    CHECK(r == 0, "exfat_tool.py operations failed");
+    fsck(&im, "exfat_tool.py self-check");
+    xinfo_t xi = xt_info(&im, "a");
+    CHECK(xi.found && !xi.nofat, "directory 'a' was not converted to a FAT chain");
+    mt_cmp(&im, "a/b/fragmented.bin", d, 40000);
+    memset(d + 1234, 0, 40000 - 1234);
+    mt_cmp(&im, "A/B/C/VDL.BIN", d, 40000);
+    free(d);
+}
+
+static void s_exfat(void) {
+    img_t im = { 0 };
+    t_exfat_tool_selfcheck();
+    /* 4 KiB clusters, MBR partition */
+    img_exfat(&im, "exfat_read.img", 64, 4096, "EXDATA", 1, 0);
+    t_read_mtools("exfat read", &im, 512, "EXDATA");
+    img_exfat(&im, "exfat_write.img", 64, 4096, "EXDATA", 1, 0);
+    t_write("exfat write", &im, 512);
+    t_rename("exfat rename", &im, 512);
+    t_delete("exfat delete", &im, 512);
+    img_exfat(&im, "exfat_many.img", 64, 4096, "EXMANY", 0, 0);
+    t_many("exfat many", &im, 512, 600);
+    img_exfat(&im, "exfat_chains.img", 64, 4096, "EXCHAIN", 1, 0);
+    t_exfat_chains("exfat chains 4k", &im, 512);
+    t_exfat_vdl("exfat valid data length", &im, 512);
+    t_exfat_benign("exfat benign entries", &im, 512);
+    img_exfat(&im, "exfat_dirty.img", 32, 4096, "EXDIRTY", 0, 0);
+    t_exfat_dirty("exfat VolumeDirty", &im, 512);
+    img_exfat(&im, "exfat_unplug.img", 32, 4096, "EXPLUG", 1, 0);
+    t_unplug("exfat unplug", &im, 512);
+    /* 512-byte clusters */
+    img_exfat(&im, "exfat_512.img", 32, 512, "EX512", 0, 0);
+    t_read_mtools("exfat 512 read", &im, 512, "EX512");
+    img_exfat(&im, "exfat_512w.img", 32, 512, "EX512", 0, 0);
+    t_write("exfat 512 write", &im, 512);
+    t_exfat_chains("exfat chains 512", &im, 512);
+    img_exfat(&im, "exfat_512full.img", 8, 512, "EXFULL", 0, 0);
+    t_diskfull("exfat 512 full", &im, 512);
+    /* 32 KiB and 128 KiB clusters */
+    img_exfat(&im, "exfat_32k.img", 128, 32768, "EX32K", 1, 0);
+    t_read_mtools("exfat 32k read", &im, 512, "EX32K");
+    t_large("exfat 32k large", &im, 512, 8 * 1024 * 1024 + 99);
+    img_exfat(&im, "exfat_128k.img", 256, 131072, "EX128K", 0, 0);
+    t_write("exfat 128k write", &im, 512);
+    t_large("exfat 128k large", &im, 512, 9 * 1024 * 1024 + 3);
+    img_exfat(&im, "exfat_128kfull.img", 64, 131072, "EXFULL128", 0, 0);
+    t_diskfull("exfat 128k full", &im, 512);
+    /* 4096-byte sectors: on a 4096-byte device and through a 512-byte one */
+    img_exfat(&im, "exfat_4ks.img", 64, 4096, "EX4KSECT", 0, 1);
+    t_read_mtools("exfat 4k-sector read", &im, 4096, "EX4KSECT");
+    img_exfat(&im, "exfat_4ksw.img", 64, 4096, "EX4KSECT", 0, 1);
+    t_write("exfat 4k-sector write", &im, 4096);
+    t_rename("exfat 4k-sector rename", &im, 4096);
+    t_shift(&im);
+    img_exfat(&im, "exfat_4ks32.img", 128, 32768, "EX4KS32", 0, 1);
+    t_exfat_chains("exfat 4k-sector chains", &im, 4096);
+    t_large("exfat 4k-sector large", &im, 4096, 3 * 1024 * 1024 + 5);
+    /* Unicode, names, random operations */
+    img_exfat(&im, "exfat_uni.img", 64, 4096, "EXUNI", 1, 0);
+    t_unicode("exfat unicode", &im, 512);
+    img_exfat(&im, "exfat_illegal.img", 16, 4096, "EXILL", 0, 0);
+    t_illegal("exfat illegal", &im, 512);
+    img_exfat(&im, "exfat_rnd.img", 48, 4096, "EXRND", 1, 0);
+    t_random("random exfat", &im, 512, 11, 1500, 400000);
+    img_exfat(&im, "exfat_rndfull.img", 8, 512, "EXRNDF", 0, 0);
+    t_random("random exfat small", &im, 512, 12, 1500, 1500000);   /* frequent disk full */
+    /* exfat_format */
+    t_exfat_format("format superfloppy 64 MB", 64, 0, 512, 0, 4096);
+    t_exfat_format("format partition 300 MB", 300, 1, 512, 0, 32768);
+    t_exfat_format("format partition 300 MB, 4K sectors", 300, 1, 4096, 0, 32768);
+    t_exfat_format("format 8 MB, 512-byte clusters", 8, 0, 512, 512, 512);
+    t_exfat_format("format 300 MB, 128 KiB clusters", 300, 0, 512, 131072, 131072);
+    t_exfat_format("format 40 GB superfloppy (sparse)", 40 * 1024, 0, 512, 0, 131072);
+    {
+        img_t b = { 0 };
+        img_blank(&b, "xfmt_refuse.img", 4, 0, 512);
+        hdisk_t *h = disk_attach(&b, 512);
+        EXPECT(exfat_format(&h->bd, "X", 1000), E_INVAL);         /* not a power of two */
+        EXPECT(exfat_format(&h->bd, "X", 256), E_INVAL);          /* below the sector size */
+        EXPECT(exfat_format(&h->bd, "X", 64u << 20), E_INVAL);    /* above 32 MiB */
+        EXPECT(exfat_format(&h->bd, "twelve chars", 0), E_INVAL);
+        EXPECT(exfat_format(&h->bd, "bad:label", 0), E_INVAL);
+        EXPECT(exfat_format(&h->bd, "X", 4u << 20), E_NOSPC);     /* one 4 MiB cluster does not fit */
+        h->bd.sector_count = 1024;                                /* 512 KiB */
+        EXPECT(exfat_format(&h->bd, "X", 0), E_NOSPC);
+        disk_detach(h);
+    }
+}
+
 static void s_fat16(void) {
-    img_t im;
+    img_t im = { 0 };
     img_mbr(&im, "fat16_read.img", 16, 32, "DATA16", 0xCAFE0016);
     t_read_mtools("fat16 read", &im, 512, "DATA16");
     img_mbr(&im, "fat16_write.img", 16, 32, "DATA16", 0xCAFE0016);
@@ -2289,7 +3420,7 @@ static void s_fat16(void) {
 }
 
 static void s_fat32(void) {
-    img_t im;
+    img_t im = { 0 };
     img_mbr(&im, "fat32_read.img", 32, 64, "DATA32", 0xCAFE0032);
     t_read_mtools("fat32 read", &im, 512, "DATA32");
     img_mbr(&im, "fat32_write.img", 32, 64, "DATA32", 0xCAFE0032);
@@ -2307,7 +3438,7 @@ static void s_fat32(void) {
 }
 
 static void s_gpt(void) {
-    img_t im;
+    img_t im = { 0 };
     img_gpt(&im, "gpt_read.img", 64, "GPTDISK");
     t_read_mtools("gpt read", &im, 512, "GPTDISK");
     img_gpt(&im, "gpt_write.img", 64, "GPTDISK");
@@ -2316,7 +3447,7 @@ static void s_gpt(void) {
 }
 
 static void s_4k(void) {
-    img_t im;
+    img_t im = { 0 };
     img_super(&im, "fat16_4k.img", 16, 65536, "SECT4K", "-S 4096");
     t_read_mtools("4k fat16 read", &im, 4096, "SECT4K");
     img_super(&im, "fat16_4k_w.img", 16, 65536, "SECT4K", "-S 4096");
@@ -2341,7 +3472,7 @@ static void s_misc(void) {
 static const scen_t scenarios[] = {
     { "paths", s_paths }, { "fat12", s_fat12 }, { "fat16", s_fat16 }, { "fat32", s_fat32 },
     { "gpt", s_gpt }, { "4k", s_4k }, { "misc", s_misc }, { "random", s_random }, { "testdisks", s_testdisks },
-    { "hostile", s_hostile }, { "unicode", s_unicode }, { "format", s_format }, { "iso", s_iso },
+    { "hostile", s_hostile }, { "unicode", s_unicode }, { "format", s_format }, { "iso", s_iso }, { "exfat", s_exfat },
 };
 
 int main(int argc, char **argv) {

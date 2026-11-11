@@ -1,5 +1,5 @@
 /* Fuzz harness for the Halcyon storage stack (kernel/fs/block.c, vfs.c, fat.c,
- * iso9660.c).
+ * exfat.c, iso9660.c).
  *
  * Input: one config byte (fuzz_fs.h: sector size, read-only, boot disk,
  * I/O fault injection, operation variant) and a disk image. The image becomes a RAM block device that is registered
@@ -427,15 +427,59 @@ size_t LLVMFuzzerMutate(uint8_t *data, size_t size, size_t max_size);
 size_t LLVMFuzzerCustomMutator(uint8_t *data, size_t size, size_t max_size, unsigned int seed);
 
 static u32 g_mstate;
+
+/* exFAT protects its boot region and every directory entry set with
+ * checksums, so most mutations would only exercise the rejection paths.
+ * Usually re-seal them: the boot checksum of exFAT boot regions near the
+ * start of the image, and the SetChecksum of File entry sets around the
+ * mutated bytes (data[0] is the config byte: image offset = index - 1). */
+static void exfat_reseal(uint8_t *data, size_t size, size_t lo, size_t hi) {
+    uint8_t *img = data + 1;
+    size_t n = size - 1;
+    for (size_t off = 0; off + 512 <= n && off < 64 * 512; off += 512) {
+        const uint8_t *b = img + off;
+        if (memcmp(b + 3, "EXFAT   ", 8) || b[108] < 9 || b[108] > 12) continue;
+        for (int reg = 0; reg < 2; reg++) {
+            u32 ss = 1u << b[108];
+            size_t r0 = off + (size_t)reg * 12 * ss;
+            if (r0 + 12 * (size_t)ss > n) break;
+            u32 c = 0;
+            for (u32 i = 0; i < 11 * ss; i++) {
+                if (i == 106 || i == 107 || i == 112) continue;
+                c = ((c & 1) ? 0x80000000u : 0) + (c >> 1) + img[r0 + i];
+            }
+            for (u32 i = 0; i < ss; i += 4) memcpy(img + r0 + 11 * ss + i, &c, 4);
+        }
+    }
+    if (lo) lo--;
+    if (hi) hi--;
+    size_t from = lo > 19 * 32 ? (lo - 19 * 32) & ~(size_t)31 : 0;
+    for (size_t p = from; p + 64 <= n && p < hi + 32; p += 32) {
+        uint8_t *e = img + p;
+        if (e[0] != 0x85) continue;
+        size_t len = ((size_t)e[1] + 1) * 32;
+        if (e[1] < 2 || p + len > n) continue;
+        u16 c = 0;
+        for (size_t i = 0; i < len; i++) {
+            if (i == 2 || i == 3) continue;
+            c = (u16)(((c & 1) ? 0x8000 : 0) + (c >> 1) + e[i]);
+        }
+        e[2] = (u8)c;
+        e[3] = (u8)(c >> 8);
+    }
+}
 static u32 mrand(void) { g_mstate ^= g_mstate << 13; g_mstate ^= g_mstate >> 17; g_mstate ^= g_mstate << 5; return g_mstate; }
 
 size_t LLVMFuzzerCustomMutator(uint8_t *data, size_t size, size_t max_size, unsigned int seed) {
     static const u32 vals[] = { 0, 1, 2, 3, 0x7F, 0x80, 0xFF, 0x100, 0x200, 0x1000, 0xFF0, 0xFF6, 0xFF7, 0xFF8,
                                 0xFFF, 0xFFF0, 0xFFF7, 0xFFF8, 0xFFFF, 0x10000, 0x0FFFFFF0, 0x0FFFFFF7,
                                 0x0FFFFFF8, 0x0FFFFFFF, 0x7FFFFFFF, 0x80000000, 0xFFFFFFF0, 0xFFFFFFFF,
-                                0x41615252, 0x61417272, 0xAA55, 0xE5, 0x2E, 0x0F, 0x10, 0x40, 0x41, 0x05, 0xEE };
+                                0x41615252, 0x61417272, 0xAA55, 0xE5, 0x2E, 0x0F, 0x10, 0x40, 0x41, 0x05, 0xEE,
+                                /* exFAT entry types, flags */
+                                0x81, 0x82, 0x83, 0x85, 0xA0, 0xC0, 0xC1, 0xE0, 0xE1, 0x03, 0x02, 0xFFFFFFF7 };
     g_mstate = seed | 1;
     if (size < 64 || mrand() % 8 == 0) return LLVMFuzzerMutate(data, size, max_size);
+    size_t lo = size, hi = 0;           /* mutated range */
     u32 k = 1 + mrand() % 3;
     for (u32 m = 0; m < k; m++) {
         size_t start;
@@ -447,6 +491,8 @@ size_t LLVMFuzzerCustomMutator(uint8_t *data, size_t size, size_t max_size, unsi
         }
         if (start >= size) start = size - 1;
         size_t len = MIN((size_t)(16 << (mrand() % 9)), size - start);   /* 16 B .. 4 KiB */
+        if (start < lo) lo = start;
+        if (start + len > hi) hi = start + len;
         if (mrand() % 2) {
             u32 v = vals[mrand() % ARRAY_SIZE(vals)];
             if (mrand() % 4 == 0) v += mrand() % 5 - 2;
@@ -458,6 +504,7 @@ size_t LLVMFuzzerCustomMutator(uint8_t *data, size_t size, size_t max_size, unsi
             (void)n;                                                  /* size stays */
         }
     }
+    if (mrand() % 4) exfat_reseal(data, size, lo, hi);
     return size;
 }
 #endif

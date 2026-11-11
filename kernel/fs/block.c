@@ -26,6 +26,7 @@
 #include "fs/vfs.h"
 #include "fs/fat.h"
 #include "fs/iso9660.h"
+#include "fs/exfat.h"
 
 #define MAX_LOGICAL   128
 #define MAX_GPT_PARTS 256
@@ -311,7 +312,7 @@ int blockdev_register(blockdev_t *bd) {
     }
     int has_gpt = 0;
     int mbr = mbr_valid(s0, bd->sector_count, &has_gpt);
-    int bpb = fat_bpb_sane(s0, bd->sector_size);
+    int bpb = fat_bpb_sane(s0, bd->sector_size) || exfat_boot_sane(s0, bd->sector_size);
     if (s0[510] == 0x55 && s0[511] == 0xAA) bd->disk_sig = rd32(s0 + 440);
 
     if (mbr && bpb && !has_gpt) {
@@ -323,7 +324,8 @@ int blockdev_register(blockdev_t *bd) {
             const u8 *e = s0 + 446 + 16 * i;
             u32 start = rd32(e + 8);
             if (!e[4] || is_extended(e[4])) continue;
-            if (!blk_read(bd, start, 1, buf) && fat_bpb_sane(buf, bd->sector_size)) part_bpb = 1;
+            if (!blk_read(bd, start, 1, buf) &&
+                (fat_bpb_sane(buf, bd->sector_size) || exfat_boot_sane(buf, bd->sector_size))) part_bpb = 1;
             break;
         }
         if (part_bpb) bpb = 0;
@@ -353,7 +355,7 @@ int blockdev_register(blockdev_t *bd) {
         mount_children(bd);
     } else {
         /* no partition table: superfloppy (or unknown) */
-        if (bpb) kprintf("block: %s: no partition table, FAT boot sector at LBA 0\n", bd->name);
+        if (bpb) kprintf("block: %s: no partition table, boot sector at LBA 0\n", bd->name);
         vfs_try_mount(bd);
     }
     return 0;

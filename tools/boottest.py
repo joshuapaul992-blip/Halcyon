@@ -6,7 +6,8 @@ usage: tools/boottest.py [CONFIG ...]     CONFIG = hc:fw[:variant[+variant]], e.
        xhci:bios:nvme+nomsi (default: the full matrix)
 
 Each boot must reach "gui: desktop ready", mount the boot stick as C:, mount
-the SATA test disk, write \\HALCYON\\BOOT.LOG, and log no exception/panic.
+the SATA test disks (FAT32/GPT and exFAT/MBR), write \\HALCYON\\BOOT.LOG, and
+log no exception/panic.
 With interrupts on, the idle desktop must also leave QEMU mostly idle (the
 guest halts the CPU), and the USB controller must get a working interrupt.
 Variants add boot flags through QEMU fw_cfg (see qemu_boot_flags()):
@@ -43,6 +44,7 @@ CHECKS = [
     ("desktop", "gui: desktop ready"),
     ("boot volume C:", "(boot volume)"),
     ("SATA volume", "on sata0"),
+    ("exFAT volume", "exFAT 'EXFATDISK' on sata"),
     ("BOOT.LOG", "bootlog: saved"),
 ]
 BAD = ["CPU EXCEPTION", "KERNEL PANIC", "nested fault"]
@@ -127,11 +129,16 @@ def run(cfg):
         else:
             extra += ("-drive if=none,id=nv0,format=raw,file=%s "
                       "-device nvme,serial=HALC0001,drive=nv0" % disk)
-        checks = [c if c[0] != "SATA volume" else ("NVMe volume", "on nvme0") for c in checks]
+        checks = [c if c[0] != "SATA volume" else ("NVMe volume", "on nvme0") for c in checks
+                  if c[0] != "exFAT volume"]
     else:
         sata = os.path.join(BUILD, "ci_sata.img")
         subprocess.run(["cp", os.path.join(BUILD, "fat32gpt.img"), sata], check=True)
         extra += "-drive if=none,id=d0,format=raw,file=%s -device ide-hd,drive=d0,bus=ide.0" % sata
+        # exFAT test disk on a third SATA port (ide.1 is the CD variant's drive)
+        sata_x = os.path.join(BUILD, "ci_sata_exfat.img")
+        subprocess.run(["cp", os.path.join(BUILD, "exfat.img"), sata_x], check=True)
+        extra += " -drive if=none,id=d1,format=raw,file=%s -device ide-hd,drive=d1,bus=ide.2" % sata_x
     if flags:
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
     isos = None
@@ -216,7 +223,7 @@ def run(cfg):
 
 def main():
     cfgs = sys.argv[1:] or MATRIX
-    if not os.path.exists(os.path.join(BUILD, "fat32gpt.img")):
+    if not all(os.path.exists(os.path.join(BUILD, f)) for f in ("fat32gpt.img", "exfat.img")):
         subprocess.run(["make", "testdisks"], check=True, stdout=subprocess.DEVNULL)
     failed = sum(0 if run(c) else 1 for c in cfgs)
     print("boot matrix: %d/%d passed" % (len(cfgs) - failed, len(cfgs)))

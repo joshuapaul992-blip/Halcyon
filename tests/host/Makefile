@@ -1,10 +1,12 @@
 # Host tests for the storage stack: kernel/fs/*.c compiled unmodified with the
-# host compiler against a small libc shim, run against real FAT images and
-# ISO 9660 images (isotest.c, built with xorriso).
+# host compiler against a small libc shim, run against real FAT and exFAT
+# images (exFAT results are cross-checked with exfat_tool.py, an independent
+# Python implementation, and fsck.exfat) and ISO 9660 images (isotest.c,
+# built with xorriso).
 #
 #   tests/host/run.sh            (== make -C tests/host test)
 #                                includes the "hostile" scenario: corrupted
-#                                partition tables / FAT volumes and the
+#                                partition tables / FAT / exFAT volumes and the
 #                                minimized fuzzer crash inputs (fuzz_regress/)
 #
 # Fuzzing (see fuzz_fs.c; seeds come from fuzz_seeds.sh):
@@ -16,11 +18,12 @@
 #   build/hosttest/fuzz_replay [-v] FILE|DIR...
 #                                replay single inputs (gcc + ASan/UBSan)
 #
-# Needs: gcc, mkfs.fat, fsck.fat, mtools, sfdisk, truncate, dd, gzip, python3, xorriso;
+# Needs: gcc, mkfs.fat, fsck.fat, mtools, exfatprogs (mkfs.exfat, fsck.exfat),
+# sfdisk, truncate, dd, gzip, python3, xorriso;
 # clang with the libFuzzer runtime (libclang-rt-18-dev) for fuzz / fuzz-run.
 ROOT    := ../..
 OUT     ?= $(ROOT)/build/hosttest
-KSRCS   := $(ROOT)/kernel/fs/block.c $(ROOT)/kernel/fs/vfs.c $(ROOT)/kernel/fs/fat.c $(ROOT)/kernel/fs/iso9660.c $(ROOT)/kernel/core/unicode.c shim.c
+KSRCS   := $(ROOT)/kernel/fs/block.c $(ROOT)/kernel/fs/vfs.c $(ROOT)/kernel/fs/fat.c $(ROOT)/kernel/fs/exfat.c $(ROOT)/kernel/fs/iso9660.c $(ROOT)/kernel/core/unicode.c shim.c
 SRCS    := $(KSRCS) fstest.c fuzz_fs.c
 HDRS    := $(wildcard $(ROOT)/kernel/fs/*.h) $(wildcard $(ROOT)/kernel/core/*.h) fuzz_fs.h
 WARN    := -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \

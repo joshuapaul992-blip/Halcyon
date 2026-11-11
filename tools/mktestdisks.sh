@@ -5,6 +5,9 @@
 #   $BUILD/fat32gpt.img  64 MiB, GPT, one FAT32 partition at LBA 2048, label GPTDISK
 #   $BUILD/fat32_4k.img  320 MiB (sparse), 4096-byte sectors, GPT, FAT32 partition at
 #                        LBA 256 (1 MiB), label NVME4K (for a 4Kn NVMe namespace)
+#   $BUILD/exfat.img     64 MiB, MBR, one exFAT partition (type 7) at LBA 2048,
+#                        label EXFATDISK (mkfs.exfat; populated with
+#                        tests/host/exfat_tool.py, as mtools has no exFAT)
 # Every image holds the same sample tree:
 #   README.TXT                       8.3 name, known text
 #   Long File Name Example.txt       long name with spaces
@@ -12,7 +15,7 @@
 #   Folder With Spaces/Nested Dir/deep file.txt
 #   SUBDIR/HELLO.TXT
 #   SUBDIR/pattern.bin               (32 KiB: bytes 0..255 repeated)
-# Needs mkfs.fat, mtools, sfdisk, fdisk.
+# Needs mkfs.fat, mtools, sfdisk, fdisk; mkfs.exfat and python3 for exfat.img.
 set -e
 BUILD=${BUILD:-build}
 mkdir -p "$BUILD"
@@ -77,3 +80,28 @@ SECT=$(fdisk -b 4096 -l "$IMG" | awk '$1 == "'"$IMG"'1" { print $4 }')
 mkfs.fat --offset=256 -S 4096 -F 32 -s 1 -n NVME4K "$IMG" $((SECT * 4)) >/dev/null 2>&1
 populate "$IMG@@1M"
 echo "Built $IMG (320 MiB, 4096-byte sectors, GPT, FAT32 partition at LBA 256, label NVME4K)"
+
+# ---- exFAT, MBR ----
+if command -v mkfs.exfat >/dev/null 2>&1; then
+    IMG=$BUILD/exfat.img
+    XT="python3 $(cd "$(dirname "$0")/.." && pwd)/tests/host/exfat_tool.py"
+    rm -f "$IMG"
+    dd if=/dev/zero of="$IMG" bs=1M count=0 seek=64 2>/dev/null
+    SECT=$((64 * 2048 - 2048))
+    printf 'label: dos\nlabel-id: 0x48414cef\nstart=2048, size=%s, type=7\n' $SECT | sfdisk -q "$IMG"
+    dd if=/dev/zero of="$TMP/exfat.part" bs=512 count=0 seek=$SECT 2>/dev/null
+    mkfs.exfat -q -L EXFATDISK "$TMP/exfat.part"
+    P="$TMP/exfat.part"
+    $XT "$P" mkdir -p "Folder With Spaces/Nested Dir"
+    $XT "$P" mkdir SUBDIR
+    $XT "$P" put "$TMP/readme.txt" README.TXT
+    $XT "$P" put "$TMP/long.txt" "Long File Name Example.txt"
+    $XT "$P" put "$TMP/mixed.dat" "Mixed Case.Data"
+    $XT "$P" put "$TMP/deep.txt" "Folder With Spaces/Nested Dir/deep file.txt"
+    $XT "$P" put "$TMP/hello.txt" SUBDIR/HELLO.TXT
+    $XT "$P" put "$TMP/pattern.bin" SUBDIR/pattern.bin --frag
+    dd if="$P" of="$IMG" bs=1M seek=1 conv=notrunc 2>/dev/null
+    echo "Built $IMG (64 MiB MBR, exFAT partition at LBA 2048, label EXFATDISK)"
+else
+    echo "mkfs.exfat not found: $BUILD/exfat.img not built"
+fi
