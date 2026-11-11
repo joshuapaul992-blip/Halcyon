@@ -1,11 +1,15 @@
 /* Halcyon OS - windows and drawing for user programs (SYS_WIN_*, SYS_GFX_*,
- * SYS_CTL_*, message boxes, clipboard).
+ * SYS_CTL_*, SYS_MENU_*, message boxes, clipboard).
  *
  * Each program window has a canvas in the kernel: drawing calls paint into it
  * and the window manager copies it into the window whenever the window is
  * drawn (retained, like a GDI window with a backing bitmap). Input arrives in
  * a per-process event queue. Window-manager changes run on the GUI thread
- * (gui_call), the drawing and the queue are private to the program. */
+ * (gui_call), the drawing and the queue are private to the program.
+ *
+ * A menu bar is outside the program's client area, as in Win32: the canvas
+ * starts below it (u->top), events and control rectangles are moved by it,
+ * and adding one grows the window instead of shrinking the canvas. */
 #include "wm.h"
 #include "core/lib.h"
 #include "core/mm.h"
@@ -24,6 +28,19 @@
 #define MAX_PIXELS (8u << 20)            /* all canvases of one process (32 MiB) */
 #define GUI_RESERVE (32ull << 20)        /* kernel heap the GUI calls never touch */
 #define MAX_MSGBOXES 4
+#define MENU_LABEL 64                    /* bytes per menu label / shortcut, with the NUL */
+#define MENU_SHORTCUT 32
+#define MAX_CLIP (1u << 20)              /* SYS_CLIPBOARD_SET_N */
+#define STATUS_H_DEFAULT 22
+
+/* a program's menu bar or popup menu, copied into one block */
+typedef struct umenu {
+    menubar_t bar;          /* bar.menus = menus */
+    menu_t *menus;
+    menu_item_t *items;
+    int nmenus, nitems;
+    char *pool;
+} umenu_t;
 
 typedef struct uwin {
     window_t *w;            /* NULL once the window is gone */
@@ -36,6 +53,11 @@ typedef struct uwin {
     surface_t *mapped;      /* the canvas mapped into the program (SYS_WIN_CANVAS), maybe an old one */
     u64 map_va;
     int ncontrols;
+    int top;                /* menu bar height above the canvas */
+    umenu_t *bar, *pop;     /* menu bar and the last popup menu (both may be shown) */
+    int clip_on, ox, oy;    /* drawing clip rectangle and origin (canvas coordinates) */
+    rect_t clip;
+    int min_cw, min_ch;     /* minimum client size (SYS_WIN_SET_MIN_SIZE) */
 } uwin_t;
 
 /* a program's message box: not modal for the GUI thread, the program waits */
@@ -60,10 +82,10 @@ static ustate_t *state_of(proc_t *p) {
 static void push(proc_t *p, const hal_event_t *ev) {
     ustate_t *s = p ? p->gui : NULL;
     if (!s) return;
-    /* coalesce pointer motion */
-    if (ev->type == EVT_MOUSE_MOVE && s->qh != s->qt) {
+    /* coalesce pointer motion and scroll bar thumb tracking */
+    if ((ev->type == EVT_MOUSE_MOVE || (ev->type == EVT_SCROLL && ev->button == SCROLL_THUMB_TRACK)) && s->qh != s->qt) {
         hal_event_t *last = &s->q[(s->qh + QLEN - 1) % QLEN];
-        if (last->type == EVT_MOUSE_MOVE && last->win == ev->win) { *last = *ev; return; }
+        if (last->type == ev->type && last->win == ev->win && last->id == ev->id && last->button == ev->button) { *last = *ev; return; }
     }
     int n = (s->qh + 1) % QLEN;
     if (n == s->qt) return;                 /* full: the program is not keeping up */
@@ -80,7 +102,7 @@ static const font_t *font_of(int f) {
 
 static void uw_paint(window_t *w, gc_t *g) {
     uwin_t *u = w->data;
-    if (u && u->canvas) gfx_blit(g, 0, 0, u->canvas, mkrect(0, 0, u->canvas->w, u->canvas->h));
+    if (u && u->canvas) gfx_blit(g, 0, u->top, u->canvas, mkrect(0, 0, u->canvas->w, u->canvas->h));
 }
 
 static void uw_event(window_t *w, gui_event_t *e) {
@@ -88,8 +110,9 @@ static void uw_event(window_t *w, gui_event_t *e) {
     if (!u || !u->p) return;
     hal_event_t ev = { 0 };
     ev.win = u->handle;
-    ev.x = e->x; ev.y = e->y;
+    ev.x = e->x; ev.y = (e->type == GE_KEY || e->type == GE_FOCUS || e->type == GE_BLUR) ? e->y : e->y - u->top;
     ev.button = e->button; ev.buttons = e->buttons; ev.dz = e->dz;
+    ev.mods = input_mods();
     switch (e->type) {
     case GE_MOUSE_DOWN: ev.type = EVT_MOUSE_DOWN; break;
     case GE_MOUSE_UP: ev.type = EVT_MOUSE_UP; break;
@@ -112,14 +135,55 @@ static void uw_event(window_t *w, gui_event_t *e) {
     push(u->p, &ev);
 }
 
-static void uw_click(window_t *w, widget_t *wd) {
+static void uw_notify(window_t *w, widget_t *wd, int type, int code) {
     uwin_t *u = w->data;
     if (!u || !u->p) return;
     hal_event_t ev = { 0 };
-    ev.type = EVT_COMMAND;
+    ev.type = type;
     ev.win = u->handle;
     ev.id = wd->id;
+    ev.button = code;
+    if (type == EVT_SCROLL) ev.x = wd->value;
     push(u->p, &ev);
+}
+static void uw_click(window_t *w, widget_t *wd) { uw_notify(w, wd, EVT_COMMAND, CMD_CLICK); }
+static void uw_activate(window_t *w, widget_t *wd) { uw_notify(w, wd, EVT_COMMAND, CMD_ACTIVATE); }
+static void uw_scroll(window_t *w, widget_t *wd, int part) { uw_notify(w, wd, EVT_SCROLL, part); }
+
+static void uw_menu(window_t *w, int id) {
+    uwin_t *u = w->data;
+    if (!u || !u->p) return;
+    hal_event_t ev = { 0 };
+    ev.type = EVT_MENU;
+    ev.win = u->handle;
+    ev.id = id;
+    push(u->p, &ev);
+}
+
+static void uw_tick(window_t *w) { widgets_tick(w); }
+
+/* status bars sit at the bottom of the client area */
+static void dock(window_t *w) {
+    for (widget_t *wd = w->widgets; wd; wd = wd->next)
+        if (wd->type == W_STATUSBAR) wd->r = mkrect(0, w->client->h - wd->r.h, w->client->w, wd->r.h);
+}
+
+/* the frame's minimum size from the program's minimum client size */
+static void set_min(uwin_t *u) {
+    window_t *w = u->w;
+    w->min_w = MAX(160, u->min_cw + 2 * BORDER);
+    w->min_h = MAX(80, u->min_ch + u->top + TITLE_H + BORDER);
+}
+
+/* after a size change: keep the window on screen (like Sonar's level change) */
+static void keep_on_screen(window_t *w) {
+    rect_t f = w->frame;
+    int nx = MAX(0, MIN(f.x, screen_w() - f.w)), ny = MAX(0, MIN(f.y, screen_h() - TASKBAR_H - f.h));
+    if (nx != f.x || ny != f.y) {
+        wm_invalidate_rect(mkrect(f.x, f.y, f.w + 8, f.h + 8));
+        w->frame.x = nx; w->frame.y = ny;
+        wm_invalidate_rect(mkrect(nx, ny, f.w + 8, f.h + 8));
+    }
 }
 
 static int uw_close(window_t *w) {
@@ -147,10 +211,13 @@ static int uw_close(window_t *w) {
 static void uw_resize(window_t *w) {
     uwin_t *u = w->data;
     if (!u || !w->client || !u->p || !u->p->gui) return;
+    dock(w);
     ustate_t *s = u->p->gui;
-    u64 oldpx = u->canvas ? (u64)u->canvas->w * u->canvas->h : 0, newpx = (u64)w->client->w * w->client->h;
+    int cw = w->client->w, ch = MAX(1, w->client->h - u->top);
+    if (u->canvas && u->canvas->w == cw && u->canvas->h == ch) return;
+    u64 oldpx = u->canvas ? (u64)u->canvas->w * u->canvas->h : 0, newpx = (u64)cw * ch;
     if (s->pixels - oldpx + newpx > MAX_PIXELS || mm_heap_free() < GUI_RESERVE + newpx * 4) return;
-    surface_t *n = surface_new_paged(w->client->w, w->client->h);
+    surface_t *n = surface_new_paged(cw, ch);
     if (!n) return;
     s->pixels = s->pixels - oldpx + newpx;
     gc_t g = gc_for(n);
@@ -193,12 +260,17 @@ static void job_create(void *a) {
     w->on_close = uw_close;
     w->on_resize = uw_resize;
     w->on_destroy = uw_destroyed;
+    w->on_menu = uw_menu;
     j->ok = 1;
 }
 
 static void job_destroy(void *a) {
     uwin_t *u = a;
-    if (u->w) { u->w->on_close = NULL; u->w->data = NULL; wm_destroy(u->w); }
+    if (u->w) {
+        menu_close_owned(u->w);
+        u->w->menubar = NULL;
+        u->w->on_close = NULL; u->w->data = NULL; wm_destroy(u->w);
+    }
     u->w = NULL;
 }
 
@@ -207,30 +279,153 @@ typedef struct { uwin_t *u; int cw, ch; } resize_job_t;
 static void job_resize(void *a) {
     resize_job_t *j = a;
     window_t *w = j->u->w;
-    if (!w || !w->client || (w->client->w == j->cw && w->client->h == j->ch)) return;
-    wm_resize_client(w, j->cw, j->ch);
-    rect_t f = w->frame;
-    int nx = MAX(0, MIN(f.x, screen_w() - f.w)), ny = MAX(0, MIN(f.y, screen_h() - TASKBAR_H - f.h));
-    if (nx != f.x || ny != f.y) {
-        wm_invalidate_rect(mkrect(f.x, f.y, f.w + 8, f.h + 8));
-        w->frame.x = nx; w->frame.y = ny;
-        wm_invalidate_rect(mkrect(nx, ny, f.w + 8, f.h + 8));
-    }
+    if (!w || !w->client || (w->client->w == j->cw && w->client->h == j->ch + j->u->top)) return;
+    wm_resize_client(w, j->cw, j->ch + j->u->top);
+    keep_on_screen(w);
+}
+
+/* CTL_NOTIFY: Enter / double click report CMD_ACTIVATE (otherwise Enter presses the default button) */
+static void set_notify(widget_t *wd) {
+    if (wd->type == W_TEXTBOX || wd->type == W_LISTBOX) wd->on_activate = (wd->style & CTL_NOTIFY) ? uw_activate : NULL;
 }
 
 typedef struct { uwin_t *u; int type; rect_t r; char text[256]; int id, style; } ctl_job_t;
 static void job_ctl(void *a) {
     ctl_job_t *j = a;
-    if (!j->u->w) return;
-    static const int types[] = { 0, W_BUTTON, W_LABEL, W_TEXTBOX, W_CHECKBOX, W_LISTBOX, W_GROUP, W_PROGRESS };
+    window_t *w = j->u->w;
+    if (!w) return;
+    static const int types[] = { 0, W_BUTTON, W_LABEL, W_TEXTBOX, W_CHECKBOX, W_LISTBOX, W_GROUP, W_PROGRESS,
+                                 W_VSCROLL, W_HSCROLL, W_TOOLBUTTON, W_STATUSBAR };
     if (j->u->ncontrols >= MAX_CONTROLS || mm_heap_free() < GUI_RESERVE) return;
-    widget_t *wd = widget_add(j->u->w, types[j->type], j->r, j->text, j->id);
+    rect_t r = j->r;
+    r.y += j->u->top;
+    if (j->type == CTL_STATUSBAR) r.h = r.h > 0 ? CLAMP(r.h, 16, 48) : STATUS_H_DEFAULT;
+    widget_t *wd = widget_add(w, types[j->type], r, j->text, j->id);
     if (!wd) return;
     j->u->ncontrols++;
     wd->style |= (u32)j->style;
-    if (j->type == CTL_BUTTON) wd->on_click = uw_click;
+    if (j->type == CTL_BUTTON || j->type == CTL_TOOLBUTTON) wd->on_click = uw_click;
     if (j->type == CTL_CHECKBOX || j->type == CTL_LISTBOX) wd->on_change = uw_click;
-    if (j->type == CTL_TEXTBOX && !j->u->w->focus) j->u->w->focus = wd;
+    if (j->type == CTL_TEXTBOX && !w->focus) w->focus = wd;
+    if (j->type == CTL_VSCROLL || j->type == CTL_HSCROLL) { wd->on_scroll = uw_scroll; w->on_tick = uw_tick; }
+    if (j->type == CTL_STATUSBAR) dock(w);
+    set_notify(wd);
+}
+
+/* ---- menus ---- */
+
+static void umenu_free(umenu_t *m) { kfree(m); }
+
+/* copy a program's flat item array; bar: MENU_TITLE entries start menus */
+static long umenu_build(u64 uitems, u64 count, int bar, umenu_t **out) {
+    if (count == 0 || count > MENU_MAX_ITEMS) return E_INVAL;
+    if (mm_heap_free() < GUI_RESERVE + (64u << 10)) return E_NOMEM;
+    hal_menu_item_t *in = kmalloc(sizeof *in * count);
+    if (!in) return E_NOMEM;
+    if (copyin(in, uitems, sizeof *in * count)) { kfree(in); return E_INVAL; }
+    int nmenus = 0;
+    for (u64 i = 0; i < count; i++) if (in[i].flags & MENU_TITLE) nmenus++;
+    if (bar ? (nmenus > MENU_MAX_TITLES || !(in[0].flags & MENU_TITLE)) : nmenus != 0) { kfree(in); return E_INVAL; }
+    if (!bar) nmenus = 1;
+    int nitems = (int)count - (bar ? nmenus : 0);
+    u64 size = sizeof(umenu_t) + sizeof(menu_t) * (u64)nmenus + sizeof(menu_item_t) * (u64)(nitems + 1) +
+               (u64)count * (MENU_LABEL + MENU_SHORTCUT);
+    umenu_t *m = kzalloc(size);
+    if (!m) { kfree(in); return E_NOMEM; }
+    m->menus = (menu_t *)(m + 1);
+    m->items = (menu_item_t *)(m->menus + nmenus);
+    m->pool = (char *)(m->items + nitems + 1);
+    m->nmenus = nmenus; m->nitems = nitems;
+    char *pool = m->pool;
+    int mi = bar ? -1 : 0, ii = 0;
+    if (!bar) { m->menus[0].title = ""; m->menus[0].items = m->items; }
+    long r = 0;
+    for (u64 i = 0; i < count && !r; i++) {
+        hal_menu_item_t *it = &in[i];
+        char *label = pool;
+        pool += MENU_LABEL;
+        if (!(it->flags & MENU_SEPARATOR) && it->label && copyin_str(label, (u64)it->label, MENU_LABEL) == E_INVAL) r = E_INVAL;
+        if (it->flags & MENU_TITLE) {
+            mi++;
+            m->menus[mi].title = label;
+            m->menus[mi].items = m->items + ii;
+            m->menus[mi].count = 0;
+            pool += MENU_SHORTCUT;
+            continue;
+        }
+        menu_item_t *k = &m->items[ii++];
+        k->label = label;
+        k->id = it->id;
+        k->flags = (u32)it->flags & (MI_SEPARATOR | MI_DISABLED | MI_CHECKED | MI_BOLD);
+        k->icon = it->icon > 0 && it->icon < ICON_COUNT ? it->icon : 0;
+        if (it->shortcut && !(it->flags & MENU_SEPARATOR)) {
+            if (copyin_str(pool, (u64)it->shortcut, MENU_SHORTCUT) == E_INVAL) r = E_INVAL;
+            if (pool[0]) k->shortcut = pool;
+        }
+        pool += MENU_SHORTCUT;
+        m->menus[mi].count++;
+    }
+    kfree(in);
+    if (r) { kfree(m); return r; }
+    m->bar.menus = m->menus;
+    m->bar.count = nmenus;
+    m->bar.open = m->bar.hover = -1;
+    *out = m;
+    return 0;
+}
+
+typedef struct { uwin_t *u; umenu_t *m, *old; int x, y, ok; } menu_job_t;
+
+/* set, replace or remove (m NULL) the menu bar */
+static void job_menubar(void *a) {
+    menu_job_t *j = a;
+    uwin_t *u = j->u;
+    window_t *w = u->w;
+    if (!w || !w->client) return;
+    menu_close_owned(w);             /* an open menu may show the old items */
+    j->old = u->bar;
+    u->bar = j->m;
+    w->menubar = j->m ? &j->m->bar : NULL;
+    j->ok = 1;
+    int top = j->m ? MENUBAR_H : 0, d = top - u->top;
+    if (d) {
+        for (widget_t *wd = w->widgets; wd; wd = wd->next) wd->r.y += d;
+        u->top = top;
+        set_min(u);
+        /* grow or shrink the window so the canvas keeps its size (not when maximized) */
+        if (w->state == WS_NORMAL) {
+            wm_resize_client(w, w->client->w, w->client->h + d);
+            keep_on_screen(w);
+        }
+        uw_resize(w);
+    }
+    wm_invalidate(w);
+}
+
+static void job_popup(void *a) {
+    menu_job_t *j = a;
+    uwin_t *u = j->u;
+    window_t *w = u->w;
+    if (!w || wm_active() != w) return;          /* only over the window the user is working in */
+    rect_t c = wm_client_rect(w);
+    menu_popup(w, &j->m->menus[0], c.x + j->x, c.y + u->top + j->y);   /* closes the previous one */
+    j->old = u->pop;
+    u->pop = j->m;
+    j->ok = 1;
+}
+
+/* a modal or owned dialog: owner == NULL makes it free again */
+typedef struct { uwin_t *u, *owner; int modal, ok; } owner_job_t;
+static void job_owner(void *a) {
+    owner_job_t *j = a;
+    window_t *w = j->u->w, *o = j->owner ? j->owner->w : NULL;
+    if (!w || (j->owner && !o)) return;
+    /* no cycles: the owner chain must not lead back to w */
+    for (window_t *x = o; x; x = x->owner) if (x == w) return;
+    if (w->owner && wm_alive(w->owner) && w->owner->modal == w) w->owner->modal = NULL;
+    w->owner = o;
+    if (o && j->modal) o->modal = w;
+    j->ok = 1;
 }
 
 typedef struct { umb_t *mb; char title[96]; char text[1024]; int icon, buttons; } mb_job_t;
@@ -284,6 +479,8 @@ static void canvas_unmap(proc_t *p, uwin_t *u) {
 static void uwin_free(proc_t *p, uwin_t *u) {
     gui_call(job_destroy, u);
     canvas_unmap(p, u);
+    umenu_free(u->bar);
+    umenu_free(u->pop);
     ustate_t *s = p->gui;
     if (s) for (int i = 0; i < MAX_WINDOWS; i++) if (s->wins[i] == u) s->wins[i] = NULL;
     handle_free(p, u->handle);
@@ -341,16 +538,24 @@ static long get_event(proc_t *p, u64 uev, long timeout) {
     }
 }
 
-/* the user's canvas as a graphics context */
+/* the user's canvas as a graphics context, with the program's clip rectangle and origin */
 static int canvas_gc(proc_t *p, int h, gc_t *g, uwin_t **out) {
     uwin_t *u = uwin(p, h);
     if (!u || !u->canvas) return E_INVAL;
     *g = gc_for(u->canvas);
+    if (u->clip_on) {
+        g->clip = rect_intersect(g->clip, u->clip);
+        g->ox = u->ox; g->oy = u->oy;
+    }
     if (out) *out = u;
     return 0;
 }
 
+static rect_t unpack_rect(u64 geom) { return mkrect((i16)(geom >> 48), (i16)(geom >> 32), (i16)(geom >> 16), (i16)geom); }
+
 static color_t col(u64 c) { return HEX((u32)c & 0xFFFFFF); }
+
+static long usergui_syscall_more(proc_t *p, int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6);
 
 long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
     proc_t *p = proc_current();
@@ -507,14 +712,14 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
     }
 
     case SYS_CTL_CREATE: {
-        if (!(u = uwin(p, (int)a1)) || a2 < CTL_BUTTON || a2 > CTL_PROGRESS) return E_INVAL;
+        if (!(u = uwin(p, (int)a1)) || a2 < CTL_BUTTON || a2 > CTL_STATUSBAR) return E_INVAL;
         if (u->ncontrols >= MAX_CONTROLS) return E_NOMEM;
         ctl_job_t *j = kzalloc(sizeof *j);
         if (!j) return E_NOMEM;
         if (a4 && copyin_str(j->text, a4, sizeof j->text) == E_INVAL) { kfree(j); return E_INVAL; }
         j->u = u; j->type = (int)a2;
-        j->r = mkrect((i16)(a3 >> 48), (i16)(a3 >> 32), (i16)(a3 >> 16), (i16)a3);
-        j->id = (int)a5; j->style = (int)(a6 & 0xFF);
+        j->r = unpack_rect(a3);
+        j->id = (int)a5; j->style = (int)(a6 & 0x1FF);
         gui_call(job_ctl, j);
         kfree(j);
         wm_invalidate(u->w);
@@ -538,7 +743,8 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
     case SYS_CTL_SET_VALUE: {
         widget_t *wd;
         if (!(u = uwin(p, (int)a1)) || !(wd = widget_find(u->w, (int)a2))) return E_INVAL;
-        wd->value = (int)a3;
+        if (wd->type == W_VSCROLL || wd->type == W_HSCROLL) widget_scroll_set(u->w, wd, wd->total, wd->page, (int)a3, wd->line);
+        else wd->value = (int)a3;
         wm_invalidate(u->w);
         return 0;
     }
@@ -550,7 +756,8 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
     case SYS_CTL_SET_STYLE: {
         widget_t *wd;
         if (!(u = uwin(p, (int)a1)) || !(wd = widget_find(u->w, (int)a2))) return E_INVAL;
-        wd->style = (wd->style & ~0xFFu) | (u32)(a3 & 0xFF);
+        wd->style = (wd->style & ~0x1FFu) | (u32)(a3 & 0x1FF);
+        set_notify(wd);
         wm_invalidate(u->w);
         return 0;
     }
@@ -624,6 +831,16 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
         if (copyin_str(text, a1, sizeof text) == E_INVAL) return E_INVAL;
         clipboard_set(text, (int)strlen(text));
         return 0;
+    case SYS_CLIPBOARD_SET_N: {
+        if (a2 > MAX_CLIP) return E_INVAL;
+        if (mm_heap_free() < GUI_RESERVE + 2 * a2) return E_NOMEM;
+        char *buf = kmalloc(a2 + 1);
+        if (!buf) return E_NOMEM;
+        if (a2 && copyin(buf, a1, a2)) { kfree(buf); return E_INVAL; }
+        clipboard_set(buf, (int)a2);
+        kfree(buf);
+        return 0;
+    }
     case SYS_CLIPBOARD_GET: {
         int len = 0;
         const char *c = clipboard_get(&len);
@@ -633,6 +850,225 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
         char z = 0;
         if (copyout(a1 + n, &z, 1)) return E_INVAL;
         return (long)n;
+    }
+    }
+    return usergui_syscall_more(p, nr, a1, a2, a3, a4, a5, a6);
+}
+
+/* ---- menus, cursors, geometry, clipping, font metrics, theme, more controls ---- */
+
+_Static_assert(MENU_SEPARATOR == MI_SEPARATOR && MENU_DISABLED == MI_DISABLED && MENU_CHECKED == MI_CHECKED &&
+               MENU_BOLD == MI_BOLD && !(MENU_TITLE & (MI_SEPARATOR | MI_DISABLED | MI_CHECKED | MI_BOLD)), "menu flags");
+_Static_assert((int)CUR_ARROW == (int)CURSOR_ARROW && (int)CUR_IBEAM == (int)CURSOR_IBEAM && (int)CUR_WAIT == (int)CURSOR_BUSY &&
+               (int)CUR_SIZE_NWSE == (int)CURSOR_RESIZE_NWSE && (int)CUR_SIZE_WE == (int)CURSOR_RESIZE_H && (int)CUR_SIZE_NS == (int)CURSOR_RESIZE_V &&
+               (int)CUR_HAND == (int)CURSOR_HAND && (int)CUR_CROSS == (int)CURSOR_CROSS, "cursor shapes");
+_Static_assert((int)HICON_COUNT == (int)ICON_COUNT && (int)HICON_FOLDER == (int)ICON_FOLDER && (int)HICON_NOTEPAD == (int)ICON_NOTEPAD &&
+               (int)HICON_PAINT == (int)ICON_PAINT && (int)HICON_CALC == (int)ICON_CALC && (int)HICON_GAME == (int)ICON_GAME &&
+               (int)HICON_RECYCLE == (int)ICON_RECYCLE && (int)HICON_HELP == (int)ICON_HELP && (int)HICON_FILE_TEXT == (int)ICON_FILE_TEXT, "icon ids");
+_Static_assert((int)SCROLL_LINE_UP == (int)SBP_LINE_UP && (int)SCROLL_THUMB_TRACK == (int)SBP_THUMB_TRACK && (int)SCROLL_WHEEL == (int)SBP_WHEEL, "scroll parts");
+_Static_assert(CTL_NOTIFY > 0xFF && !(CTL_NOTIFY & (WS_DEFAULT | WS_CANCEL | WS_DISABLED | WS_HIDDEN | WS_PASSWORD | WS_BOLD |
+                                                  WS_READONLY | WS_WRAP)), "control styles");
+
+static int menu_set_flags(umenu_t *m, int id, u32 mask, u32 val) {
+    int n = 0;
+    for (int i = 0; m && i < m->nitems; i++) {
+        menu_item_t *it = &m->items[i];
+        if (it->id != id || (it->flags & MI_SEPARATOR)) continue;
+        it->flags = (it->flags & ~mask) | (val & mask);
+        n++;
+    }
+    return n;
+}
+
+static color_t shade_col(u64 c) { return HEX((u32)c & 0xFFFFFF); }
+
+static long usergui_syscall_more(proc_t *p, int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
+    uwin_t *u;
+    gc_t g;
+    switch (nr) {
+    case SYS_MENU_SET: {
+        /* items, count; count 0 removes the bar */
+        if (!(u = uwin(p, (int)a1))) return E_INVAL;
+        menu_job_t j = { u, NULL, NULL, 0, 0, 0 };
+        if (a3) {
+            long r = umenu_build(a2, a3, 1, &j.m);
+            if (r) return r;
+        }
+        gui_call(job_menubar, &j);
+        if (!j.ok) { umenu_free(j.m); return E_INVAL; }
+        umenu_free(j.old);
+        return 0;
+    }
+    case SYS_MENU_POPUP: {
+        /* items, count, client x, y; the choice arrives as EVT_MENU */
+        if (!(u = uwin(p, (int)a1))) return E_INVAL;
+        menu_job_t j = { u, NULL, NULL, (int)CLAMP((i64)(int)a4, -8192, 8192), (int)CLAMP((i64)(int)a5, -8192, 8192), 0 };
+        long r = umenu_build(a2, a3, 0, &j.m);
+        if (r) return r;
+        gui_call(job_popup, &j);
+        if (!j.ok) { umenu_free(j.m); return E_INVAL; }
+        umenu_free(j.old);
+        return 0;
+    }
+    case SYS_MENU_STATE: {
+        /* id, mask, flags (MENU_DISABLED, MENU_CHECKED, MENU_BOLD): items changed */
+        if (!(u = uwin(p, (int)a1))) return E_INVAL;
+        u32 mask = (u32)a3 & (MI_DISABLED | MI_CHECKED | MI_BOLD);
+        int n = menu_set_flags(u->bar, (int)a2, mask, (u32)a4) + menu_set_flags(u->pop, (int)a2, mask, (u32)a4);
+        if (n) menu_refresh();
+        return n;
+    }
+    case SYS_WIN_SET_CURSOR:
+        if (!(u = uwin(p, (int)a1)) || a2 > CUR_CROSS) return E_INVAL;
+        if (u->w->cursor != (int)a2) {
+            u->w->cursor = (int)a2;
+            wm_cursor_changed();
+        }
+        return 0;
+    case SYS_WIN_GET_RECT: {
+        /* the client area (below the menu bar) on screen; returns 0 normal, 1 minimized, 2 maximized */
+        if (!(u = uwin(p, (int)a1)) || !u->canvas) return E_INVAL;
+        rect_t c = wm_client_rect(u->w);
+        rect_t r = mkrect(c.x, c.y + u->top, u->canvas->w, u->canvas->h);
+        if (copyout(a2, &r, sizeof r)) return E_INVAL;
+        return u->w->state == WS_MINIMIZED ? 1 : u->w->state == WS_MAXIMIZED ? 2 : 0;
+    }
+    case SYS_WIN_SET_MIN_SIZE:
+        if (!(u = uwin(p, (int)a1))) return E_INVAL;
+        u->min_cw = (int)CLAMP((i64)a2, 0, 2048);
+        u->min_ch = (int)CLAMP((i64)a3, 0, 1536);
+        set_min(u);
+        return 0;
+    case SYS_WIN_SET_OWNER: {
+        /* owner window (or -1), modal: the owner takes no input while this window is open */
+        owner_job_t j = { uwin(p, (int)a1), NULL, (int)(a3 != 0), 0 };
+        if (!j.u) return E_INVAL;
+        if ((int)a2 >= 0 && (!(j.owner = uwin(p, (int)a2)) || j.owner == j.u)) return E_INVAL;
+        gui_call(job_owner, &j);
+        return j.ok ? 0 : E_INVAL;
+    }
+    case SYS_GFX_SET_CLIP: {
+        if (!(u = uwin(p, (int)a1))) return E_INVAL;
+        if (a6 & CLIP_RESET) { u->clip_on = 0; u->ox = u->oy = 0; return 0; }
+        int x = (int)CLAMP((i64)(int)a2, -8192, 8192), y = (int)CLAMP((i64)(int)a3, -8192, 8192);
+        int w = (int)CLAMP((i64)(int)a4, 0, 8192), h = (int)CLAMP((i64)(int)a5, 0, 8192);
+        u->clip = mkrect(x, y, w, h);
+        u->clip_on = 1;
+        if (a6 & CLIP_ORIGIN) { u->ox = x; u->oy = y; } else { u->ox = u->oy = 0; }
+        return 0;
+    }
+    case SYS_GFX_FONT_METRICS: {
+        /* font, first code point, count, u8 advances[count] (or NULL), hal_fontinfo_t * (or NULL) */
+        const font_t *f = font_of((int)a1);
+        if (a3 > FONT_METRICS_MAX || a2 > 0x10FFFF || a2 + a3 > 0x110000) return E_INVAL;
+        if (a5) {
+            hal_fontinfo_t fi = { f->height, f->ascent, f->descent, 0 };
+            if (copyout(a5, &fi, sizeof fi)) return E_INVAL;
+        }
+        if (a4 && a3) {
+            u8 adv[256];
+            for (u64 i = 0; i < a3; i += sizeof adv) {
+                u64 n = MIN(sizeof adv, a3 - i);
+                for (u64 k = 0; k < n; k++) adv[k] = (u8)MIN(gfx_char_width(f, (u32)(a2 + i + k)), 255);
+                if (copyout(a4 + i, adv, n)) return E_INVAL;
+            }
+        }
+        return 0;
+    }
+    case SYS_GFX_TEXT_N: {
+        /* x, y, text, bytes, color | font << 24: text that need not end in NUL; returns end x */
+        char buf[2048];
+        if (canvas_gc(p, (int)a1, &g, NULL) || a5 > sizeof buf) return E_INVAL;
+        if (a5 && copyin(buf, a4, a5)) return E_INVAL;
+        return gfx_text_n(&g, font_of((int)((a6 >> 24) & 0xFF)), (int)CLAMP((i64)(int)a2, -8192, 8192),
+                          (int)CLAMP((i64)(int)a3, -8192, 8192), buf, (int)a5, col(a6));
+    }
+    case SYS_GFX_SHADE: {
+        /* geometry (packed as SYS_CTL_CREATE), c1, c2, kind, param */
+        if (canvas_gc(p, (int)a1, &g, NULL)) return E_INVAL;
+        rect_t r = unpack_rect(a2);
+        int param = (int)a6;
+        int rad = CLAMP(param & 0xFF, 0, 32), corners = (param >> 8) & 15;
+        if (!corners) corners = 15;
+        switch ((int)a5) {
+        case SHADE_GRADIENT_V: gfx_gradient_v(&g, r, shade_col(a3), shade_col(a4)); return 0;
+        case SHADE_GRADIENT_H: gfx_gradient_h(&g, r, shade_col(a3), shade_col(a4)); return 0;
+        case SHADE_ROUNDED: gfx_rounded(&g, r, rad, corners, shade_col(a3), shade_col(a4)); return 0;
+        case SHADE_ROUNDED_OUTLINE: gfx_rounded_outline(&g, r, rad, corners, shade_col(a3)); return 0;
+        case SHADE_SUNKEN: gfx_sunken_field(&g, r, shade_col(a3)); return 0;
+        case SHADE_FOCUS: gfx_focus_rect(&g, r); return 0;
+        case SHADE_SHADOW: gfx_shadow(&g, r, CLAMP(param & 0xFF, 1, 16), CLAMP((param >> 8) & 0xFF, 0, 255)); return 0;
+        case SHADE_ICON_TINTED: case SHADE_ICON_ALPHA: {
+            int id = (int)(a4 & 0xFFFF), sz = (int)((a4 >> 16) & 0xFF);
+            if (id < 0 || id >= ICON_COUNT) return E_INVAL;
+            const icon_t *ic = sz == 1 ? &icons16[id] : sz == 2 ? &icons48[id] : &icons32[id];
+            if ((int)a5 == SHADE_ICON_TINTED) gfx_icon_tinted(&g, r.x, r.y, ic, shade_col(a3), CLAMP(param, 0, 255));
+            else gfx_icon_alpha(&g, r.x, r.y, ic, CLAMP(param, 0, 255));
+            return 0;
+        }
+        }
+        return E_INVAL;
+    }
+    case SYS_GFX_THEME: {
+        const theme_t *t = g_theme;
+        hal_theme_t ht = {
+            t->title_top, t->title_mid, t->title_bottom, t->title_in_top, t->title_in_bottom,
+            t->frame, t->frame_in, t->title_text, t->title_in_text, t->face,
+            t->taskbar_top, t->taskbar_bottom, t->taskbar_line, t->start_top, t->start_bottom,
+            t->select, t->select_text, t->sidebar_top, t->sidebar_bottom,
+            t->menu_header_top, t->menu_header_bottom, t->button_border, t->hover, theme_index() };
+        for (unsigned *c = &ht.title_top; c <= &ht.hover; c++) *c &= 0xFFFFFF;
+        return copyout(a1, &ht, sizeof ht) ? E_INVAL : 0;
+    }
+    case SYS_CTL_MOVE: {
+        /* id, geometry (packed as SYS_CTL_CREATE); status bars stay docked */
+        widget_t *wd;
+        if (!(u = uwin(p, (int)a1)) || !(wd = widget_find(u->w, (int)a2))) return E_INVAL;
+        if (wd->type != W_STATUSBAR) {
+            rect_t r = unpack_rect(a3);
+            r.y += u->top;
+            wd->r = r;
+        }
+        wm_invalidate(u->w);
+        return 0;
+    }
+    case SYS_CTL_FOCUS: {
+        /* id: the control that gets the keyboard, 0 = the program's own drawing; -1 only asks.
+         * Returns the id that had the focus (0 = none) */
+        widget_t *wd = NULL;
+        if (!(u = uwin(p, (int)a1))) return E_INVAL;
+        int old = u->w->focus ? u->w->focus->id : 0;
+        if ((int)a2 == -1) return old;
+        if ((int)a2 != 0) {
+            wd = widget_find(u->w, (int)a2);
+            if (!wd || (wd->style & (WS_DISABLED | WS_HIDDEN)) ||
+                !(wd->type == W_BUTTON || wd->type == W_TEXTBOX || wd->type == W_CHECKBOX || wd->type == W_LISTBOX)) return E_INVAL;
+        }
+        u->w->focus = wd;
+        if (wd && wd->type == W_TEXTBOX) { wd->sel_anchor = 0; wd->cursor = (int)strlen(wd->text); }   /* as Tab: all selected */
+        wm_invalidate(u->w);
+        return old;
+    }
+    case SYS_CTL_SCROLL_SET: {
+        /* id, total, page, position, line step */
+        widget_t *wd;
+        if (!(u = uwin(p, (int)a1)) || !(wd = widget_find(u->w, (int)a2)) || (wd->type != W_VSCROLL && wd->type != W_HSCROLL)) return E_INVAL;
+        widget_scroll_set(u->w, wd, (int)CLAMP((i64)a3, 0, 1 << 30), (int)CLAMP((i64)a4, 0, 1 << 30),
+                          (int)CLAMP((i64)a5, 0, 1 << 30), (int)CLAMP((i64)a6, 1, 1 << 30));
+        return 0;
+    }
+    case SYS_CTL_SET_TOOL: {
+        /* id, icon (HICON_*, -1 none), tooltip (NULL none; any control) */
+        widget_t *wd;
+        char tip[sizeof wd->tip];
+        if (!(u = uwin(p, (int)a1)) || !(wd = widget_find(u->w, (int)a2)) || (i64)a3 < -1 || (i64)a3 >= ICON_COUNT) return E_INVAL;
+        tip[0] = 0;
+        if (a4 && copyin_str(tip, a4, sizeof tip) == E_INVAL) return E_INVAL;
+        wd->icon = (int)a3;
+        memcpy(wd->tip, tip, sizeof tip);
+        if (tip[0]) u->w->on_tick = uw_tick;
+        wm_invalidate(u->w);
+        return 0;
     }
     }
     return E_NOTSUP;

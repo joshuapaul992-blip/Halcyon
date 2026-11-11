@@ -45,7 +45,8 @@ typedef struct gui_event {
 typedef struct window window_t;
 typedef struct widget widget_t;
 
-enum { W_BUTTON = 1, W_LABEL, W_TEXTBOX, W_CHECKBOX, W_LISTBOX, W_GROUP, W_PROGRESS, W_ICON, W_COMBO };
+enum { W_BUTTON = 1, W_LABEL, W_TEXTBOX, W_CHECKBOX, W_LISTBOX, W_GROUP, W_PROGRESS, W_ICON, W_COMBO,
+       W_VSCROLL, W_HSCROLL, W_TOOLBUTTON, W_STATUSBAR };
 
 #define WS_DEFAULT  0x01      /* default button (Enter) */
 #define WS_CANCEL   0x02      /* cancel button (Esc) */
@@ -62,7 +63,8 @@ struct widget {
     u32 style;
     int id;
     char text[1024];          /* labels can hold a message box's text */
-    int value;                /* checkbox state, listbox selection, progress 0..1000, icon index */
+    int value;                /* checkbox state, listbox selection, progress 0..1000, icon index,
+                                 scroll bar position, tool button checked, status bar part width */
     /* textbox */
     int cursor, sel_anchor, scroll;
     /* listbox */
@@ -72,6 +74,11 @@ struct widget {
     void (*on_click)(window_t *w, widget_t *wd);
     void (*on_change)(window_t *w, widget_t *wd);
     void (*on_activate)(window_t *w, widget_t *wd);   /* listbox double click / Enter in textbox */
+    /* scroll bars: position range 0..total-page, arrows move by line */
+    int total, page, line;
+    void (*on_scroll)(window_t *w, widget_t *wd, int part);   /* SBP_*, after value changed */
+    int icon;                 /* tool button: 16x16 icon or -1 */
+    char tip[96];             /* tooltip shown when the pointer rests on the widget */
     widget_t *next;
 };
 
@@ -141,6 +148,7 @@ void wm_resize_client(window_t *w, int cw, int ch);
 int  wm_mouse_x(void);
 int  wm_mouse_y(void);
 void wm_set_busy(int busy);            /* hourglass cursor */
+void wm_cursor_changed(void);          /* a window's cursor shape changed: redraw the pointer */
 
 /* main loop */
 void gui_main(void);
@@ -165,6 +173,11 @@ void draw_scrollbar(gc_t *g, rect_t r, int total, int visible, int pos, int vert
 /* scrollbar hit test helper: returns new position for a click/drag at (x,y) */
 int  scrollbar_hit(rect_t r, int total, int visible, int pos, int x, int y, int vertical, int *part);
 void draw_group(gc_t *g, rect_t r, const char *title);
+/* scroll bar parts reported to on_scroll */
+enum { SBP_LINE_UP = 1, SBP_LINE_DOWN, SBP_PAGE_UP, SBP_PAGE_DOWN, SBP_THUMB_TRACK, SBP_THUMB_END, SBP_WHEEL };
+void widget_scroll_set(window_t *w, widget_t *wd, int total, int page, int pos, int line);
+void widgets_tick(window_t *w);        /* tooltips and scroll bar auto-repeat; call from on_tick */
+void widget_gone(widget_t *wd);        /* a widget is being freed */
 
 /* menus */
 #define MI_SEPARATOR 0x01
@@ -183,6 +196,11 @@ void menubar_attach(window_t *w, menu_t *menus, int count);   /* adds MENUBAR_H 
 int  menubar_height(window_t *w);
 void menubar_paint(window_t *w, gc_t *g);
 int  menubar_event(window_t *w, gui_event_t *e);
+void menubar_open(window_t *w, int index, int keyboard);   /* open one menu of the bar (keyboard: first item selected) */
+void menu_close_owned(window_t *w);    /* close popups that belong to w (before its menus are freed) */
+void menu_refresh(void);               /* repaint open popups (item flags changed) */
+/* Labels may mark a mnemonic with '&' ("&File": Alt+F; "&&" is a literal '&') */
+int  menu_label_width(const font_t *f, const char *label);
 
 /* dialogs (modal, run a nested loop) */
 enum { MB_OK = 1, MB_OKCANCEL, MB_YESNO, MB_YESNOCANCEL };
