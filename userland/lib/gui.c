@@ -14,6 +14,8 @@ void win_size(int win, int *w, int *h) {
     if (h) *h = (int)(r & 0xFFFF);
 }
 void win_set_timer(int win, int ms) { SC2(SYS_WIN_SET_TIMER, win, ms); }
+void win_resize(int win, int w, int h) { SC3(SYS_WIN_RESIZE, win, w, h); }
+void win_set_icon(int win, int icon) { SC2(SYS_WIN_SET_ICON, win, icon); }
 
 void gfx_fill(int win, int x, int y, int w, int h, unsigned c) { SC6(SYS_GFX_FILL, win, x, y, w, h, c); }
 void gfx_rect(int win, int x, int y, int w, int h, unsigned c) { SC6(SYS_GFX_RECT, win, x, y, w, h, c); }

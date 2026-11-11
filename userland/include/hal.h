@@ -126,6 +126,8 @@ void win_invalidate(int win);                                    /* repaint the 
 int  win_get_event(hal_event_t *ev, int timeout_ms);
 void win_size(int win, int *w, int *h);
 void win_set_timer(int win, int ms);                             /* EVT_TIMER every ms (0 = off) */
+void win_resize(int win, int w, int h);                          /* new client size; EVT_RESIZE + EVT_PAINT follow */
+void win_set_icon(int win, int icon);                            /* title bar / taskbar icon (as gfx_icon) */
 
 void gfx_fill(int win, int x, int y, int w, int h, unsigned color);
 void gfx_rect(int win, int x, int y, int w, int h, unsigned color);

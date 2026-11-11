@@ -18,6 +18,7 @@ enum {
     /* windows and drawing (user32 / GDI style) */
     SYS_WIN_CREATE = 40, SYS_WIN_DESTROY, SYS_WIN_SET_TITLE, SYS_WIN_INVALIDATE, SYS_WIN_GET_EVENT,
     SYS_WIN_SIZE, SYS_WIN_SET_TIMER, SYS_WIN_SHOW,
+    SYS_WIN_RESIZE, SYS_WIN_SET_ICON,     /* client size (kept on screen); title bar / taskbar icon */
     SYS_GFX_FILL = 60, SYS_GFX_RECT, SYS_GFX_LINE, SYS_GFX_TEXT, SYS_GFX_TEXT_WIDTH, SYS_GFX_BLIT,
     SYS_GFX_ICON, SYS_GFX_BEVEL, SYS_GFX_CIRCLE, SYS_GFX_FONT_HEIGHT,
     SYS_CTL_CREATE = 80, SYS_CTL_SET_TEXT, SYS_CTL_GET_TEXT, SYS_CTL_SET_VALUE, SYS_CTL_GET_VALUE,
@@ -59,7 +60,8 @@ typedef struct hal_sysinfo {
 
 /* window events (SYS_WIN_GET_EVENT) */
 enum { EVT_NONE = 0, EVT_PAINT, EVT_CLOSE, EVT_KEY, EVT_MOUSE_DOWN, EVT_MOUSE_UP, EVT_MOUSE_MOVE, EVT_DBLCLICK,
-       EVT_WHEEL, EVT_COMMAND, EVT_TIMER, EVT_RESIZE, EVT_FOCUS };
+       EVT_WHEEL, EVT_COMMAND, EVT_TIMER, EVT_RESIZE, EVT_FOCUS,
+       EVT_MOUSE_LEAVE };            /* the pointer left the window (clear hover highlights) */
 typedef struct hal_event {
     int type;
     int win;                     /* window handle */

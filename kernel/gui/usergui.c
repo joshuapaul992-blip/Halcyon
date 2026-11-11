@@ -96,6 +96,7 @@ static void uw_event(window_t *w, gui_event_t *e) {
     case GE_WHEEL: ev.type = EVT_WHEEL; break;
     case GE_FOCUS: ev.type = EVT_FOCUS; ev.pressed = 1; break;
     case GE_BLUR: ev.type = EVT_FOCUS; ev.pressed = 0; break;
+    case GE_MOUSE_LEAVE: ev.type = EVT_MOUSE_LEAVE; break;
     case GE_KEY:
         ev.type = EVT_KEY;
         ev.id = e->key.key;
@@ -192,6 +193,22 @@ static void job_destroy(void *a) {
     uwin_t *u = a;
     if (u->w) { u->w->on_close = NULL; u->w->data = NULL; wm_destroy(u->w); }
     u->w = NULL;
+}
+
+/* new client size; keep the window on screen (like Sonar's level change) */
+typedef struct { uwin_t *u; int cw, ch; } resize_job_t;
+static void job_resize(void *a) {
+    resize_job_t *j = a;
+    window_t *w = j->u->w;
+    if (!w || !w->client || (w->client->w == j->cw && w->client->h == j->ch)) return;
+    wm_resize_client(w, j->cw, j->ch);
+    rect_t f = w->frame;
+    int nx = MAX(0, MIN(f.x, screen_w() - f.w)), ny = MAX(0, MIN(f.y, screen_h() - TASKBAR_H - f.h));
+    if (nx != f.x || ny != f.y) {
+        wm_invalidate_rect(mkrect(f.x, f.y, f.w + 8, f.h + 8));
+        w->frame.x = nx; w->frame.y = ny;
+        wm_invalidate_rect(mkrect(nx, ny, f.w + 8, f.h + 8));
+    }
 }
 
 typedef struct { uwin_t *u; int type; rect_t r; char text[256]; int id, style; } ctl_job_t;
@@ -383,6 +400,18 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
     case SYS_WIN_SHOW:
         if (!(u = uwin(p, (int)a1))) return E_INVAL;
         wm_show(u->w);
+        return 0;
+    case SYS_WIN_RESIZE: {
+        if (!(u = uwin(p, (int)a1))) return E_INVAL;
+        resize_job_t j = { u, (int)CLAMP((i64)a2, 32, 2048), (int)CLAMP((i64)a3, 16, 1536) };
+        gui_call(job_resize, &j);
+        return 0;
+    }
+    case SYS_WIN_SET_ICON:
+        if (!(u = uwin(p, (int)a1)) || (i64)a2 < 0 || (i64)a2 >= ICON_COUNT) return E_INVAL;
+        u->w->icon = (int)a2;
+        wm_invalidate_rect(mkrect(u->w->frame.x, u->w->frame.y, u->w->frame.w, TITLE_H));
+        taskbar_invalidate();
         return 0;
 
     case SYS_GFX_FILL: if (canvas_gc(p, (int)a1, &g, NULL)) return E_INVAL; gfx_fill(&g, mkrect((int)a2, (int)a3, (int)a4, (int)a5), col(a6)); return 0;
