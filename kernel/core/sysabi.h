@@ -12,9 +12,15 @@ enum {
     /* processes */
     SYS_EXIT = 0, SYS_SPAWN, SYS_WAIT, SYS_GETPID, SYS_YIELD, SYS_SLEEP, SYS_TIME, SYS_SBRK,
     SYS_GETCWD, SYS_CHDIR, SYS_KILL, SYS_PROCLIST, SYS_SYSINFO,
+    /* threads */
+    SYS_THREAD_CREATE = 13, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_FUTEX_WAIT, SYS_FUTEX_WAKE,
+    SYS_SET_TLS, SYS_GETTID,
     /* files */
     SYS_OPEN = 20, SYS_CLOSE, SYS_READ, SYS_WRITE, SYS_SEEK, SYS_FSIZE, SYS_TRUNCATE,
     SYS_STAT, SYS_READDIR, SYS_MKDIR, SYS_UNLINK, SYS_RENAME, SYS_VOLUMES,
+    /* shell and shared memory */
+    SYS_SHELL_OPEN = 33, SYS_SHELL_FORMAT, SYS_EJECT, SYS_SHM_OPEN, SYS_SHM_MAP, SYS_SHM_UNMAP,
+    SYS_THREAD_DETACH,
     /* windows and drawing (user32 / GDI style) */
     SYS_WIN_CREATE = 40, SYS_WIN_DESTROY, SYS_WIN_SET_TITLE, SYS_WIN_INVALIDATE, SYS_WIN_GET_EVENT,
     SYS_WIN_SIZE, SYS_WIN_SET_TIMER, SYS_WIN_SHOW,
@@ -27,12 +33,25 @@ enum {
     /* M9 number ranges (each owned by one part of the kernel):
      *   13-19   threads and futexes (core/proc.c, core/syscall.c)
      *   33-39   shell and shared memory (core/syscall.c)
-     *   48      SYS_WIN_CANVAS: the window's pixels mapped into the program
-     *   49-59, 70-79, 87-89, 94-99, 140-159   more window / drawing / control /
-     *           menu calls (gui/usergui.c)
-     *   100-139 sockets and poll (net/) */
-    SYS_COUNT = 160
+     *   50-59, 70-79, 87-89, 94-99, 140-159   more window / drawing / control /
+     *           menu calls (gui/usergui.c; 48 and 49 are SYS_WIN_RESIZE and
+     *           SYS_WIN_SET_ICON)
+     *   100-139 sockets and poll (net/)
+     *   160     SYS_WIN_CANVAS: the window's pixels mapped into the program */
+    SYS_WIN_CANVAS = 160,
+    SYS_COUNT = 170
 };
+
+/* SYS_SHM_OPEN flags */
+#define SHM_CREATE 0x01
+#define SHM_EXCL   0x02
+
+/* SYS_WIN_CANVAS: the window's pixels, mapped into the program (0x00RRGGBB,
+ * stride in pixels). Valid until the next EVT_RESIZE: call it again then. */
+typedef struct hal_canvas {
+    unsigned int *pixels;
+    int w, h, stride;
+} hal_canvas_t;
 
 /* SYS_OPEN flags */
 #define O_READ   0x01

@@ -9,6 +9,8 @@
 #include "proc.h"
 #include "sysabi.h"
 #include "fs/vfs.h"
+#include "fs/block.h"
+#include "gui/wm.h"
 
 struct sysframe {
     u64 r15, r14, r13, r12, rbp, rbx, r9, r8, r10, rdx, rsi, rdi, rax, rip, rflags, rsp;
@@ -205,6 +207,61 @@ static long sys_readdir(proc_t *p, u64 upath, u64 ubuf, int max) {
     return out < 0 ? out : (max ? out : n);
 }
 
+/* ending another program: its ancestors may; anyone else only if the user
+ * says so in a kernel dialog (Task Manager's End Process asks that way) */
+static long sys_kill(proc_t *p, u32 pid) {
+    proc_t *t = proc_by_pid(pid);
+    if (!t || t->state != P_RUNNING) return E_NOENT;
+    if (pid == p->pid || proc_is_ancestor(p->pid, pid)) return proc_kill(pid, "ended by another program");
+    char msg[400];
+    snprintf(msg, sizeof msg,
+             "%s (process %u) wants to end %s (process %u).\n\n"
+             "If you allow it, any unsaved information in %s will be lost. Do you want to end %s?",
+             p->name, p->pid, t->name, pid, t->name, t->name);
+    int a = gui_ask_permission(p, "End Program", msg);
+    if (a < 0) return a;
+    if (!a) return E_PERM;
+    char why[80];
+    snprintf(why, sizeof why, "ended by %s, with your permission", p->name);
+    return proc_kill(pid, why);
+}
+
+typedef struct { char path[VFS_MAX_PATH]; } open_job_t;
+static void job_open(void *a) { shell_open(((open_job_t *)a)->path); kfree(a); }
+static long sys_shell_open(proc_t *p, u64 upath) {
+    open_job_t *j = kmalloc(sizeof *j);
+    if (!j) return E_NOMEM;
+    int r = user_path(p, upath, j->path);
+    if (r) { kfree(j); return r; }
+    vfs_dirent_t st;
+    if ((r = vfs_stat(j->path, &st)) != 0) { kfree(j); return r; }
+    gui_post(job_open, j);              /* does not wait: the program keeps running */
+    return 0;
+}
+
+static volatile int format_open;
+static void job_format(void *a) {
+    format_dialog(NULL, (char)(uptr)a);
+    format_open = 0;
+}
+static long sys_shell_format(u64 letter) {
+    char c = (char)toupper((int)(letter & 0x7F));
+    volume_t *v = vfs_volume_by_letter(c);
+    if (!v || !v->bd) return E_NOENT;
+    if (format_open) return E_BUSY;     /* one at a time; the user answers it */
+    format_open = 1;
+    gui_post(job_format, (void *)(uptr)c);
+    return 0;
+}
+
+int ahci_cd_eject(blockdev_t *bd) __attribute__((weak));   /* drivers/ahci.c */
+static long sys_eject(u64 letter) {
+    volume_t *v = vfs_volume_by_letter((char)toupper((int)(letter & 0x7F)));
+    if (!v || !v->bd) return E_NOENT;
+    if (!ahci_cd_eject) return E_NOTSUP;
+    return ahci_cd_eject(v->bd);
+}
+
 static long sys_volumes(u64 ubuf, int max) {
     /* "C:FAT32:HALCYON\n..." */
     char buf[1024];
@@ -261,12 +318,29 @@ void syscall_dispatch(struct sysframe *f) {
         if (!r) strlcpy(p->cwd, path, sizeof p->cwd);
         break;
     }
-    case SYS_KILL: r = proc_kill((u32)a1, "ended by another program"); break;
+    case SYS_KILL: r = sys_kill(p, (u32)a1); break;
+    case SYS_THREAD_CREATE: r = uthread_create(p, a1, a2); break;
+    case SYS_THREAD_EXIT: uthread_exit((int)a1);
+    case SYS_THREAD_JOIN: r = uthread_join(p, (u32)a1); break;
+    case SYS_THREAD_DETACH: r = uthread_detach(p, (u32)a1); break;
+    case SYS_FUTEX_WAIT:
+        r = futex_wait(p, a1, (u32)a2, (i64)a3 < 0 ? ~0ull : time_ms_to_tsc(time_ms() + MIN(a3, 86400000ull)));
+        break;
+    case SYS_FUTEX_WAKE: r = futex_wake(p, a1, (int)MIN(a2, 0x7FFFFFFFull)); break;
+    case SYS_SET_TLS: uthread_set_tls(a1); r = 0; break;
+    case SYS_GETTID: r = thread_current()->utid; break;
+    case SYS_SHM_OPEN: r = shm_open(p, a1, a2, a3); break;
+    case SYS_SHM_MAP: r = shm_map(p, (int)a1, a2); break;
+    case SYS_SHM_UNMAP: r = shm_unmap(p, a1); break;
+    case SYS_SHELL_OPEN: r = sys_shell_open(p, a1); break;
+    case SYS_SHELL_FORMAT: r = sys_shell_format(a1); break;
+    case SYS_EJECT: r = sys_eject(a1); break;
     case SYS_PROCLIST: r = sys_proclist(a1, (int)MIN(a2, 256)); break;
     case SYS_SYSINFO: r = sys_sysinfo(a1); break;
 
     case SYS_OPEN: r = sys_open(p, a1, (int)a2); break;
     case SYS_CLOSE: {
+        if (handle_get(p, (int)a1, H_SHM)) { r = shm_close(p, (int)a1); break; }
         if (handle_get(p, (int)a1, H_SOCKET)) { r = socket_handle_close ? socket_handle_close(p, (int)a1) : E_INVAL; break; }
         vfs_file_t *fl = handle_get(p, (int)a1, H_FILE);
         if (!fl) { r = E_INVAL; break; }

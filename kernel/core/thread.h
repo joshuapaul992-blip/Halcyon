@@ -29,6 +29,8 @@ struct thread {
     void (*fn)(void *);
     void *arg;
     void *proc;                 /* user process (milestone 4b), NULL for kernel threads */
+    u64 fs_base;                /* user threads: FS segment base (thread-local storage) */
+    u32 utid;                   /* user threads: thread id within the process */
     u64 cpu_tsc;                /* time spent running */
     u64 run_start;
     thread_t *next;             /* all threads */

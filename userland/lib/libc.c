@@ -141,7 +141,10 @@ void *sbrk(long incr) {
     return r < 0 ? (void *)-1 : (void *)r;
 }
 
-void *malloc(size_t n) {
+/* one lock for the heap: programs can have several threads */
+static hal_mutex_t heap_lock;
+
+static void *malloc_locked(size_t n) {
     if (!n) n = 1;
     n = (n + 15) & ~(size_t)15;
     blk_t *last = 0;
@@ -166,10 +169,10 @@ void *malloc(size_t n) {
     b->free = 1;
     b->next = 0;
     if (last) last->next = b; else heap_head = b;
-    return malloc(n);
+    return malloc_locked(n);
 }
 
-void free(void *p) {
+static void free_locked(void *p) {
     if (!p) return;
     blk_t *b = (blk_t *)p - 1;
     b->free = 1;
@@ -178,6 +181,20 @@ void free(void *p) {
         b->size += sizeof(blk_t) + b->next->size;
         b->next = b->next->next;
     }
+}
+
+void *malloc(size_t n) {
+    if (n > ((size_t)1 << 40)) return 0;
+    mutex_lock(&heap_lock);
+    void *p = malloc_locked(n);
+    mutex_unlock(&heap_lock);
+    return p;
+}
+
+void free(void *p) {
+    mutex_lock(&heap_lock);
+    free_locked(p);
+    mutex_unlock(&heap_lock);
 }
 
 void *calloc(size_t n, size_t m) {
@@ -190,12 +207,15 @@ void *calloc(size_t n, size_t m) {
 
 void *realloc(void *p, size_t n) {
     if (!p) return malloc(n);
+    mutex_lock(&heap_lock);
     blk_t *b = (blk_t *)p - 1;
-    if (b->size >= n) return p;
-    void *q = malloc(n);
-    if (!q) return 0;
-    memcpy(q, p, b->size);
-    free(p);
+    if (b->size >= n) { mutex_unlock(&heap_lock); return p; }
+    void *q = malloc_locked(n);
+    if (q) {
+        memcpy(q, p, b->size);
+        free_locked(p);
+    }
+    mutex_unlock(&heap_lock);
     return q;
 }
 

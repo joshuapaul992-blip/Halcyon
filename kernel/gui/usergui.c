@@ -33,6 +33,8 @@ typedef struct uwin {
     int timer_ms;
     u64 next_timer;
     u64 close_asked;        /* EVT_CLOSE sent at (ms), to spot a program that ignores it */
+    surface_t *mapped;      /* the canvas mapped into the program (SYS_WIN_CANVAS), maybe an old one */
+    u64 map_va;
     int ncontrols;
 } uwin_t;
 
@@ -148,12 +150,16 @@ static void uw_resize(window_t *w) {
     ustate_t *s = u->p->gui;
     u64 oldpx = u->canvas ? (u64)u->canvas->w * u->canvas->h : 0, newpx = (u64)w->client->w * w->client->h;
     if (s->pixels - oldpx + newpx > MAX_PIXELS || mm_heap_free() < GUI_RESERVE + newpx * 4) return;
-    surface_t *n = surface_new(w->client->w, w->client->h);
+    surface_t *n = surface_new_paged(w->client->w, w->client->h);
     if (!n) return;
     s->pixels = s->pixels - oldpx + newpx;
     gc_t g = gc_for(n);
     gfx_fill(&g, mkrect(0, 0, n->w, n->h), g_theme->face);
-    if (u->canvas) { gfx_blit(&g, 0, 0, u->canvas, mkrect(0, 0, u->canvas->w, u->canvas->h)); surface_free(u->canvas); }
+    if (u->canvas) {
+        gfx_blit(&g, 0, 0, u->canvas, mkrect(0, 0, u->canvas->w, u->canvas->h));
+        /* still mapped into the program: freed when it maps the new one */
+        if (u->canvas != u->mapped) surface_free(u->canvas);
+    }
     u->canvas = n;
     hal_event_t ev = { 0 };
     ev.win = u->handle;
@@ -267,8 +273,17 @@ static uwin_t *uwin(proc_t *p, int h) {
     return u && u->w ? u : NULL;
 }
 
+/* drop the program's view of the canvas (and an old canvas kept for it) */
+static void canvas_unmap(proc_t *p, uwin_t *u) {
+    if (u->map_va) vm_unmap_shared(p, u->map_va);
+    if (u->mapped && u->mapped != u->canvas) surface_free(u->mapped);
+    u->mapped = NULL;
+    u->map_va = 0;
+}
+
 static void uwin_free(proc_t *p, uwin_t *u) {
     gui_call(job_destroy, u);
+    canvas_unmap(p, u);
     ustate_t *s = p->gui;
     if (s) for (int i = 0; i < MAX_WINDOWS; i++) if (s->wins[i] == u) s->wins[i] = NULL;
     handle_free(p, u->handle);
@@ -356,7 +371,7 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
         if (!j || !u || copyin_str(j->title, a1, sizeof j->title) == E_INVAL) { kfree(j); kfree(u); return E_INVAL; }
         if (s->pixels + (u64)cw * ch > MAX_PIXELS || mm_heap_free() < GUI_RESERVE + (u64)cw * ch * 8) { kfree(j); kfree(u); return E_NOMEM; }
         u->p = p;
-        u->canvas = surface_new(cw, ch);
+        u->canvas = surface_new_paged(cw, ch);
         if (!u->canvas) { kfree(j); kfree(u); return E_NOMEM; }
         gc_t cg = gc_for(u->canvas);
         gfx_fill(&cg, mkrect(0, 0, cw, ch), g_theme->face);
@@ -389,6 +404,21 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
         wm_invalidate(u->w);
         return 0;
     case SYS_WIN_GET_EVENT: return get_event(p, a1, (long)a2);
+    case SYS_WIN_CANVAS: {
+        /* map the canvas into the program; drawing calls and direct pixel
+         * writes then go to the same memory */
+        if (!(u = uwin(p, (int)a1)) || !u->canvas || !user_writable(a2, sizeof(hal_canvas_t))) return E_INVAL;
+        if (u->mapped != u->canvas || !u->map_va) {
+            canvas_unmap(p, u);
+            u64 size = ((u64)u->canvas->w * u->canvas->h * 4 + 4095) & ~4095ull;
+            u64 va = vm_map_shared(p, u->canvas->px, size, 1);
+            if (!va) return E_NOMEM;
+            u->mapped = u->canvas;
+            u->map_va = va;
+        }
+        hal_canvas_t c = { (unsigned int *)(uptr)u->map_va, u->canvas->w, u->canvas->h, u->canvas->stride };
+        return copyout(a2, &c, sizeof c) ? E_INVAL : 0;
+    }
     case SYS_WIN_SIZE:
         if (!(u = uwin(p, (int)a1)) || !u->canvas) return E_INVAL;
         return ((long)u->canvas->w << 16) | u->canvas->h;

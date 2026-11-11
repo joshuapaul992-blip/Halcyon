@@ -15,6 +15,8 @@ __attribute__((noinline)) static int recurse(int n) {
     return recurse(n + 1) + pad[0];
 }
 
+static int crash_thread(void *arg) { (void)arg; volatile int *p = 0; return *p; }
+
 static void fail(const char *how) {
     if (!strcmp(how, "null")) { volatile int *p = 0; sink = *p; }
     else if (!strcmp(how, "kernel")) { volatile unsigned long *p = (unsigned long *)0x100000; *p = 0; }   /* the kernel's code */
@@ -22,6 +24,11 @@ static void fail(const char *how) {
     else if (!strcmp(how, "opcode")) __asm__ volatile("ud2");
     else if (!strcmp(how, "privileged")) __asm__ volatile("cli; hlt");
     else if (!strcmp(how, "stack")) sink = recurse(0);
+    else if (!strcmp(how, "threadcrash")) {
+        int t = thread_create(crash_thread, 0);
+        if (t > 0) thread_join(t);
+        sink = 2;
+    }
     else if (!strcmp(how, "msgbox")) {
         /* waits in a message box nobody answers (the self test ends it) */
         msgbox(-1, "CRASHME", "Waiting for an answer that never comes.", MBX_ICON_INFO, MBX_OK);

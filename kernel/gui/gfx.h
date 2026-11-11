@@ -24,6 +24,7 @@ typedef struct surface {
 } surface_t;
 
 surface_t *surface_new(int w, int h);
+surface_t *surface_new_paged(int w, int h);   /* page-aligned pixels (mappable) */
 void surface_free(surface_t *s);
 
 /* drawing context: target surface + origin offset + clip (in surface coords) */

@@ -235,6 +235,9 @@ void keyboard_menu(int x, int y);      /* the taskbar layout indicator's menu */
 void shutdown_dialog(void);
 /* open a file with the right application, by extension */
 void shell_open(const char *path);
+int  format_dialog(window_t *owner, char letter);   /* apps/format.c; 1 if formatted */
+struct proc;
+int  gui_ask_permission(struct proc *asker, const char *title, const char *text);   /* permit.c */
 int  shell_run(const char *path, const char *args);   /* start a user program; pid or error (reported) */
 
 #endif

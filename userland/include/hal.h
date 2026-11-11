@@ -50,12 +50,51 @@ static inline int getpid(void) { return (int)SC0(SYS_GETPID); }
 static inline void yield(void) { SC0(SYS_YIELD); }
 static inline void sleep_ms(unsigned ms) { SC1(SYS_SLEEP, ms); }
 static inline uint64_t time_ms(void) { return (uint64_t)SC0(SYS_TIME); }
+/* end a program: its ancestors may; for any other, the user is asked (E_PERM if refused) */
 static inline int kill(int pid) { return (int)SC1(SYS_KILL, pid); }
 static inline int getcwd(char *buf, size_t n) { return (int)SC2(SYS_GETCWD, buf, n); }
 static inline int chdir(const char *p) { return (int)SC1(SYS_CHDIR, p); }
 static inline int proclist(hal_procinfo_t *buf, int max) { return (int)SC2(SYS_PROCLIST, buf, max); }
 static inline int sysinfo(hal_sysinfo_t *si) { return (int)SC1(SYS_SYSINFO, si); }
 void *sbrk(long incr);
+
+/* ---- threads (several per program; each has its own 1 MiB stack) ---- */
+#define E_TIMEOUT -9
+#define E_AGAIN   -12
+typedef struct { volatile int v; } hal_mutex_t;    /* zero-initialised = unlocked */
+typedef struct { volatile int seq; } hal_cond_t;   /* zero-initialised */
+/* start fn(arg) in a new thread; returns its id (> 0) or an error. fn's return
+ * value is the thread's exit code (thread_join). At most 31 extra threads. */
+int  thread_create(int (*fn)(void *), void *arg);
+__attribute__((noreturn)) void thread_exit(int code);   /* this thread only; exit() ends the program */
+static inline int thread_join(int tid) { return (int)SC1(SYS_THREAD_JOIN, tid); }      /* its exit code */
+static inline int thread_detach(int tid) { return (int)SC1(SYS_THREAD_DETACH, tid); }  /* no join needed */
+static inline int gettid(void) { return (int)SC0(SYS_GETTID); }                         /* main thread: 1 */
+static inline int set_tls(void *base) { return (int)SC1(SYS_SET_TLS, base); }          /* this thread's FS base */
+/* futexes: wait while *addr == expected (timeout_ms < 0: no timeout; 0, E_AGAIN,
+ * E_TIMEOUT), wake up to n waiters (returns how many) */
+static inline int futex_wait(volatile int *addr, int expected, int timeout_ms) {
+    return (int)SC3(SYS_FUTEX_WAIT, addr, expected, (long)timeout_ms);
+}
+static inline int futex_wake(volatile int *addr, int n) { return (int)SC2(SYS_FUTEX_WAKE, addr, n); }
+void mutex_lock(hal_mutex_t *m);
+int  mutex_trylock(hal_mutex_t *m);                  /* 1 if locked */
+void mutex_unlock(hal_mutex_t *m);
+void cond_wait(hal_cond_t *c, hal_mutex_t *m);
+int  cond_wait_ms(hal_cond_t *c, hal_mutex_t *m, int timeout_ms);   /* 0 or E_TIMEOUT */
+void cond_signal(hal_cond_t *c);
+void cond_broadcast(hal_cond_t *c);
+
+/* ---- shared memory between programs: a name ("halcyon.demo": letters, digits,
+ * . - _) opened by several programs maps the same pages ---- */
+static inline int shm_open(const char *name, size_t size, int flags) { return (int)SC3(SYS_SHM_OPEN, name, size, flags); }
+void *shm_map(int h, size_t *size);                  /* NULL on error; close() the handle when done */
+static inline int shm_unmap(void *p) { return (int)SC1(SYS_SHM_UNMAP, p); }
+
+/* ---- the shell ---- */
+static inline int shell_open(const char *path) { return (int)SC1(SYS_SHELL_OPEN, path); }   /* like a double click */
+static inline int shell_format(char drive) { return (int)SC1(SYS_SHELL_FORMAT, drive); }    /* the user decides in it */
+static inline int eject(char drive) { return (int)SC1(SYS_EJECT, drive); }                  /* CD/DVD drives */
 
 /* ---- files (fd 0/1/2: console) ---- */
 static inline int open(const char *p, int flags) { return (int)SC2(SYS_OPEN, p, flags); }
@@ -127,6 +166,10 @@ void win_invalidate(int win);                                    /* repaint the 
 int  win_get_event(hal_event_t *ev, int timeout_ms);
 void win_size(int win, int *w, int *h);
 void win_set_timer(int win, int ms);                             /* EVT_TIMER every ms (0 = off) */
+/* the client area's pixels mapped into the program: write 0x00RRGGBB at
+ * c->pixels[y * c->stride + x], then win_invalidate(). Call again after each
+ * EVT_RESIZE (the old mapping then shows nothing); 0 or an error. */
+static inline int win_canvas(int win, hal_canvas_t *c) { return (int)SC2(SYS_WIN_CANVAS, win, c); }
 void win_resize(int win, int w, int h);                          /* new client size; EVT_RESIZE + EVT_PAINT follow */
 void win_set_icon(int win, int icon);                            /* title bar / taskbar icon (as gfx_icon) */
 

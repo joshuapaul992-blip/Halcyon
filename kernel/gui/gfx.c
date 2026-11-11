@@ -29,6 +29,15 @@ surface_t *surface_new(int w, int h) {
     if (!s->px) { kfree(s); return NULL; }
     return s;
 }
+/* pixels in whole, page-aligned pages: can be mapped into a program */
+surface_t *surface_new_paged(int w, int h) {
+    surface_t *s = kzalloc(sizeof *s);
+    if (!s) return NULL;
+    s->w = w; s->h = h; s->stride = w;
+    s->px = kmalloc_aligned(((size_t)w * h * 4 + 4095) & ~(size_t)4095, 4096);
+    if (!s->px) { kfree(s); return NULL; }
+    return s;
+}
 void surface_free(surface_t *s) {
     if (!s) return;
     kfree(s->px);

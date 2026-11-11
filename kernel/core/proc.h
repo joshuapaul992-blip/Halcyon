@@ -14,6 +14,16 @@ struct regs;
 #define USER_MAX_PAGES  (256 * 1024)            /* 1 GiB per process */
 #define PROC_HANDLES    64
 #define MAX_PROCS       64                      /* running programs */
+/* threads: slot 0 is the main thread; slot i's stack is the 1 MiB below
+ * USER_STACK_TOP - i * THREAD_SLOT (the rest of the slot stays unmapped as a
+ * guard) */
+#define MAX_UTHREADS    32
+#define THREAD_SLOT     (4ull << 20)
+#define UTHREAD_STACK   (1024 * 1024)
+/* shared mappings (window canvases, shared memory): 256 slots of 64 MiB */
+#define MAP_BASE        0x0000600000000000ull
+#define MAP_SLOT        (64ull << 20)
+#define MAP_SLOTS       256
 
 enum { H_NONE = 0, H_FILE, H_WINDOW, H_DIR, H_SOCKET, H_SHM };
 
@@ -27,6 +37,18 @@ typedef struct console_ops {
 } console_ops_t;
 
 enum { P_RUNNING = 1, P_ZOMBIE };
+
+typedef struct uthread {
+    thread_t *t;                    /* NULL once ended */
+    u32 tid;                        /* 0 = free slot */
+    int done, code, detached;
+} uthread_t;
+
+typedef struct fwait {              /* a thread waiting in SYS_FUTEX_WAIT */
+    u64 addr;
+    volatile int woken;
+    struct fwait *next;
+} fwait_t;
 
 typedef struct proc {
     u32 pid;
@@ -44,6 +66,12 @@ typedef struct proc {
     u64 image_base, entry;
     int nthreads;
     thread_t *main;                 /* NULL once it has ended */
+    uthread_t uthreads[MAX_UTHREADS];
+    u32 next_tid;
+    fwait_t *futexq;
+    u64 map_used[MAP_SLOTS / 64];   /* shared mapping slots in use */
+    u32 map_pages[MAP_SLOTS];
+    u32 confirm_pending;            /* a permission question is on screen */
     u64 cpu_tsc;                    /* CPU time of threads that have ended */
     handle_t handles[PROC_HANDLES];
     void *gui;                      /* window system state (gui/usergui.c) */
@@ -77,6 +105,29 @@ int  vm_grow(proc_t *p, u64 va, u64 len);
 /* a wait in a system call: like thread_wait, but returns E_CANCELED as soon
  * as the process is being ended */
 int  proc_wait(wait_cond_t cond, void *arg, u64 deadline_tsc);
+
+/* threads (SYS_THREAD_*): returns the thread id or E_* */
+int  uthread_create(proc_t *p, u64 rip, u64 arg);
+NORETURN void uthread_exit(int code);
+int  uthread_join(proc_t *p, u32 tid);
+int  uthread_detach(proc_t *p, u32 tid);
+int  futex_wait(proc_t *p, u64 addr, u32 expected, u64 deadline_tsc);
+int  futex_wake(proc_t *p, u64 addr, int n);
+void uthread_set_tls(u64 base);
+
+/* map already allocated kernel memory (page aligned, size a multiple of 4 KiB)
+ * into the process: returns the user address or 0. The pages stay owned by
+ * the caller: unmap before freeing them. */
+u64  vm_map_shared(proc_t *p, void *mem, u64 size, int writable);
+int  vm_unmap_shared(proc_t *p, u64 va);
+int  proc_is_ancestor(u32 ancestor, u32 pid);
+
+/* named shared memory (shm.c) */
+long shm_open(proc_t *p, u64 uname, u64 size, u64 flags);
+long shm_map(proc_t *p, int h, u64 usize);
+long shm_unmap(proc_t *p, u64 va);
+int  shm_close(proc_t *p, int h);
+void shm_release_all(proc_t *p);
 
 /* handles */
 int  handle_alloc(proc_t *p, int type, void *obj);

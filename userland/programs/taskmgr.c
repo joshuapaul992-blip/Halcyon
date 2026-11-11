@@ -106,13 +106,10 @@ int main(int argc, char **argv) {
             if (pid == 0) { msgbox(win, "Task Manager", "The System process is the Halcyon kernel and cannot be ended.", MBX_ICON_WARNING, MBX_OK); continue; }
             if (pid < 0) continue;
             if (pid == getpid()) break;
-            char msg[160];
-            snprintf(msg, sizeof msg, "WARNING: Ending a process can cause loss of unsaved data.\n\nEnd process %d?", pid);
-            if (msgbox(win, "Task Manager Warning", msg, MBX_ICON_WARNING, MBX_YESNO) == IDR_YES) {
-                int r = kill(pid);
-                if (r < 0) msgbox(win, "Unable to Terminate Process", hal_strerror(r), MBX_ICON_ERROR, MBX_OK);
-                tick();
-            }
+            /* Halcyon itself asks the user before a program ends another one */
+            int r = kill(pid);
+            if (r < 0 && r != E_PERM) msgbox(win, "Unable to Terminate Process", hal_strerror(r), MBX_ICON_ERROR, MBX_OK);
+            tick();
         }
     }
     return 0;

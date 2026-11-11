@@ -6,6 +6,46 @@
 static int checks, failed;
 #define CHECK(c, ...) do { checks++; if (!(c)) { failed++; printf("selftest: FAIL line %d: ", __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
+/* ---- threads ---- */
+static hal_mutex_t lock;
+static hal_cond_t cv;
+static volatile int counter, ready, consumed;
+
+static int adder(void *arg) {
+    int n = (int)(long)arg;
+    for (int i = 0; i < n; i++) {
+        mutex_lock(&lock);
+        int v = counter;
+        if ((i & 63) == 0) yield();          /* force interleaving inside the lock */
+        counter = v + 1;
+        mutex_unlock(&lock);
+    }
+    return 100 + gettid();
+}
+
+static int producer(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 50; i++) {
+        mutex_lock(&lock);
+        while (ready) cond_wait(&cv, &lock);
+        ready = i + 1;
+        cond_broadcast(&cv);
+        mutex_unlock(&lock);
+    }
+    return 0;
+}
+
+static int tls_check(void *arg) {
+    long slot[2] = { 0x1234567L + (long)arg, 0 };
+    set_tls(slot);
+    sleep_ms(20);                           /* other threads run and set their own */
+    long v;
+    __asm__ volatile("mov %%fs:0, %0" : "=r"(v));
+    return v == 0x1234567L + (long)arg;
+}
+
+static int sleeper(void *arg) { (void)arg; sleep_ms(100000); return 0; }
+
 static int run(const char *args) {
     int pid = spawn("C:/PROGRAMS/CRASHME.EXE", args);
     if (pid < 0) return 9999;
@@ -13,6 +53,20 @@ static int run(const char *args) {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 2 && !strcmp(argv[1], "shm")) {
+        /* child: check what the parent wrote, answer through the same memory */
+        int h = shm_open(argv[2], 0, 0);
+        size_t sz = 0;
+        unsigned *m = h >= 0 ? shm_map(h, &sz) : 0;
+        if (!m || m[0] != 0xC0FFEEu) return 1;
+        m[1] = 0xBEEFu;
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "threadexit")) {
+        /* the main thread exits while another one sleeps: the program ends */
+        thread_create(sleeper, 0);
+        exit(42);
+    }
     printf("selftest: starting (pid %d)\n", getpid());
 
     /* files */
@@ -82,6 +136,64 @@ int main(int argc, char **argv) {
     CHECK(kill(loop) == 0, "kill");
     CHECK(wait(loop) == -1, "killed exit code");
 
+    /* threads: a contended mutex, join codes, condition variables, TLS, limits */
+    counter = 0;
+    int tids[8];
+    for (int i = 0; i < 8; i++) tids[i] = thread_create(adder, (void *)2000L);
+    int joined = 1;
+    for (int i = 0; i < 8; i++) joined &= tids[i] > 1 && thread_join(tids[i]) == 100 + tids[i];
+    CHECK(joined, "8 threads joined with their exit codes");
+    CHECK(counter == 16000, "mutex: counter %d (expected 16000)", counter);
+    ready = 0; consumed = 0;
+    int pt = thread_create(producer, 0);
+    for (int i = 0; i < 50; i++) {
+        mutex_lock(&lock);
+        while (!ready) cond_wait(&cv, &lock);
+        consumed += ready;
+        ready = 0;
+        cond_broadcast(&cv);
+        mutex_unlock(&lock);
+    }
+    CHECK(thread_join(pt) == 0 && consumed == 50 * 51 / 2, "condition variable hand-over: %d", consumed);
+    int t1 = thread_create(tls_check, (void *)1L), t2 = thread_create(tls_check, (void *)2L);
+    CHECK(thread_join(t1) == 1 && thread_join(t2) == 1, "thread-local storage (FS base) per thread");
+    volatile int fw = 7;
+    uint64_t f0 = time_ms();
+    CHECK(futex_wait(&fw, 7, 50) == E_TIMEOUT && time_ms() - f0 >= 50, "futex timeout");
+    CHECK(futex_wait(&fw, 8, 50) == E_AGAIN, "futex value changed");
+    int many[40], nmany = 0, lastr = 0;
+    for (int i = 0; i < 40; i++) {
+        lastr = thread_create(sleeper, 0);
+        if (lastr < 0) break;
+        many[nmany++] = lastr;
+    }
+    CHECK(nmany == 31 && lastr == E_BUSY, "thread limit: %d threads, then %d", nmany, lastr);
+    for (int i = 0; i < nmany; i++) thread_detach(many[i]);
+    CHECK(thread_join(gettid()) == E_INVAL && thread_join(9999) == E_INVAL, "bad joins rejected");
+    int te = spawn("C:/PROGRAMS/SELFTEST.EXE", "threadexit");
+    CHECK(te > 0 && wait(te) == 42, "exit() from main ends the other threads too");
+    CHECK(run("threadcrash") == -1014, "a crash in a second thread ends the program");
+
+    /* shared memory between two programs */
+    char shname[32];
+    snprintf(shname, sizeof shname, "selftest.%d", getpid());
+    int sh = shm_open(shname, 10000, SHM_CREATE | SHM_EXCL);
+    size_t shsz = 0;
+    unsigned *shm = sh >= 0 ? shm_map(sh, &shsz) : 0;
+    CHECK(shm && shsz == 12288, "shared memory: %d, %lu bytes", sh, (unsigned long)shsz);
+    if (shm) {
+        shm[0] = 0xC0FFEEu;
+        char a[48];
+        snprintf(a, sizeof a, "shm %s", shname);
+        int c = spawn("C:/PROGRAMS/SELFTEST.EXE", a);
+        CHECK(c > 0 && wait(c) == 0 && shm[1] == 0xBEEFu, "another program sees and writes the same memory");
+        CHECK(shm_open(shname, 100, SHM_CREATE | SHM_EXCL) == E_EXIST, "exclusive create of an existing name");
+        CHECK(shm_open("bad name!", 100, SHM_CREATE) == E_INVAL, "bad shared memory name");
+        CHECK(shm_unmap(shm) == 0 && shm_unmap(shm) == E_INVAL, "unmap once");
+        close(sh);
+    }
+    CHECK(shm_open("selftest.none", 0, 0) == E_NOENT, "missing shared memory");
+
     hal_procinfo_t pl[32];
     int np = proclist(pl, 32);
     int me = 0;
@@ -97,6 +209,15 @@ int main(int argc, char **argv) {
         CHECK(gfx_text(w, 4, 4, "Self test", RGB(255, 255, 255), FONT_UI) > 4, "text");
         win_invalidate(w);
         CHECK(win_get_event(&ev, 50) == 0, "timeout with no events");
+        hal_canvas_t cv2;
+        CHECK(win_canvas(w, &cv2) == 0 && cv2.pixels && cv2.w == 200 && cv2.h == 100 && cv2.stride >= 200, "canvas mapped");
+        if (cv2.pixels) {
+            CHECK((cv2.pixels[50 * cv2.stride + 100] & 0xFFFFFF) == 0x008000, "drawing calls visible in the mapping");
+            cv2.pixels[10 * cv2.stride + 10] = 0x123456;
+            gfx_line(w, 0, 99, 199, 99, RGB(255, 0, 0));
+            CHECK((cv2.pixels[99 * cv2.stride + 5] & 0xFFFFFF) == 0xFF0000 && cv2.pixels[10 * cv2.stride + 10] == 0x123456,
+                  "direct writes and drawing calls share the pixels");
+        }
         win_set_timer(w, 30);
         CHECK(win_get_event(&ev, 1000) == 1 && ev.type == EVT_TIMER, "timer event");
         /* drawing with absurd coordinates costs bounded time */

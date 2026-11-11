@@ -84,7 +84,7 @@ endif
 UCFLAGS := -std=gnu11 -O2 -g0 -ffreestanding -fno-builtin -fPIE -fno-stack-protector -fno-asynchronous-unwind-tables \
            -Wall -Wextra -Wno-unused-parameter -Iuserland/include
 ULDFLAGS := -static-pie -nostdlib -Wl,--no-dynamic-linker -Wl,-z,noexecstack -Wl,--build-id=none
-ULIB := $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/gui.o
+ULIB := $(BUILD)/user/crt0.o $(patsubst userland/lib/%.c,$(BUILD)/user/%.o,$(wildcard userland/lib/*.c))
 UPROGS := $(patsubst userland/programs/%.c,$(BUILD)/user/%.exe,$(wildcard userland/programs/*.c))
 
 $(BUILD)/user/crt0.o: userland/lib/crt0.S

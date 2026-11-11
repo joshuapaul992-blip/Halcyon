@@ -12,6 +12,7 @@
 #define PTE_RW  0x002ull
 #define PTE_US  0x004ull
 #define PTE_NX  (1ull << 63)
+#define PTE_SHARED (1ull << 9)   /* available bit: the frame is not the process's own (shared mapping) */
 #define PTE_ADDR 0x000FFFFFFFFFF000ull
 #define VM_W 1
 #define VM_X 2
@@ -43,7 +44,8 @@ int proc_alive(u32 pid) { proc_t *p = proc_by_pid(pid); return p && p->state == 
 int proc_exit_code(u32 pid) { proc_t *p = proc_by_pid(pid); return p ? p->exit_code : E_NOENT; }
 u64 proc_cpu_ms(proc_t *p) {
     u64 t = p->cpu_tsc;
-    if (p->main) t += p->main->cpu_tsc + (p->main == thread_current() ? rdtsc() - p->main->run_start : 0);
+    for (thread_t *x = thread_first(); x; x = x->next)
+        if (x->proc == p && x->state != T_DEAD) t += x->cpu_tsc + (x == thread_current() ? rdtsc() - x->run_start : 0);
     return t / tsc_khz();
 }
 
@@ -172,7 +174,7 @@ static void vm_destroy(proc_t *p) {
                 if (!(l2[i2] & PTE_P)) continue;
                 u64 *l1 = (u64 *)(uptr)(l2[i2] & PTE_ADDR);
                 for (int i1 = 0; i1 < 512; i1++)
-                    if (l1[i1] & PTE_P) page_free((void *)(uptr)(l1[i1] & PTE_ADDR));
+                    if ((l1[i1] & PTE_P) && !(l1[i1] & PTE_SHARED)) page_free((void *)(uptr)(l1[i1] & PTE_ADDR));
                 page_free(l1);
             }
             page_free(l2);
@@ -182,6 +184,48 @@ static void vm_destroy(proc_t *p) {
     page_free(p->pml4);
     p->pml4 = NULL;
     p->pages = 0;
+}
+
+/* unmap [va, va+len): the process's own frames go back to the pool */
+static void vm_free_range(proc_t *p, u64 va, u64 len) {
+    int live = 0;
+    u64 cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    live = (u64 *)(uptr)(cr3 & PTE_ADDR) == p->pml4;
+    for (u64 a = va & ~0xFFFull; a < va + len; a += 4096) {
+        u64 *pte = walk(p, a, 0);
+        if (!pte || !(*pte & PTE_P)) continue;
+        if (!(*pte & PTE_SHARED)) { page_free((void *)(uptr)(*pte & PTE_ADDR)); p->pages--; }
+        *pte = 0;
+        if (live) __asm__ volatile("invlpg (%0)" :: "r"(a) : "memory");
+    }
+}
+
+u64 vm_map_shared(proc_t *p, void *mem, u64 size, int writable) {
+    if (!p || !p->pml4 || !mem || ((uptr)mem & 0xFFF) || !size || (size & 0xFFF) || size > MAP_SLOT) return 0;
+    int slot = -1;
+    for (int i = 0; i < MAP_SLOTS && slot < 0; i++) if (!(p->map_used[i / 64] & (1ull << (i % 64)))) slot = i;
+    if (slot < 0) return 0;
+    u64 va = MAP_BASE + (u64)slot * MAP_SLOT;
+    u64 flags = PTE_P | PTE_US | PTE_SHARED | (writable ? PTE_RW : 0) | nx_bit;
+    for (u64 o = 0; o < size; o += 4096) {
+        u64 *pte = walk(p, va + o, 1);
+        if (!pte) { vm_free_range(p, va, o); return 0; }
+        *pte = ((u64)(uptr)mem + o) | flags;
+    }
+    p->map_used[slot / 64] |= 1ull << (slot % 64);
+    p->map_pages[slot] = (u32)(size / 4096);
+    return va;
+}
+
+int vm_unmap_shared(proc_t *p, u64 va) {
+    if (!p || !p->pml4 || va < MAP_BASE || (va - MAP_BASE) % MAP_SLOT) return E_INVAL;
+    u64 slot = (va - MAP_BASE) / MAP_SLOT;
+    if (slot >= MAP_SLOTS || !(p->map_used[slot / 64] & (1ull << (slot % 64)))) return E_INVAL;
+    vm_free_range(p, va, (u64)p->map_pages[slot] * 4096);
+    p->map_used[slot / 64] &= ~(1ull << (slot % 64));
+    p->map_pages[slot] = 0;
+    return 0;
 }
 
 static u64 *cr3_now(void) { u64 v; __asm__ volatile("mov %%cr3, %0" : "=r"(v)); return (u64 *)(uptr)(v & PTE_ADDR); }
@@ -195,6 +239,7 @@ static void switch_hook(thread_t *n) {
         u64 *k = mm_kernel_pml4();
         for (int i = 0; i < 512; i++) if (i < PML4_USER_FIRST || i > PML4_USER_LAST) p->pml4[i] = k[i];
         cr3_load(p->pml4);
+        wrmsr(0xC0000100, n->fs_base);             /* FS base: the thread's TLS */
         slice_end = rdtsc() + 10 * tsc_khz();
         irq_timeslice(10);
     } else {
@@ -427,8 +472,12 @@ int proc_spawn(const char *path, const char *args, const console_ops_t *con, voi
     }
     st->p = p; st->sp = sp; st->argp = argp;
     t->proc = p;
+    t->utid = 1;
     p->main = t;
     p->nthreads = 1;
+    p->uthreads[0].t = t;
+    p->uthreads[0].tid = 1;
+    p->next_tid = 2;
     if (con && con->attach) con->attach(con_ctx, p->pid);
     p->state = P_RUNNING;
     p->next = procs;
@@ -445,6 +494,7 @@ void proc_detach_console(void *ctx) {
 static void proc_finish(proc_t *p) {
     if (proc_release_hook) proc_release_hook(p);
     if (socket_release_all) socket_release_all(p);
+    shm_release_all(p);
     for (int i = 0; i < PROC_HANDLES; i++) {
         if (p->handles[i].type == H_FILE) vfs_close(p->handles[i].obj);
         else if (p->handles[i].type == H_DIR) kfree(p->handles[i].obj);
@@ -462,17 +512,142 @@ static void proc_finish(proc_t *p) {
     proc_reap();
 }
 
-NORETURN void proc_exit(int code) {
-    proc_t *p = proc_current();
-    if (!p) panic("proc_exit outside a process");
-    if (!p->killed) p->exit_code = code;
-    p->killed = 1;
+static uthread_t *uthread_of(proc_t *p, thread_t *t, int *slot) {
+    for (int i = 0; i < MAX_UTHREADS; i++)
+        if (p->uthreads[i].tid && p->uthreads[i].t == t) { if (slot) *slot = i; return &p->uthreads[i]; }
+    return NULL;
+}
+
+/* the current thread of p ends; the last one ends the process */
+static NORETURN void end_thread(proc_t *p, int code) {
     thread_t *t = thread_current();
+    int slot = -1;
+    uthread_t *u = uthread_of(p, t, &slot);
+    if (u) {
+        if (slot > 0) vm_free_range(p, USER_STACK_TOP - (u64)slot * THREAD_SLOT - UTHREAD_STACK, UTHREAD_STACK);
+        u->t = NULL;
+        u->done = 1;
+        u->code = code;
+        if (u->detached) u->tid = 0;
+    }
     p->cpu_tsc += t->cpu_tsc + (rdtsc() - t->run_start);
     if (p->main == t) p->main = NULL;   /* the thread is freed after it ends */
     if (--p->nthreads == 0) proc_finish(p);
     t->proc = NULL;                     /* this thread now only finishes in the kernel */
     thread_exit();
+}
+
+/* the whole process ends (SYS_EXIT, a fault, being ended): this thread now,
+ * the others at their next return to user mode or blocking wait */
+NORETURN void proc_exit(int code) {
+    proc_t *p = proc_current();
+    if (!p) panic("proc_exit outside a process");
+    if (!p->killed) p->exit_code = code;
+    p->killed = 1;
+    end_thread(p, code);
+}
+
+/* ---------------- threads ---------------- */
+typedef struct ustart { proc_t *p; u64 rip, sp, arg; } ustart_t;
+
+static void uthread_main(void *a) {
+    ustart_t st = *(ustart_t *)a;
+    kfree(a);
+    user_enter(st.rip, st.sp, st.arg);
+}
+
+int uthread_create(proc_t *p, u64 rip, u64 arg) {
+    if (p->killed) return E_CANCELED;
+    if (rip < USER_BASE || rip >= USER_END) return E_INVAL;
+    int slot = -1;
+    for (int i = 1; i < MAX_UTHREADS && slot < 0; i++) if (!p->uthreads[i].tid) slot = i;
+    if (slot < 0) return E_BUSY;
+    u64 top = USER_STACK_TOP - (u64)slot * THREAD_SLOT;
+    int r = vm_alloc(p, top - UTHREAD_STACK, UTHREAD_STACK, VM_W);
+    if (r) { vm_free_range(p, top - UTHREAD_STACK, UTHREAD_STACK); return r; }
+    ustart_t *st = kmalloc(sizeof *st);
+    thread_t *t = st ? thread_create(p->name, uthread_main, st) : NULL;
+    if (!t) { kfree(st); vm_free_range(p, top - UTHREAD_STACK, UTHREAD_STACK); return E_NOMEM; }
+    st->p = p; st->rip = rip; st->sp = top - 8; st->arg = arg;
+    uthread_t *u = &p->uthreads[slot];
+    memset(u, 0, sizeof *u);
+    u->t = t;
+    u->tid = p->next_tid++;
+    t->proc = p;                        /* before it first runs: it starts in p's address space */
+    t->utid = u->tid;
+    t->fs_base = 0;
+    p->nthreads++;
+    return (int)u->tid;
+}
+
+NORETURN void uthread_exit(int code) {
+    proc_t *p = proc_current();
+    if (!p) panic("uthread_exit outside a process");
+    end_thread(p, code);
+}
+
+static uthread_t *uthread_by_tid(proc_t *p, u32 tid) {
+    for (int i = 0; i < MAX_UTHREADS; i++) if (tid && p->uthreads[i].tid == tid) return &p->uthreads[i];
+    return NULL;
+}
+
+static int uthread_done(void *a) { return ((uthread_t *)a)->done; }
+
+int uthread_join(proc_t *p, u32 tid) {
+    uthread_t *u = uthread_by_tid(p, tid);
+    if (!u || u->detached || u->t == thread_current()) return E_INVAL;
+    int r = proc_wait(uthread_done, u, ~0ull);
+    if (r < 0) return r;
+    int code = u->code;
+    u->tid = 0;                          /* the slot is free again */
+    return code;
+}
+
+int uthread_detach(proc_t *p, u32 tid) {
+    uthread_t *u = uthread_by_tid(p, tid);
+    if (!u || u->detached) return E_INVAL;
+    if (u->done) u->tid = 0;
+    else u->detached = 1;
+    return 0;
+}
+
+void uthread_set_tls(u64 base) {
+    thread_t *t = thread_current();
+    t->fs_base = base;
+    wrmsr(0xC0000100, base);
+}
+
+/* futexes: wait while the 32-bit word at addr still holds expected */
+static int fwait_woken(void *a) { return ((fwait_t *)a)->woken; }
+
+int futex_wait(proc_t *p, u64 addr, u32 expected, u64 deadline_tsc) {
+    u32 v;
+    if (addr & 3) return E_INVAL;
+    if (copyin(&v, addr, 4)) return E_INVAL;
+    if (v != expected) return E_AGAIN;
+    fwait_t w = { addr, 0, p->futexq };
+    p->futexq = &w;
+    int r = proc_wait(fwait_woken, &w, deadline_tsc);
+    for (fwait_t **pp = &p->futexq; *pp; pp = &(*pp)->next) if (*pp == &w) { *pp = w.next; break; }
+    if (w.woken) return 0;
+    return r < 0 ? r : E_TIMEOUT;
+}
+
+int futex_wake(proc_t *p, u64 addr, int n) {
+    int woke = 0;
+    for (fwait_t *w = p->futexq; w && woke < n; w = w->next)
+        if (w->addr == addr && !w->woken) { w->woken = 1; woke++; }
+    return woke;
+}
+
+int proc_is_ancestor(u32 ancestor, u32 pid) {
+    for (int depth = 0; depth < MAX_PROCS + 8; depth++) {
+        proc_t *q = proc_by_pid(pid);
+        if (!q || !q->parent) return 0;
+        if (q->parent == ancestor) return 1;
+        pid = q->parent;
+    }
+    return 0;
 }
 
 int proc_kill(u32 pid, const char *why) {
