@@ -522,7 +522,7 @@ static long get_event(proc_t *p, u64 uev, long timeout) {
             s->qt = (s->qt + 1) % QLEN;
             if (ev.type == EVT_CLOSE) {
                 uwin_t *u = uwin(p, ev.win);
-                if (u) u->close_asked = time_ms();
+                if (u) u->close_asked = 0;      /* the program has it: it may decline */
             }
             return copyout(uev, &ev, sizeof ev) ? E_INVAL : 1;
         }

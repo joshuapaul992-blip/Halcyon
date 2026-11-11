@@ -394,7 +394,7 @@ static void ex_menu(window_t *w, int id) {
     ex_t *x = w->data;
     switch (id) {
     case CMD_OPEN: open_item(x, x->sel); break;
-    case CMD_OPEN_NOTEPAD: if (x->sel >= 0 && !x->items[x->sel].is_dir) { char p[VFS_MAX_PATH]; item_path(x, x->sel, p, sizeof p); app_notepad(p); } break;
+    case CMD_OPEN_NOTEPAD: if (x->sel >= 0 && !x->items[x->sel].is_dir) { char p[VFS_MAX_PATH]; item_path(x, x->sel, p, sizeof p); shell_notepad(p); } break;
     case CMD_NEWFOLDER: cmd_new(x, 1); break;
     case CMD_NEWTEXT: cmd_new(x, 0); break;
     case CMD_RENAME: cmd_rename(x); break;

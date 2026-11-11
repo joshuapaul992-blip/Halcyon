@@ -296,7 +296,8 @@ int menubar_event(window_t *w, gui_event_t *e) {
         input_event_t *k = &e->key;
         if (!k->pressed || !mb->count) return 0;
         if (k->key == KEY_F10 && !(k->mods & (MOD_CTRL | MOD_ALT | MOD_SHIFT))) { menubar_open(w, 0, 1); return 1; }
-        if ((k->mods & (MOD_CTRL | MOD_ALT)) == MOD_ALT) {
+        /* a key that types a character with Alt held is AltGr (Right Alt + E is the euro sign) */
+        if ((k->mods & (MOD_CTRL | MOD_ALT)) == MOD_ALT && !key_is_text(k)) {
             u32 c = event_letter(k);
             for (int i = 0; c && i < mb->count; i++)
                 if (label_key(mb->menus[i].title) == c) { menubar_open(w, i, 1); return 1; }
