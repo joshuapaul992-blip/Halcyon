@@ -155,8 +155,9 @@ def run(cfg):
     img = os.path.join(BUILD, "ci_boot.img")
     subprocess.run(["cp", os.path.join(BUILD, "halcyon.img"), img], check=True)
     env["IMG_OVERRIDE"] = img
+    errlog = os.path.join(BUILD, "qemu.err")
     p = subprocess.Popen(["sh", "tools/run.sh", hc, fw], env=env,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         stdout=subprocess.DEVNULL, stderr=open(errlog, "w"))
     t0 = time.time()
     text = ""
     limit = TIMEOUT.get(hc, 45)
@@ -236,6 +237,11 @@ def run(cfg):
         print("    --- last lines of the serial log ---")
         for line in text.strip().splitlines()[-15:]:
             print("    " + line)
+        err = open(errlog, errors="replace").read().strip()
+        if err:
+            print("    --- QEMU error output ---")
+            for line in err.splitlines()[-10:]:
+                print("    " + line)
     return not failures
 
 
