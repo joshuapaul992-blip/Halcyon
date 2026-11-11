@@ -59,6 +59,9 @@ typedef uintptr_t uptr;
 #define E_MSGSIZE     -27 /* message too long */
 #define E_NOTSOCK     -28 /* the handle is not a socket */
 #define E_INPROGRESS  -29 /* a non-blocking connect has started */
+#define E_HOSTUNREACH -30 /* no answer from that computer (ARP, ICMP host unreachable) */
+#define E_NETUNREACH  -31 /* no route to that network */
+#define E_ADDRNOTAVAIL -32 /* not an address of this computer */
 
 const char *strerror(int err);
 

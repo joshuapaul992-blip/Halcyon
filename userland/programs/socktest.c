@@ -222,7 +222,7 @@ static int child_hog(const char *name) {
 /* ================= checks ================= */
 
 static void test_basics(void) {
-    CHECK(socket(AF_INET, SOCK_STREAM, 0) == E_AFNOSUPPORT, "AF_INET not yet");
+    CHECK(socket(AF_INET6, SOCK_STREAM, 0) == E_AFNOSUPPORT, "AF_INET6 not yet");
     CHECK(socket(77, SOCK_STREAM, 0) == E_AFNOSUPPORT, "unknown family");
     CHECK(socket(AF_LOCAL, 3, 0) == E_NOTSUP, "raw sockets");
     CHECK(socket(AF_LOCAL, SOCK_STREAM, 6) == E_NOTSUP, "protocol");

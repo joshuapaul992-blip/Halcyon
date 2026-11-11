@@ -66,6 +66,7 @@ void net_stack_input(netdev_t *d, const u8 *frame, u32 len) __attribute__((weak)
 /* timers and queued output; returns the next deadline (time_ms) or ~0 */
 u64  net_stack_poll(u64 now_ms) __attribute__((weak));
 void net_stack_link(netdev_t *d) __attribute__((weak));    /* link_up changed */
+void net_settings_loaded(void) __attribute__((weak));      /* kmain: SETTINGS.INI has been read */
 
 /* drivers (weak: probe the PCI bus, register what they find) */
 void virtio_net_init(void) __attribute__((weak));

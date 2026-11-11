@@ -6,8 +6,8 @@
  *   socket.c   generic sockets: handles, the system calls, waiting (blocking,
  *              non-blocking, timeouts, a process being ended), poll, socket
  *              options, limits and memory accounting, socket buffers.
- *   families   one per address family: local.c (AF_LOCAL) now; AF_INET and
- *              AF_INET6 (TCP, UDP) in milestone 6. A family only implements
+ *   families   one per address family: local.c (AF_LOCAL), inet.c (AF_INET:
+ *              TCP, UDP and ping sockets, docs/DESIGN-M6.md); AF_INET6 later. A family only implements
  *              non-blocking primitives (sock_ops_t) and says what changed by
  *              calling sock_wake(); the generic layer does every wait.
  *
@@ -77,6 +77,10 @@ long nq_get_stream(nqueue_t *q, uio_t *u, int peek);
  * *alen in: room at a, out: the address length */
 long nq_get_msg(nqueue_t *q, uio_t *u, int peek, void *a, u32 *alen);
 u32  nq_next_msg_len(const nqueue_t *q);
+/* streams: copy n bytes starting off bytes into the unread data (TCP
+ * retransmissions; the caller checks the bounds), drop n bytes from the front */
+void nq_copy(const nqueue_t *q, u32 off, void *dst, u32 n);
+void nq_drop(nqueue_t *q, u32 n);
 void nq_free(nqueue_t *q);
 
 /* ---- sockets ---- */
@@ -145,8 +149,10 @@ sock_t *sock_first(void);                   /* every socket (including released 
 /* memory accounting for buffers families allocate themselves */
 int  net_charge(netacct_t *a, u32 bytes);   /* E_NOMEM over a limit */
 void net_uncharge(netacct_t *a, u32 bytes);
+u32  net_acct_pid(const netacct_t *a);      /* the program it belongs to (0: none) */
 
 extern const net_family_t local_family;     /* local.c */
+extern const net_family_t inet_family;      /* inet.c (AF_INET: TCP, UDP, ping) */
 int local_name_count(void);
 
 #endif

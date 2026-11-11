@@ -64,6 +64,10 @@ const char *hal_strerror(int e) {
     case E_MSGSIZE: return "Message too long";
     case E_NOTSOCK: return "Not a socket";
     case E_INPROGRESS: return "Operation in progress";
+    case E_HOSTUNREACH: return "Host unreachable";
+    case E_NODEV: return "No such device";
+    case E_NETUNREACH: return "Network unreachable";
+    case E_ADDRNOTAVAIL: return "Address not available";
     }
     return "Error";
 }

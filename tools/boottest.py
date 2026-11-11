@@ -32,6 +32,16 @@ interrupts on, get a working interrupt:
           BearSSL as built for Halcyon (several cipher suites, RSA and EC
           certificates, rejected certificates), inflate, URLs, the clock, and a
           fetch on the system's network; it must report "webtest: all N checks passed"
+  net     an Intel e1000 on QEMU's user network, with servers on the host
+          (tools/netservers.py: DNS, HTTP, a TCP sink, UDP echo; the DNS
+          server's port goes into net.dns in SETTINGS.INI): runs
+          C:\\PROGRAMS\\NETTEST.EXE (DHCP, ping, DNS, a 32 MiB download and an
+          8 MiB upload with CRCs, 40 parallel connections, UDP, the loopback,
+          errors, and a server in Halcyon that the host connects to through
+          hostfwd); it must report "nettest: all N checks passed"
+  loss    (with net) 3% of frames dropped on receive and transmit by the
+          stack's test hook (fw_cfg opt/halcyon/netloss): a shorter NETTEST
+          run that must still pass, with retransmissions
   res     a saved resolution (display.width/height = 1280 x 1024 in
           \\HALCYON\\SETTINGS.INI): the loader must choose it and the desktop use it
   fwvideo no display adapter driver (boot flag): the firmware frame buffer only
@@ -55,12 +65,14 @@ or attach a network adapter on QEMU's user-mode network (-netdev user):
           be transmitted (replies to it may be dropped when the receive ring
           overruns), and the adapter must have the expected interrupt (MSI-X,
           INTx, or polled with noirq).
+NETDUMP=file.pcap records the net variants' frames (128 bytes each) for debugging.
 Exit status is the number of failed configurations.
 """
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 BUILD = os.environ.get("BUILD", "build")
@@ -69,10 +81,11 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:nomsi", "uhci:bios:pic", "xhci:uefi:pic", "ehci:bios:noirq",
           "xhci:bios:nvme", "xhci:uefi:nvme4k", "xhci:bios:nvme+nomsi", "xhci:uefi:nvme+noirq",
           "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user", "xhci:bios:sock", "xhci:bios:web",
+          "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
           "xhci:bios:virtio", "xhci:uefi:e1000e"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
-            "fwvideo": 0x800, "res": 0, "switch": 0}
+            "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -95,7 +108,21 @@ CHECKS = [
 ]
 BAD = ["CPU EXCEPTION", "KERNEL PANIC", "nested fault"]
 # variants that run a test program after boot: (program, its report prefix)
-PROGRAMS = {"user": ("SELFTEST.EXE", "selftest"), "sock": ("SOCKTEST.EXE", "socktest"), "web": ("WEBTEST.EXE", "webtest")}
+PROGRAMS = {"user": ("SELFTEST.EXE", "selftest"), "sock": ("SOCKTEST.EXE", "socktest"), "web": ("WEBTEST.EXE", "webtest"),
+            "net": ("NETTEST.EXE", "nettest")}
+PROGRAM_TIMEOUT = {"net": 300}
+NET_LOSS_PCT = 3
+_netservers = None
+
+
+def net_servers():
+    """the host's servers for the net variant (started once)"""
+    global _netservers
+    if _netservers is None:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import netservers
+        _netservers = (netservers, netservers.start())
+    return _netservers
 
 
 def cpu_seconds(pid):
@@ -242,8 +269,28 @@ def run(cfg):
         extra += " -netdev user,id=n0 -device %s,netdev=n0 -fw_cfg name=opt/halcyon/netprobe,string=%d" % (
             NICS[nic][0], NET_PROBE)
     prog = next((PROGRAMS[v] for v in opts if v in PROGRAMS), None)
+    prog_args = ""
+    ini_lines = []
+    net = "net" in opts
+    if net:
+        ns_mod, ports = net_servers()
+        fwd = ns_mod.free_port()
+        extra += " -netdev user,id=n0,hostfwd=tcp:127.0.0.1:%d-:8080 -device e1000,netdev=n0" % fwd
+        if os.environ.get("NETDUMP"):       # debugging: the guest's frames in a pcap file
+            extra += " -object filter-dump,id=fd0,netdev=n0,maxlen=128,file=%s" % os.path.abspath(os.environ["NETDUMP"])
+        ini_lines.append("net.dns=10.0.2.2:%d" % ports["dns"])
+        prog_args = " http=%d sink=%d echo=%d" % (ports["http"], ports["sink"], ports["echo"])
+        checks.append(("DHCP configuration", "net: eth0: 10.0.2.15/24 via 10.0.2.2"))
+        if "loss" in opts:
+            prog_args += " loss big=2"
+            extra += " -fw_cfg name=opt/halcyon/netloss,string=%d" % NET_LOSS_PCT
+            checks.append(("loss test hook", "of frames lost (receive and transmit)"))
     if prog:
-        extra += " -fw_cfg name=opt/halcyon/autorun,string=C:/PROGRAMS/" + prog[0]
+        # (a file: run.sh splits EXTRA at spaces)
+        argf = os.path.abspath(os.path.join(BUILD, "ci_autorun.txt"))
+        with open(argf, "w") as f:
+            f.write("C:/PROGRAMS/" + prog[0] + prog_args)
+        extra += " -fw_cfg name=opt/halcyon/autorun,file=" + argf
     if "switch" in opts:
         extra += " -fw_cfg name=opt/halcyon/setmode,string=1600x900"
         checks.append(("live mode switch", "test mode switch to 1600x900: ok (desktop 1600x900)"))
@@ -261,14 +308,24 @@ def run(cfg):
     img = os.path.join(BUILD, "ci_boot.img")
     subprocess.run(["cp", os.path.join(BUILD, "halcyon.img"), img], check=True)
     if "res" in opts:
+        ini_lines += ["display.width=1280", "display.height=1024"]
+    if ini_lines:
         ini = os.path.join(BUILD, "ci_settings.ini")
         with open(ini, "w") as f:
-            f.write("display.width=1280\r\ndisplay.height=1024\r\n")
+            f.write("".join(l + "\r\n" for l in ini_lines))
         subprocess.run(["mcopy", "-o", "-i", img + "@@1M", ini, "::/HALCYON/SETTINGS.INI"], check=True)
     env["IMG_OVERRIDE"] = img
     errlog = os.path.join(BUILD, "qemu.err")
     p = subprocess.Popen(["sh", "tools/run.sh", hc, fw], env=env,
                          stdout=subprocess.DEVNULL, stderr=open(errlog, "w"))
+    client = None
+    if net and "loss" not in opts:
+        client = {"err": "not run"}
+
+        def run_client():
+            client["err"] = ns_mod.client_test(fwd, log, 0)
+        client["thread"] = threading.Thread(target=run_client, daemon=True)
+        client["thread"].start()
     t0 = time.time()
     text = ""
     limit = TIMEOUT.get(hc, 45)
@@ -287,7 +344,8 @@ def run(cfg):
     elapsed = time.time() - t0
     if prog:
         t1 = time.time()
-        while time.time() - t1 < 90 and p.poll() is None:
+        plimit = max([PROGRAM_TIMEOUT.get(v, 90) for v in opts] + [90])
+        while time.time() - t1 < plimit and p.poll() is None:
             text = open(log, errors="replace").read()
             if prog[1] + ": all" in text or "checks FAILED" in text or any(b in text for b in BAD):
                 break
@@ -327,6 +385,10 @@ def run(cfg):
         if prog[1] + ": all" not in text:
             bad = [l for l in text.splitlines() if prog[1] + ":" in l and ("FAIL" in l or "skipped" in l)]
             failures.append("%s (%s)" % (prog[1], bad[0].strip() if bad else "did not finish"))
+    if client:
+        client["thread"].join(5)
+        if client["err"]:
+            failures.append(client["err"])
     if isos:
         if "ISO9660 'HALCYONCD' on cd0" not in text:
             failures.append("CD volume")
@@ -356,6 +418,11 @@ def run(cfg):
     status = "PASS" if not failures else "FAIL (%s)" % ", ".join(failures)
     cpu = "" if idle is None else "  idle CPU %3.0f%%" % idle
     print("%-22s %5.1fs%s  %s" % (cfg, elapsed, cpu, status), flush=True)
+    if net:
+        for line in text.splitlines():
+            if "nettest: " in line and any(k in line for k in ("MB/s", "parallel", "ping 10", "loopback 4",
+                                                                       "retransmitted", "DNS:")):
+                print("    " + line[line.index("nettest: "):].strip())
     if failures:
         print("    --- last lines of the serial log ---")
         for line in text.strip().splitlines()[-15:]:

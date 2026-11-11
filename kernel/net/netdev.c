@@ -186,7 +186,8 @@ void net_init(void) {
     if (igb_init) igb_init();
     if (rtl8139_init) rtl8139_init();
     if (rtl8169_init) rtl8169_init();
-    if (!ndevs) { kprintf("net: no network adapter\n"); return; }
+    if (!ndevs) kprintf("net: no network adapter\n");
+    if (!ndevs && !net_stack_init) return;      /* (the stack still runs the loopback) */
     net_thread = thread_create("net", net_main, NULL);
     if (!net_thread) kprintf("net: cannot start the net thread\n");
 }

@@ -35,6 +35,10 @@
 #define E_MSGSIZE     -27 /* message too long */
 #define E_NOTSOCK     -28 /* the handle is not a socket */
 #define E_INPROGRESS  -29 /* a non-blocking connect has started */
+#define E_HOSTUNREACH -30 /* no answer from that computer */
+#define E_NETUNREACH  -31 /* no route to that network (not connected?) */
+#define E_ADDRNOTAVAIL -32 /* not an address of this computer */
+#define E_NODEV   -15     /* (resolve: no DNS server configured) */
 const char *hal_strerror(int err);
 
 /* ---- raw system calls ---- */
@@ -378,8 +382,8 @@ int  inputbox(int owner, const char *title, const char *prompt, char *buf, int n
  * "yourname.program[.service]"; "halcyon." is for the programs that come with
  * Halcyon). A name is taken until its socket is closed or its program ends.
  * SOCK_STREAM: listen / accept / connect, bytes in order; SOCK_DGRAM:
- * messages (up to 64 KiB) with boundaries kept. AF_INET comes with
- * networking.
+ * messages (up to 64 KiB) with boundaries kept. AF_INET: the internet (see
+ * below).
  *
  * Limits: each socket's receive buffer (SO_RCVBUF, 64 KiB by default, 256 KiB
  * at most) is the back-pressure: a sender waits while the receiver's buffer
@@ -415,5 +419,45 @@ int  sock_nonblock(int fd, int on);
 int  sock_timeouts(int fd, int recv_ms, int send_ms);      /* SO_RCVTIMEO / SO_SNDTIMEO; 0 = none */
 int  local_listen(const char *name, int backlog);          /* stream socket bound to name, listening */
 int  local_connect(const char *name);                      /* stream socket connected to name */
+
+/* ---- the internet (AF_INET, IPv4; see docs/DESIGN-M6.md) ----
+ * socket(AF_INET, SOCK_STREAM, 0) is TCP, SOCK_DGRAM UDP, and
+ * socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP) a "ping socket": send ICMP echo
+ * requests (type 8: at least the 8-byte header; the kernel sets the
+ * identifier and the checksum), receive the echo replies. Addresses are
+ * struct sockaddr_in with port and address in network byte order. Errors
+ * of note: E_CONNREFUSED (nobody listens), E_TIMEOUT (no answer),
+ * E_HOSTUNREACH / E_NETUNREACH, E_CONNRESET (the peer reset the connection).
+ * Options: SO_REUSEADDR, SO_RCVBUF / SO_SNDBUF (TCP's windows), SO_KEEPALIVE
+ * with TCP_KEEPIDLE / TCP_KEEPINTVL / TCP_KEEPCNT, SO_LINGER {1, 0} (close
+ * resets), TCP_NODELAY, SO_BROADCAST (UDP), IP_TTL, IP_TOS; FIONREAD. */
+static inline unsigned short htons(unsigned short v) { return (unsigned short)__builtin_bswap16(v); }
+static inline unsigned short ntohs(unsigned short v) { return (unsigned short)__builtin_bswap16(v); }
+static inline unsigned int htonl(unsigned int v) { return __builtin_bswap32(v); }
+static inline unsigned int ntohl(unsigned int v) { return __builtin_bswap32(v); }
+int  inet_aton(const char *s, struct in_addr *out);        /* "a.b.c.d": 1, else 0 */
+unsigned int inet_addr(const char *s);                     /* network order, INADDR_NONE if not an address */
+char *inet_ntoa_r(unsigned int addr, char *buf);           /* network order -> "a.b.c.d" in buf (16 bytes) */
+const char *inet_ntoa(struct in_addr a);                   /* (a static buffer) */
+/* fill a sockaddr_in: addr in network order, port in host order; its length */
+socklen_t inet_sockaddr(struct sockaddr_in *a, unsigned int addr, int port);
+/* look up a host name: up to max IPv4 addresses (network order) in out;
+ * returns how many (>= 1), E_NOENT (no such name), E_TIMEOUT (no answer
+ * within timeout_ms; <= 0 = 10 s), E_INVAL (not a valid name), E_NODEV (no
+ * DNS server), E_IO (the servers failed). "localhost" and "a.b.c.d" are
+ * answered at once; answers are cached. */
+int  resolve(const char *host, unsigned int *out, int max, int timeout_ms);
+/* a TCP connection to host:port (a name or an address), trying each
+ * address; the socket, or an error */
+int  inet_connect(const char *host, int port, int timeout_ms);
+
+/* network interfaces: index 0.. (the loopback "lo" is last); E_NOENT past the end */
+int  net_ifinfo(int index, hal_ifinfo_t *out);
+/* change an interface's configuration (NETCFG_ADDR: DHCP or static,
+ * NETCFG_DNS: the DNS servers, NETCFG_SAVE: keep it in SETTINGS.INI) */
+int  net_ifconfig(const hal_ifconfig_t *cfg);
+int  net_ctl(int op, const char *ifname);                  /* NETCTL_RENEW / RELEASE / DNS_FLUSH / ARP_FLUSH */
+int  net_stats(hal_netstats_t *st);
+int  net_conns(hal_netconn_t *out, int max);               /* TCP connections, UDP sockets: entries */
 
 #endif

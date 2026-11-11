@@ -81,6 +81,7 @@ void kmain(struct bootinfo *bi) {
     if (hwreport_late) hwreport_late();
     if (settings_load) settings_load();
     if (keyboard_settings_load) keyboard_settings_load();
+    if (net_settings_loaded) net_settings_loaded();
     if (bootlog_save) {
         int r = bootlog_save("desktop starting");
         kprintf("bootlog: %s\n", r == 0 ? "saved" : strerror(r));

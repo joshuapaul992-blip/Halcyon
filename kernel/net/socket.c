@@ -12,8 +12,11 @@
 /* the program's window events, for poll (gui/usergui.c) */
 int usergui_poll_ready(proc_t *p, u64 *next_timer_ms) __attribute__((weak));
 
-/* address families; milestone 6 adds &inet_family and &inet6_family */
-static const net_family_t *const families[] = { &local_family };
+/* the internet stack's system calls (116-127, net/inet.c) */
+long inet_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __attribute__((weak));
+
+/* address families (AF_INET6 later) */
+static const net_family_t *const families[] = { &local_family, &inet_family };
 
 /* ---------------- accounting and limits ---------------- */
 
@@ -38,6 +41,8 @@ static netacct_t *acct_of(proc_t *p, int create) {
     }
     return NULL;
 }
+
+u32 net_acct_pid(const netacct_t *a) { return a ? a->pid : 0; }
 
 int net_charge(netacct_t *a, u32 n) {
     if (net_mem + n > NET_MAX_MEM) return E_NOMEM;
@@ -201,6 +206,30 @@ long nq_get_msg(nqueue_t *q, uio_t *u, int peek, void *a, u32 *alen) {
         nb_free(q, b);
     }
     return len;
+}
+
+void nq_copy(const nqueue_t *q, u32 off, void *dst, u32 n) {
+    u8 *d = dst;
+    for (nbuf_t *b = q->head; b && n; b = b->next) {
+        u32 have = b->len - b->off;
+        if (off >= have) { off -= have; continue; }
+        u32 k = MIN(n, have - off);
+        memcpy(d, b->data + b->off + off, k);
+        d += k; n -= k; off = 0;
+    }
+}
+
+void nq_drop(nqueue_t *q, u32 n) {
+    while (n && q->head) {
+        nbuf_t *b = q->head;
+        u32 k = MIN(n, b->len - b->off);
+        b->off += k; q->bytes -= k; n -= k;
+        if (b->off == b->len) {
+            q->head = b->next;
+            if (!q->head) q->tail = NULL;
+            nb_free(q, b);
+        }
+    }
 }
 
 u32 nq_next_msg_len(const nqueue_t *q) { return q->head ? q->head->len - q->head->off : 0; }
@@ -793,6 +822,7 @@ long socket_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
     case SYS_POLL: return sys_poll(p, a1, a2, (long)(int)a3);
     case SYS_SOCKSTAT: return sys_sockstat(p, a1);
     }
+    if (nr >= SYS_RESOLVE && nr <= SYS_RESOLVE + 11) return inet_syscall ? inet_syscall(nr, a1, a2, a3, a4, a5, a6) : E_NOTSUP;
     if (nr < SYS_SOCKET || nr > SYS_IOCTLSOCKET) return E_NOTSUP;
     long r;
     sock_t *s = fd_sock(p, (int)a1, &r);
