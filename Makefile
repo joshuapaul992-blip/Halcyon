@@ -80,6 +80,27 @@ ifneq ($(EFI_SRC),)
 IMG_DEPS += $(BUILD)/efi/BOOTX64.EFI
 endif
 
+# ---- user programs (userland/): static position-independent ELF64 .EXE ----
+UCFLAGS := -std=gnu11 -O2 -g0 -ffreestanding -fno-builtin -fPIE -fno-stack-protector -fno-asynchronous-unwind-tables \
+           -Wall -Wextra -Wno-unused-parameter -Iuserland/include
+ULDFLAGS := -static-pie -nostdlib -Wl,--no-dynamic-linker -Wl,-z,noexecstack -Wl,--build-id=none
+ULIB := $(BUILD)/user/crt0.o $(BUILD)/user/libc.o $(BUILD)/user/gui.o
+UPROGS := $(patsubst userland/programs/%.c,$(BUILD)/user/%.exe,$(wildcard userland/programs/*.c))
+
+$(BUILD)/user/crt0.o: userland/lib/crt0.S
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/%.o: userland/lib/%.c userland/include/hal.h kernel/core/sysabi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) userland/include/hal.h kernel/core/sysabi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $<
+	strip $@
+
+IMG_DEPS += $(UPROGS)
+.SECONDARY: $(ULIB)
+
 $(BUILD)/halcyon.img: $(IMG_DEPS)
 	BUILD=$(BUILD) sh tools/mkimage.sh
 

@@ -43,6 +43,8 @@ static void paging_init(void) {
     __asm__ volatile("mov %0, %%cr3" :: "r"((u64)(uptr)pml4) : "memory");
 }
 
+u64 *mm_kernel_pml4(void) { return pml4; }
+
 void *mm_map_mmio(u64 phys, u64 size) {
     if (phys + size <= 0x100000000ull) return (void *)(uptr)phys;
     u64 start = phys & ~0x1FFFFFull, end = (phys + size + 0x1FFFFF) & ~0x1FFFFFull;

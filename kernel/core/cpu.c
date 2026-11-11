@@ -2,19 +2,62 @@
 #include "kernel.h"
 #include "lib.h"
 #include "io.h"
+#include "proc.h"
 
 struct bootinfo g_bootinfo;
 void (*g_idle_hook)(void);
 
 /* ---------------- GDT ---------------- */
-static u64 gdt[5] ALIGNED(16) = {
+/* The order is what SYSCALL/SYSRET expect: kernel code, kernel data, then
+ * user data and user code (STAR[63:48] = 0x10: SS = 0x18, CS = 0x20). */
+static u64 gdt[7] ALIGNED(16) = {
     0,
     0x00AF9A000000FFFFull,   /* 0x08 kernel code 64 */
     0x00CF92000000FFFFull,   /* 0x10 kernel data */
-    0x00CFFA000000FFFFull,   /* 0x18 unused */
-    0x00CFF2000000FFFFull,   /* 0x20 unused */
+    0x00CFF2000000FFFFull,   /* 0x18 user data (DPL 3) */
+    0x00AFFA000000FFFFull,   /* 0x20 user code 64 (DPL 3) */
+    0, 0,                    /* 0x28 TSS (16 bytes) */
 };
 struct PACKED dtr { u16 limit; u64 base; };
+
+/* 64-bit TSS: RSP0 = kernel stack for interrupts from user mode, IST1 for
+ * double faults, IST2 for NMI / machine check */
+static struct PACKED tss {
+    u32 rsvd0;
+    u64 rsp[3];
+    u64 rsvd1;
+    u64 ist[7];
+    u64 rsvd2;
+    u16 rsvd3, iomap;
+} tss ALIGNED(16);
+static u8 ist_df[8192] ALIGNED(16), ist_nmi[8192] ALIGNED(16);
+u64 g_kstack_top;           /* kernel stack of the current thread (syscall entry) */
+
+void tss_set_rsp0(u64 rsp0) {
+    tss.rsp[0] = rsp0;
+    g_kstack_top = rsp0;
+}
+
+static void tss_init(void) {
+    memset(&tss, 0, sizeof tss);
+    tss.ist[0] = (u64)(uptr)(ist_df + sizeof ist_df);
+    tss.ist[1] = (u64)(uptr)(ist_nmi + sizeof ist_nmi);
+    tss.iomap = sizeof tss;           /* no I/O permission bitmap */
+    u64 base = (u64)(uptr)&tss, lim = sizeof tss - 1;
+    gdt[5] = (lim & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (0x89ull << 40) | (((lim >> 16) & 0xF) << 48) |
+             (((base >> 24) & 0xFF) << 56);
+    gdt[6] = base >> 32;
+    __asm__ volatile("ltr %w0" :: "r"(0x28));
+}
+
+/* SYSCALL/SYSRET: kernel CS 0x08 / SS 0x10, user base 0x10 (SS 0x1B, CS 0x23) */
+extern void syscall_entry(void);   /* entry.asm */
+static void syscall_init(void) {
+    wrmsr(0xC0000080, rdmsr(0xC0000080) | 1);                 /* EFER.SCE */
+    wrmsr(0xC0000081, (0x10ull << 48) | (0x08ull << 32));      /* STAR */
+    wrmsr(0xC0000082, (u64)(uptr)syscall_entry);               /* LSTAR */
+    wrmsr(0xC0000084, 0x200 | 0x400 | 0x100 | 0x40000);        /* FMASK: IF, DF, TF, AC */
+}
 
 static void gdt_load(void) {
     struct dtr d = { sizeof(gdt) - 1, (u64)(uptr)gdt };
@@ -36,10 +79,6 @@ struct PACKED idt_entry { u16 off_lo, sel; u8 ist, type; u16 off_mid; u32 off_hi
 static struct idt_entry idt[256] ALIGNED(16);
 extern u64 isr_table[256];
 
-struct regs {
-    u64 r15, r14, r13, r12, r11, r10, r9, r8, rbp, rdi, rsi, rdx, rcx, rbx, rax;
-    u64 vector, error, rip, cs, rflags, rsp, ss;
-};
 
 static void idt_set(int n, u64 handler) {
     idt[n].off_lo = handler & 0xFFFF;
@@ -64,7 +103,13 @@ void irq_dispatch(u64 vector);   /* core/irq.c */
 extern int g_panicking;          /* core/thread.c: locks and scheduling off */
 
 void isr_dispatch(struct regs *r) {
-    if (r->vector >= 32) { irq_dispatch(r->vector); return; }
+    if (r->vector >= 32) {
+        irq_dispatch(r->vector);
+        if (r->cs & 3) proc_user_return(r);     /* preemption, kill requests */
+        return;
+    }
+    /* an exception in a user program ends that program, not the system */
+    if ((r->cs & 3) && r->vector != 8 && r->vector != 18) { proc_user_fault(r); return; }
     __asm__ volatile("cli");
     g_panicking = 1;
     u64 cr2;
@@ -113,6 +158,11 @@ const char *cpu_vendor(void) { return vendor; }
 void cpu_init(void) {
     gdt_load();
     for (int i = 0; i < 256; i++) idt_set(i, isr_table[i]);
+    idt[8].ist = 1;                    /* double fault: known-good stack */
+    idt[2].ist = 2;                    /* NMI */
+    idt[18].ist = 2;                   /* machine check */
+    tss_init();
+    syscall_init();
     struct dtr d = { sizeof(idt) - 1, (u64)(uptr)idt };
     __asm__ volatile("lidt %0" :: "m"(d));
 

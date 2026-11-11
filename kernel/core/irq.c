@@ -4,6 +4,7 @@
 #include "io.h"
 #include "irq.h"
 #include "thread.h"
+#include "proc.h"
 #include "drivers/acpi.h"
 #include "drivers/pci.h"
 
@@ -465,7 +466,7 @@ void irq_dispatch(u64 vector) {
         v->count++;
         if (v->kind == V_LINE) { line_t *l = v->ptr; pic_set(irq, 1); l->pending = 1; l->fires++; dev_gen++; }
         else if (v->kind == V_HANDLE) { ((irq_handle_t *)v->ptr)->events++; dev_gen++; }
-        else if (v->kind == V_TIMER) timer_fires++;
+        else if (v->kind == V_TIMER) { timer_fires++; if (thread_current() && thread_current()->proc) g_need_resched = 1; }
         pic_eoi(irq);
         return;
     }
@@ -479,7 +480,10 @@ void irq_dispatch(u64 vector) {
         dev_gen++;
         break;
     }
-    case V_TIMER: timer_fires++; break;
+    case V_TIMER:
+        timer_fires++;
+        if (thread_current() && thread_current()->proc) g_need_resched = 1;   /* time slice used up */
+        break;
     default:
         if (vector == VEC_ERROR) { lapic_wr(LAPIC_ESR, 0); lapic_esr_last = lapic_rd(LAPIC_ESR); }
         break;
@@ -680,6 +684,11 @@ static void timer_arm_tsc(u64 deadline) {
         outb(0x40, (u8)(c >> 8));
     }
 }
+/* a user thread starts running: interrupt it after ms (preemption) */
+void irq_timeslice(u64 ms) {
+    if (timer_kind != TMR_NONE && idle_ok) timer_arm_tsc(rdtsc() + ms * tsc_khz());
+}
+
 static void timer_disarm(void) {
     if (timer_kind == TMR_LAPIC) lapic_wr(LAPIC_TIMER_INIT, 0);
 }

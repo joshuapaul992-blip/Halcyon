@@ -8,6 +8,12 @@
 
 extern struct bootinfo g_bootinfo;
 
+/* interrupt / exception frame built by entry.asm (isr_common) */
+struct regs {
+    u64 r15, r14, r13, r12, r11, r10, r9, r8, rbp, rdi, rsi, rdx, rcx, rbx, rax;
+    u64 vector, error, rip, cs, rflags, rsp, ss;
+};
+
 void cpu_init(void);
 const char *cpu_brand(void);
 const char *cpu_vendor(void);

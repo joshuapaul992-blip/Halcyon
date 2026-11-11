@@ -142,6 +142,88 @@ thread_entry:
     hlt
     jmp .halt
 
+; ---- system calls (SYSCALL) ----
+; In: rax = number, rdi rsi rdx r10 r8 r9 = arguments; rcx = user RIP,
+; r11 = user RFLAGS, interrupts off (FMASK). The user stack pointer is parked
+; in a global while switching stacks (one CPU, interrupts still off).
+extern g_kstack_top
+extern syscall_dispatch
+global syscall_entry
+syscall_entry:
+    mov [rel user_rsp_tmp], rsp
+    mov rsp, [rel g_kstack_top]
+    push qword [rel user_rsp_tmp]   ; struct sysframe, read bottom-up
+    push r11
+    push rcx
+    push rax
+    push rdi
+    push rsi
+    push rdx
+    push r10
+    push r8
+    push r9
+    push rbx
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, rsp
+    sub rsp, 512                    ; the user's FPU / SSE state
+    fxsave [rsp]
+    sti
+    call syscall_dispatch           ; may block, switch threads, or never return (exit)
+    cli
+    fxrstor [rsp]
+    add rsp, 512
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
+    pop r9
+    pop r8
+    pop r10
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rax                         ; return value (written by the dispatcher)
+    pop rcx
+    pop r11
+    pop rsp
+    o64 sysret
+
+; void user_enter(u64 rip, u64 rsp, u64 arg) - first entry of a user thread
+global user_enter
+user_enter:
+    cli
+    push 0x1B                       ; SS: user data | RPL 3
+    push rsi                        ; RSP
+    push 0x202                      ; RFLAGS: IF
+    push 0x23                       ; CS: user code | RPL 3
+    push rdi                        ; RIP
+    mov rdi, rdx                    ; first argument to the program's entry
+    xor eax, eax
+    xor ebx, ebx
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
+    xor ebp, ebp
+    xor r8d, r8d
+    xor r9d, r9d
+    xor r10d, r10d
+    xor r11d, r11d
+    xor r12d, r12d
+    xor r13d, r13d
+    xor r14d, r14d
+    xor r15d, r15d
+    fninit
+    push 0x1F80
+    ldmxcsr [rsp]
+    add rsp, 8
+    iretq
+
 section .data
 global isr_table
 isr_table:
@@ -152,7 +234,8 @@ isr_table:
 %endrep
 
 section .bss
-align 16
+alignb 16
+user_rsp_tmp: resq 2
 boot_stack:
     resb 65536
 boot_stack_top:

@@ -13,6 +13,7 @@ extern void thread_entry(void);                        /* entry.asm */
 void cpu_idle_until(u64 deadline_tsc);                 /* irq.c, IF=0 in and out */
 void tss_set_rsp0(u64 rsp0) __attribute__((weak));     /* cpu.c (user mode) */
 int g_panicking;
+void (*thread_switch_hook)(thread_t *next);           /* proc.c: address space */
 
 static thread_t boot_thread;
 static thread_t *threads, *cur;
@@ -112,6 +113,7 @@ static void switch_to(thread_t *n) {
     if (n->stack && *(u64 *)n->stack != STACK_CANARY) panic("kernel stack overflow in thread '%s'", n->name);
     cur = n;
     if (n->stack && tss_set_rsp0) tss_set_rsp0(n->stack_top);
+    if (thread_switch_hook) thread_switch_hook(n);
     ctx_switch(&o->rsp, n->rsp);
 }
 

@@ -3,6 +3,8 @@
 #include "core/lib.h"
 #include "core/unicode.h"
 #include "core/irq.h"
+#include "core/proc.h"
+#include "core/thread.h"
 #include "core/mm.h"
 #include "core/kernel.h"
 #include "fs/vfs.h"
@@ -32,8 +34,19 @@ typedef struct term {
     /* output redirection */
     char *rbuf; int rlen, rcap;
     int sb_drag;
+    struct tcon *con;            /* console of the program running in this window */
+    int errorlevel;              /* exit code of the last program */
     window_t *win;
 } term_t;
+
+/* stdin / stdout of a program started from the Command Prompt. Lives until
+ * the program has ended, even if the window closes first (t = NULL then). */
+typedef struct tcon {
+    term_t *t;
+    u32 pid;
+    char in[LINE_MAX + 2];
+    int in_len, in_ready;
+} tcon_t;
 
 static const u32 palette[16] = {
     0x000000, 0x000080, 0x008000, 0x008080, 0x800000, 0x800080, 0x808000, 0xC0C0C0,
@@ -86,7 +99,39 @@ static void tprintf(term_t *t, const char *fmt, ...) {
     tputs(t, buf);
 }
 
+static void con_write(void *ctx, const char *s, int n) {
+    tcon_t *c = ctx;
+    if (!c->t) return;
+    for (int i = 0; i < n; i++) tputc(c->t, s[i]);
+    c->t->scroll = 0;
+    wm_invalidate(c->t->win);
+}
+static int con_line_ready(void *ctx) { tcon_t *c = ctx; return !c->t || c->in_ready; }
+static int con_read(void *ctx, char *buf, int n) {
+    tcon_t *c = ctx;
+    if (proc_wait(con_line_ready, c, ~0ull) < 0) return E_CANCELED;
+    if (!c->t || !c->in_ready) return -1;            /* window closed: end of input */
+    int len = MIN(n, c->in_len);
+    memcpy(buf, c->in, len);
+    c->in_ready = 0;
+    return len;
+}
+static void con_exited(void *ctx, int code) {
+    tcon_t *c = ctx;
+    if (c->t) {
+        term_t *t = c->t;
+        t->con = NULL;
+        t->errorlevel = code;
+        if (t->curlen) tputc(t, '\n');
+        tputc(t, '\n');
+        wm_invalidate(t->win);
+    }
+    kfree(c);
+}
+static const console_ops_t term_con_ops = { con_write, con_read, con_exited };
+
 static void prompt_str(term_t *t, char *out, int n) {
+    if (t->con) { if (n) out[0] = 0; return; }      /* a program is running: no prompt */
     char p[VFS_MAX_PATH];
     strlcpy(p, t->cwd, sizeof p);
     for (char *c = p; *c; c++) if (*c == '/') *c = '\\';
@@ -612,9 +657,38 @@ static void execute(term_t *t, int argc, char **argv, const char *rest) {
     else if (!strcasecmp(c, "reboot")) { vfs_sync_all(); reboot(); }
     else if (!strcasecmp(c, "shutdown")) shutdown_dialog();
     else {
-        /* maybe a file to open */
-        char p[VFS_MAX_PATH];
+        /* a program: NAME, NAME.EXE, in the current directory or C:\PROGRAMS */
+        char p[VFS_MAX_PATH], cand[VFS_MAX_PATH];
         vfs_dirent_t st;
+        const char *dot = strrchr(c, '.');
+        int has_ext = dot && !strchr(dot, '/') && !strchr(dot, '\\');
+        const char *dirs[2] = { NULL, "C:/PROGRAMS" };
+        for (int d = 0; d < 2; d++) {
+            for (int e = 0; e < 2; e++) {
+                if (e == 0 && !has_ext) continue;
+                snprintf(cand, sizeof cand, "%s%s", c, e ? ".EXE" : "");
+                if (e && has_ext) continue;
+                int r = d == 0 ? resolve(t, cand, p, sizeof p) : (vfs_join(dirs[d], cand, p, sizeof p), 0);
+                if (r || vfs_stat(p, &st) || st.is_dir) continue;
+                const char *x = strrchr(p, '.');
+                if (!x || strcasecmp(x, ".EXE")) continue;
+                tcon_t *con = kzalloc(sizeof *con);
+                if (!con) { tputs(t, "Not enough memory.\n"); return; }
+                con->t = t;
+                int pid = proc_spawn(p, rest, &term_con_ops, con);
+                if (pid < 0) {
+                    kfree(con);
+                    tprintf(t, "%s cannot be started: %s.\n", vfs_basename(p),
+                            pid == E_INVAL ? "it is not a valid Halcyon program" : strerror(pid));
+                    return;
+                }
+                con->pid = (u32)pid;
+                proc_t *pr = proc_by_pid((u32)pid);
+                if (pr) strlcpy(pr->cwd, t->cwd, sizeof pr->cwd);
+                t->con = con;
+                return;
+            }
+        }
         if (resolve(t, c, p, sizeof p) == 0 && vfs_stat(p, &st) == 0) { shell_open(p); return; }
         tprintf(t, "'%s' is not recognized as a command.\nType HELP for a list of commands.\n", c);
     }
@@ -719,6 +793,23 @@ static void term_paint(window_t *w, gc_t *g) {
 }
 
 static void term_submit(term_t *t) {
+    if (t->con) {
+        /* a program is running: the line is its input */
+        t->input[t->inlen] = 0;
+        tputs(t, t->input);
+        tputc(t, '\n');
+        if (!t->con->in_ready) {
+            int n = MIN(t->inlen, LINE_MAX);
+            memcpy(t->con->in, t->input, n);
+            t->con->in[n] = '\n';
+            t->con->in_len = n + 1;
+            t->con->in_ready = 1;
+        }
+        t->inlen = t->incur = 0;
+        t->input[0] = 0;
+        t->scroll = 0;
+        return;
+    }
     char p[VFS_MAX_PATH + 4];
     prompt_str(t, p, sizeof p);
     t->input[t->inlen] = 0;
@@ -819,7 +910,8 @@ static void term_event(window_t *w, gui_event_t *e) {
     t->scroll = 0;
     t->caret_on = 1; t->caret_t = time_ms();
     if (k->mods & MOD_CTRL) {
-        if (k->key == KEY_A + 2) { char p[VFS_MAX_PATH + 4]; prompt_str(t, p, sizeof p); tputs(t, p); tputs(t, t->input); tputs(t, "^C\n"); t->inlen = t->incur = 0; }
+        if (k->key == KEY_A + 2 && t->con) { tputs(t, "^C\n"); proc_kill(t->con->pid, NULL); t->inlen = t->incur = 0; }
+        else if (k->key == KEY_A + 2) { char p[VFS_MAX_PATH + 4]; prompt_str(t, p, sizeof p); tputs(t, p); tputs(t, t->input); tputs(t, "^C\n"); t->inlen = t->incur = 0; }
         else if (k->key == KEY_A + 11) execute(t, 1, (char *[]){ "cls" }, NULL);
         else if (k->key == KEY_A + 21) { gui_event_t pe = { .type = GE_MOUSE_DOWN, .button = MOUSE_RIGHT }; term_event(w, &pe); return; }
         wm_invalidate(w);
@@ -874,6 +966,7 @@ static void term_tick(window_t *w) {
 
 static void term_destroy(window_t *w) {
     term_t *t = w->data;
+    if (t->con) { t->con->t = NULL; proc_kill(t->con->pid, NULL); }
     for (int i = 0; i < t->nlines; i++) kfree(t->lines[i]);
     kfree(t->rbuf);
     kfree(t);

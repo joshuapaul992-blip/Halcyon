@@ -29,6 +29,14 @@ mcopy -i "$PART" $BUILD/KERNEL.BIN ::/HALCYON/KERNEL.BIN
 if [ -f $BUILD/efi/BOOTX64.EFI ]; then
     mcopy -i "$PART" $BUILD/efi/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
 fi
+# user programs (build/user/*.exe -> C:\PROGRAMS\NAME.EXE)
+if ls $BUILD/user/*.exe >/dev/null 2>&1; then
+    mmd -i "$PART" ::/PROGRAMS
+    for f in $BUILD/user/*.exe; do
+        n=$(basename "$f" | tr a-z A-Z)
+        mcopy -i "$PART" "$f" "::/PROGRAMS/$n"
+    done
+fi
 # user files
 if [ -d rootfs ]; then
     for f in rootfs/*; do

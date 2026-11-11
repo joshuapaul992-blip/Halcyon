@@ -4,6 +4,7 @@
 #include "mm.h"
 #include "io.h"
 #include "thread.h"
+#include "proc.h"
 #include "fs/block.h"
 #include "drivers/pci.h"
 
@@ -51,6 +52,7 @@ void kmain(struct bootinfo *bi) {
     time_init();
     if (irq_init) irq_init();
     thread_init();
+    proc_init();
     if (hwreport_early) hwreport_early();
     if (splash_init) splash_init();
     PROGRESS(10, "Scanning PCI devices...");
