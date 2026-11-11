@@ -203,6 +203,7 @@ rect_t taskbar_rect(void);
 void taskbar_invalidate(void);
 void desktop_wallpaper_set(int style);
 int  desktop_wallpaper_style(void);
+void desktop_wallpaper_render(int style, surface_t *s);   /* draw a wallpaper style into any surface (previews) */
 void start_menu_toggle(void);
 void shell_tick(void);
 #define TASKBAR_H 30

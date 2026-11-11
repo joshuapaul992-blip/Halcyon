@@ -144,15 +144,20 @@ static void wp_solid(surface_t *s) {
     for (int i = 0; i < s->w * s->h; i++) s->px[i] = HEX(0x2F6E8E);
 }
 
+void desktop_wallpaper_render(int style, surface_t *s) {
+    if (!s) return;
+    switch (style) {
+    case 1: wp_aurora(s); break;
+    case 2: wp_dunes(s); break;
+    case 3: wp_solid(s); break;
+    default: wp_bay(s); break;
+    }
+}
+
 void desktop_wallpaper_set(int style) {
     wp_style = style;
     if (!wallpaper) wallpaper = surface_new(screen_w(), screen_h());
-    switch (style) {
-    case 1: wp_aurora(wallpaper); break;
-    case 2: wp_dunes(wallpaper); break;
-    case 3: wp_solid(wallpaper); break;
-    default: wp_bay(wallpaper); break;
-    }
+    desktop_wallpaper_render(style, wallpaper);
     gui_full_redraw();
 }
 int desktop_wallpaper_style(void) { return wp_style; }
@@ -426,7 +431,7 @@ static const sitem_t left_items[] = {
     { "Notepad", "Edit text files", ICON_NOTEPAD, l_notepad },
     { "Paint", "Draw pictures", ICON_PAINT, l_paint },
     { "Calculator", NULL, ICON_CALC, l_calc },
-    { "Mines", NULL, ICON_GAME, l_mines },
+    { "Sonar", NULL, ICON_GAME, l_mines },
 };
 static const sitem_t right_items[] = {
     { "My Documents", NULL, ICON_DOCUMENTS, l_docs2 },
