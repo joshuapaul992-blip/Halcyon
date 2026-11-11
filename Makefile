@@ -107,10 +107,11 @@ IMG_DEPS += $(UPROGS)
 # headers in bearssl-port/ (no system headers). No OS random source or clock:
 # libweb seeds it from getrandom() and gives it the time.
 BEARSSL := userland/third_party/bearssl
+BEARPORT := userland/third_party/bearssl-port
 BEAR_SRC := $(shell find $(BEARSSL)/src -name '*.c' | sort)
 BEAR_OBJ := $(patsubst $(BEARSSL)/src/%.c,$(BUILD)/user/bearssl/%.o,$(BEAR_SRC))
 BEAR_CFLAGS := -std=gnu99 -O2 -g0 -ffreestanding -fPIE -fno-stack-protector -fno-asynchronous-unwind-tables \
-               -nostdinc -isystem $(shell $(CC) -print-file-name=include) -Iuserland/third_party/bearssl-port \
+               -nostdinc -isystem $(shell $(CC) -print-file-name=include) -I$(BEARPORT) \
                -I$(BEARSSL)/inc -I$(BEARSSL)/src -DBR_USE_URANDOM=0 -DBR_USE_WIN32_RAND=0 -DBR_RDRAND=0 \
                -DBR_USE_UNIX_TIME=0 -DBR_USE_WIN32_TIME=0 -Wall -Wextra
 $(BUILD)/user/bearssl/%.o: $(BEARSSL)/src/%.c
@@ -131,7 +132,7 @@ $(BUILD)/user/web/trust.o: $(BUILD)/user/web/trust.c
 	$(CC) $(BEAR_CFLAGS) -c $< -o $@
 $(BUILD)/user/web/%.o: userland/lib/web/%.c $(wildcard userland/lib/web/*.h) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h
 	@mkdir -p $(dir $@)
-	$(CC) $(UCFLAGS) -I$(BEARSSL)/inc -c $< -o $@
+	$(CC) $(UCFLAGS) -I$(BEARPORT) -I$(BEARSSL)/inc -c $< -o $@
 $(BUILD)/user/libweb.a: $(WEBLIB_OBJ)
 	rm -f $@
 	ar rcs $@ $^
@@ -144,9 +145,10 @@ $(BUILD)/user/browser.exe: userland/programs/browser.c $(BROWSER_SRC) $(wildcard
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -Iuserland/lib/web $(ULDFLAGS) -o $@ $(ULIB) $< $(BROWSER_SRC) $(WEBLIBS)
 	strip $@
-$(BUILD)/user/wget.exe: userland/programs/wget.c userland/lib/web/web.h $(ULIB) $(WEBLIBS) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h
+$(BUILD)/user/wget.exe $(BUILD)/user/webtest.exe: $(BUILD)/user/%.exe: userland/programs/%.c userland/lib/web/web.h $(ULIB) $(WEBLIBS) \
+                           userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h $(wildcard userland/programs/webtest_certs.h)
 	@mkdir -p $(dir $@)
-	$(CC) $(UCFLAGS) -Iuserland/lib/web $(ULDFLAGS) -o $@ $(ULIB) $< $(WEBLIBS)
+	$(CC) $(UCFLAGS) -Iuserland/lib/web -I$(BEARPORT) -I$(BEARSSL)/inc $(ULDFLAGS) -o $@ $(ULIB) $< $(WEBLIBS)
 	strip $@
 
 $(BUILD)/halcyon.img: $(IMG_DEPS)

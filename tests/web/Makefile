@@ -16,7 +16,7 @@ BEAR_OBJ := $(patsubst $(BEAR)/src/%.c,$(OUT)/bearssl/%.o,$(BEAR_SRC))
 WEB_SRC := $(wildcard $(WEB)/*.c)
 WEB_OBJ := $(patsubst $(WEB)/%.c,$(OUT)/web/%.o,$(WEB_SRC)) $(OUT)/web/trust.o
 BROWSER := $(ROOT)/userland/programs/browser
-TESTS := $(OUT)/inflatetest $(OUT)/urltest $(OUT)/hostget $(OUT)/tatest
+TESTS := $(OUT)/inflatetest $(OUT)/urltest $(OUT)/hostget $(OUT)/tatest $(OUT)/imagetest $(OUT)/htmltest
 
 all: $(TESTS)
 
@@ -37,6 +37,12 @@ $(OUT)/web/%.o: $(WEB)/%.c $(wildcard $(WEB)/*.h)
 	$(CC) $(WCFLAGS) -c $< -o $@
 $(OUT)/libweb.a: $(WEB_OBJ)
 	rm -f $@; ar rcs $@ $^
+
+# the browser's decoders and HTML code, with the libweb they use
+$(OUT)/imagetest: imagetest.c $(BROWSER)/image.c $(BROWSER)/browser.h $(OUT)/libweb.a
+	$(CC) $(WCFLAGS) -I$(BROWSER) -o $@ $< $(BROWSER)/image.c $(OUT)/libweb.a $(OUT)/libbearssl.a -lpthread
+$(OUT)/htmltest: htmltest.c $(BROWSER)/html.c $(BROWSER)/layout.c $(BROWSER)/browser.h $(OUT)/libweb.a
+	$(CC) $(WCFLAGS) -I$(BROWSER) -o $@ $< $(BROWSER)/html.c $(BROWSER)/layout.c $(OUT)/libweb.a $(OUT)/libbearssl.a -lpthread
 
 $(OUT)/%: %.c $(OUT)/libweb.a $(OUT)/libbearssl.a
 	$(CC) $(WCFLAGS) -o $@ $< $(OUT)/libweb.a $(OUT)/libbearssl.a -lpthread

@@ -316,6 +316,7 @@ static int is_text_file(const char *name) {
 static const char *file_type_name(const char *name, int is_dir) {
     if (is_dir) return "File Folder";
     const char *e = ext_of(name);
+    if (!strcasecmp(e, "htm") || !strcasecmp(e, "html")) return "HTML Document";
     if (is_text_file(name)) return !strcasecmp(e, "ini") || !strcasecmp(e, "cfg") ? "Configuration Settings" : "Text Document";
     if (!strcasecmp(e, "bmp")) return "Bitmap Image";
     if (!strcasecmp(e, "efi")) return "EFI Application";
@@ -335,6 +336,7 @@ static const char *file_type_name(const char *name, int is_dir) {
 static int file_icon(const char *name, int is_dir) {
     if (is_dir) return HICON_FOLDER;
     const char *e = ext_of(name);
+    if (!strcasecmp(e, "htm") || !strcasecmp(e, "html")) return HICON_WEB;
     if (is_text_file(name)) return HICON_FILE_TEXT;
     if (!strcasecmp(e, "bmp")) return HICON_FILE_IMAGE;
     if (!strcasecmp(e, "efi") || !strcasecmp(e, "exe") || !strcasecmp(e, "com")) return HICON_FILE_APP;

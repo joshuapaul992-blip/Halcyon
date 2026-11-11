@@ -188,6 +188,12 @@ static int run_prog(const char *exe, const char *path) {
 void shell_notepad(const char *path) { if (!run_prog("C:/PROGRAMS/NOTEPAD.EXE", path)) app_notepad(path); }
 void shell_paint(const char *path) { if (!run_prog("C:/PROGRAMS/PAINT.EXE", path)) app_paint(path); }
 void shell_explorer(const char *path) { if (!run_prog("C:/PROGRAMS/EXPLORER.EXE", path)) app_explorer(path ? path : ""); }
+/* the web browser has no built-in fallback: web pages open in Notepad then */
+static void shell_browser(const char *path, int html_file) {
+    if (run_prog("C:/PROGRAMS/BROWSER.EXE", path)) return;
+    if (html_file) shell_notepad(path);
+    else msgbox(NULL, "Web Browser", "The Web Browser (C:\\PROGRAMS\\BROWSER.EXE) cannot be started.", ICON_ERROR, MB_OK);
+}
 
 /* ---------------- desktop icons ---------------- */
 typedef struct dicon { const char *label; int icon; void (*launch)(void); } dicon_t;
@@ -198,6 +204,7 @@ static void l_term(void) { app_terminal(); }
 static void l_notepad(void) { shell_notepad(NULL); }
 static void l_paint(void) { shell_paint(NULL); }
 static void l_sysinfo(void) { app_sysinfo(); }
+static void l_browser(void) { shell_browser(NULL, 0); }
 /* Calculator and Sonar are user programs now; the built-in versions remain
  * for when the program cannot run (no C:\PROGRAMS, or no timer interrupt
  * in the fully polled mode) */
@@ -217,6 +224,7 @@ static const dicon_t dicons[] = {
     { "Command Prompt", ICON_TERMINAL, l_term },
     { "Notepad", ICON_NOTEPAD, l_notepad },
     { "Paint", ICON_PAINT, l_paint },
+    { "Web Browser", ICON_WEB, l_browser },
     { "System Information", ICON_SYSINFO, l_sysinfo },
 };
 #define NDICONS ((int)ARRAY_SIZE(dicons))
@@ -476,6 +484,7 @@ static const sitem_t left_items[] = {
     { "Command Prompt", "Halcyon command shell", ICON_TERMINAL, l_term },
     { "Notepad", "Edit text files", ICON_NOTEPAD, l_notepad },
     { "Paint", "Draw pictures", ICON_PAINT, l_paint },
+    { "Web Browser", "Browse the Web", ICON_WEB, l_browser },
     { "Calculator", NULL, ICON_CALC, l_calc },
     { "Sonar", NULL, ICON_GAME, l_mines },
 };
@@ -488,10 +497,10 @@ static const sitem_t right_items[] = {
     { "About Halcyon", NULL, ICON_HELP, l_about },
 };
 #define SM_W 400
-#define SM_H 440
+#define SM_H 484                   /* 7 programs on the left */
 #define SM_HEAD 62
 #define SM_FOOT 44
-static int sm_hover = -1;   /* 0..5 left, 10..14 right, 20 restart?, 21 shutdown */
+static int sm_hover = -1;   /* 0..6 left, 10..14 right, 20 restart?, 21 shutdown */
 
 static rect_t sm_item_rect(int id) {
     if (id < 10) return mkrect(6, SM_HEAD + 8 + id * 44, 196, 42);
@@ -771,7 +780,8 @@ void shell_open(const char *path) {
     const char *ext = dot ? dot + 1 : "";
     if (!strcasecmp(ext, "exe")) { shell_run(path, NULL); return; }
     static const char *text_ext[] = { "txt", "log", "ini", "cfg", "c", "h", "md", "bat", "asm", "s", "py", "csv",
-                                      "json", "xml", "htm", "html", "inf", "conf", "sh", "nfo", "diz", "me", "1st", "rtf" };
+                                      "json", "xml", "inf", "conf", "sh", "nfo", "diz", "me", "1st", "rtf" };
+    if (!strcasecmp(ext, "htm") || !strcasecmp(ext, "html")) { shell_browser(path, 1); return; }
     for (size_t i = 0; i < ARRAY_SIZE(text_ext); i++) if (!strcasecmp(ext, text_ext[i])) { shell_notepad(path); return; }
     if (!strcasecmp(ext, "bmp")) { shell_paint(path); return; }
     char msg[VFS_MAX_PATH + 96];

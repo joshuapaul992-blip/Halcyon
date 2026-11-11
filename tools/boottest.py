@@ -28,6 +28,10 @@ interrupts on, get a working interrupt:
   sock    run C:\\PROGRAMS\\SOCKTEST.EXE after boot: local stream and datagram
           sockets between programs, poll, limits, peers that crash or are
           ended; it must report "socktest: all N checks passed"
+  web     run C:\\PROGRAMS\\WEBTEST.EXE after boot: TLS 1.2 handshakes through
+          BearSSL as built for Halcyon (several cipher suites, RSA and EC
+          certificates, rejected certificates), inflate, URLs, the clock, and a
+          fetch on the system's network; it must report "webtest: all N checks passed"
   res     a saved resolution (display.width/height = 1280 x 1024 in
           \\HALCYON\\SETTINGS.INI): the loader must choose it and the desktop use it
   fwvideo no display adapter driver (boot flag): the firmware frame buffer only
@@ -49,9 +53,9 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "uhci:uefi", "ehci:uefi", "ich9:uefi", "xhci:uefi",
           "xhci:bios:nomsi", "uhci:bios:pic", "xhci:uefi:pic", "ehci:bios:noirq",
           "xhci:bios:nvme", "xhci:uefi:nvme4k", "xhci:bios:nvme+nomsi", "xhci:uefi:nvme+noirq",
-          "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user", "xhci:bios:sock",
+          "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user", "xhci:bios:sock", "xhci:bios:web",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch"]
-VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0,
+VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0}
 NVME_ERRORS = ["failed", "timed out", "fatal", "offline", "not responding", "no interrupt seen"]
 IDLE_MAX_CPU = 40      # % of one host CPU used by QEMU at the idle desktop
@@ -66,7 +70,7 @@ CHECKS = [
 ]
 BAD = ["CPU EXCEPTION", "KERNEL PANIC", "nested fault"]
 # variants that run a test program after boot: (program, its report prefix)
-PROGRAMS = {"user": ("SELFTEST.EXE", "selftest"), "sock": ("SOCKTEST.EXE", "socktest")}
+PROGRAMS = {"user": ("SELFTEST.EXE", "selftest"), "sock": ("SOCKTEST.EXE", "socktest"), "web": ("WEBTEST.EXE", "webtest")}
 
 
 def cpu_seconds(pid):

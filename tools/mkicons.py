@@ -447,6 +447,64 @@ def ic_recycle():
     return finish(img, m)
 
 
+def ic_web():
+    """a globe: the web browser"""
+    img = new()
+    m = fill(img, ellipse((2, 2, 30, 30)), "#7FD0FF", "#1F5FC0", outline="#0E2A66")
+    # continents
+    fill(img, poly([(7, 9), (12, 7), (15, 9), (14, 13), (10, 15), (11, 19), (8, 21), (5, 16)]), "#7ED86A", "#2E9A20")
+    fill(img, poly([(17, 13), (23, 12), (27, 16), (25, 22), (21, 26), (19, 21), (17, 18)]), "#7ED86A", "#2E9A20")
+    fill(img, poly([(18, 5), (22, 5.5), (21, 8), (18, 8)]), "#7ED86A", "#2E9A20")
+    d = ImageDraw.Draw(img)
+    d.ellipse(box(9, 2.3, 23, 29.7), outline=(255, 255, 255, 120), width=u(0.8))
+    line(img, [(2.5, 16), (29.5, 16)], "#FFFFFF", 0.7)
+    gloss(img, m, 0.5, 130)
+    return finish(img, m)
+
+
+def ic_nav_arrow(left, c1, c2, outline):
+    img = new()
+    m = fill(img, ellipse((2, 2, 30, 30)), c1, c2, outline=outline)
+    gloss(img, m, 0.5, 120)
+    if left:
+        fill(img, poly([(8, 16), (16, 8), (16, 12.5), (24, 12.5), (24, 19.5), (16, 19.5), (16, 24)]), "#FFFFFF", "#E8F0E0")
+    else:
+        fill(img, poly([(24, 16), (16, 8), (16, 12.5), (8, 12.5), (8, 19.5), (16, 19.5), (16, 24)]), "#FFFFFF", "#E8F0E0")
+    return finish(img, m)
+
+
+def ic_reload():
+    img = new()
+    d = ImageDraw.Draw(img)
+    d.arc(box(6, 6, 26, 26), start=-40, end=260, fill=hexc("#2E9A20"), width=u(4.2))
+    d.arc(box(7, 7, 25, 25), start=-40, end=260, fill=hexc("#7ED86A"), width=u(2))
+    fill(img, poly([(20.5, 2), (29, 10.5), (19, 12.5)]), "#7ED86A", "#2E9A20", outline="#145A0C")
+    return finish(img)
+
+
+def ic_stop():
+    img = new()
+    pts = []
+    import math
+    for i in range(8):
+        a = math.pi / 8 + i * math.pi / 4
+        pts.append((16 + 14 * math.cos(a), 16 + 14 * math.sin(a)))
+    m = fill(img, poly(pts), "#FF7A6A", "#C01810", outline="#700800")
+    gloss(img, m, 0.5, 110)
+    line(img, [(11, 11), (21, 21)], "#FFFFFF", 3)
+    line(img, [(21, 11), (11, 21)], "#FFFFFF", 3)
+    return finish(img, m)
+
+
+def ic_home():
+    img = new()
+    m = fill(img, poly([(16, 3), (30, 15), (26, 15), (26, 29), (6, 29), (6, 15), (2, 15)]), "#FFF2C8", "#E0C070", outline="#7A5A20")
+    fill(img, poly([(16, 2), (31, 15.5), (28, 17), (16, 6.5), (4, 17), (1, 15.5)]), "#E86A3A", "#A83010", outline="#701800")
+    fill(img, rrect((13, 19, 19, 29), 0.5), "#9A6A30", "#6A4010", outline="#4A2A08")
+    fill(img, rrect((20.5, 18, 24.5, 22), 0.3), "#BFE6FF", "#6AAAE0", outline="#3A5A80")
+    return finish(img, m)
+
+
 ICONS = [
     ("computer", ic_computer),
     ("hdd", ic_hdd),
@@ -484,6 +542,12 @@ ICONS = [
     ("help", ic_help),
     ("game", ic_game),
     ("recycle", ic_recycle),
+    ("web", ic_web),
+    ("back", lambda: ic_nav_arrow(True, "#7ED86A", "#2E9A20", "#145A0C")),
+    ("forward", lambda: ic_nav_arrow(False, "#7ED86A", "#2E9A20", "#145A0C")),
+    ("reload", ic_reload),
+    ("stop", ic_stop),
+    ("home", ic_home),
 ]
 
 SIZES = (16, 32, 48)

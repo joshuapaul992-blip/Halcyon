@@ -1,0 +1,22 @@
+<html><head><title>Forms</title></head><body>
+<h1>Forms</h1>
+<form action="forms.htm" method="get">
+<p>Name: <input type="text" name="name" value="Halcyon" size="24"></p>
+<p>Password: <input type="password" name="pw" size="12"></p>
+<p><input type="checkbox" name="news" checked> Send me news
+   <input type="checkbox" name="spam"> Send me spam</p>
+<p>Size: <input type="radio" name="size" value="s"> Small
+         <input type="radio" name="size" value="m" checked> Medium
+         <input type="radio" name="size" value="l"> Large</p>
+<p>Colour: <select name="colour"><option>Red<option selected>Green<option value="b">Blue</select></p>
+<p>Comment:<br><textarea name="comment" rows="3" cols="40">Hello</textarea></p>
+<input type="hidden" name="secret" value="42">
+<p><input type="submit" value="Send"> <input type="reset"> <button type="submit" name="btn" value="2">Another button</button></p>
+</form>
+<p>After sending, the address bar shows the form's data in the address
+(<code>?name=Halcyon&amp;news=on...</code>).</p>
+<h2>A search form (online)</h2>
+<form action="https://html.duckduckgo.com/html/" method="post">
+<input type="text" name="q" size="30"> <input type="submit" value="Search">
+</form>
+</body></html>
