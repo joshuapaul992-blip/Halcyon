@@ -16,7 +16,7 @@ its own drivers for USB, SATA and FAT file systems.
 | Interrupts | Local APIC (xAPIC or x2APIC) and I/O APICs from the ACPI MADT, or the 8259 PICs. MSI-X and MSI for xHCI and AHCI. PCI INTx for UHCI, OHCI and EHCI: without an AML interpreter the routing is learned from which device raised an interrupt. The CPU halts when there is nothing to do: a one-shot local APIC (or PIT) timer wakes it for the next deadline. A device whose interrupt does not work is polled. |
 | USB | Host controllers: UHCI and OHCI (USB 1.1), EHCI (USB 2.0, with companion hand-off), and xHCI (USB 3.x, SuperSpeed). Class drivers: hubs (USB 2 and SuperSpeed), HID keyboards (boot protocol), HID mice and tablets (report descriptor parsing), and mass storage (Bulk-Only Transport plus SCSI). Hot-plug. |
 | Storage | AHCI SATA (LBA48, multiple controllers). NVMe SSDs (MSI-X, MSI, INTx or polled; every active namespace with 512- or 4096-byte blocks becomes a disk, `nvme0`, `nvme1`, ...; flushed when the drive has a volatile cache, shutdown notification on Turn Off/Restart). CD/DVD drives on SATA (ATAPI): read-only drive letters, discs detected when inserted, ejected or swapped, Eject in the drive's right-click menu. Block layer with MBR (including extended partitions), GPT and superfloppy detection. |
-| File systems | FAT12, FAT16 and FAT32, read and write: long file names, create, delete, rename and move, mkdir and rmdir, truncate, FSInfo. DOS drive letters; the boot drive is `C:`. Quick format (FAT12/16/32) from Explorer (right-click a drive) or the `FORMAT` command, with Windows' default cluster sizes. |
+| File systems | FAT12, FAT16 and FAT32, read and write: long file names, create, delete, rename and move, mkdir and rmdir, truncate, FSInfo. exFAT, read and write (USB sticks and SD cards over 32 GB): fragmented and contiguous files, ValidDataLength, the volume's up-case table for case-insensitive names, VolumeDirty handling. DOS drive letters; the boot drive is `C:`. Quick format (FAT12/16/32 and exFAT) from Explorer (right-click a drive) or the `FORMAT` command, with Windows' default cluster sizes. |
 | CD/DVD | ISO 9660 with Joliet (long Unicode names) and Rock Ridge names, multi-sector directories and multi-extent files, hardened against corrupt discs. Hybrid ISO images written to USB sticks or disks mount too. |
 | Unicode | File names and text are UTF-8 throughout; FAT long names are stored as UTF-16 (including characters outside the BMP), with Unicode case-insensitive lookup. The fonts cover Latin, Greek, Cyrillic and common symbols; other characters are kept and drawn as a replacement box. |
 | GUI | Compositing window manager (move, resize, minimize, maximize), menus, dialogs, widgets, three colour themes, four procedural wallpapers. |
@@ -89,13 +89,19 @@ tools/ci.sh
 This runs the following checks; `.github/workflows/ci.yml` runs the same script:
 
 - a warning-free build
-- the host FAT test suite (`tests/host/run.sh`), including about 80 deliberately
-  corrupted disk images and the fuzzer's regression inputs
+- the host storage test suite (`tests/host/run.sh`, about 110,000 checks): the
+  FAT, exFAT and ISO 9660 drivers, Unicode names and formatting, compiled for the
+  host with ASan/UBSan and run against images made by mkfs.fat, mkfs.exfat and
+  xorriso. Results are cross-checked with mtools, `fsck.fat`, `fsck.exfat` and an
+  independent exFAT implementation in Python (`tests/host/exfat_tool.py`), and
+  a few hundred deliberately corrupted images plus the fuzzer's regression
+  inputs must fail cleanly
 - a QEMU boot matrix (`tools/boottest.py`) covering UHCI, OHCI, EHCI, EHCI with
   companions, and xHCI, under BIOS and UEFI, plus the interrupt fallbacks (legacy
-  PIC, no MSI, no interrupts), set through a QEMU-only `fw_cfg` hook
+  PIC, no MSI, no interrupts) set through a QEMU-only `fw_cfg` hook, NVMe disks
+  (512- and 4096-byte blocks, INTx, polled), and a CD drive with a disc swap
 
-The partition and FAT code can also be fuzzed with libFuzzer, ASan and UBSan
+The partition, FAT, exFAT and ISO 9660 code can also be fuzzed with libFuzzer, ASan and UBSan
 (needs clang and `libclang-rt-dev`):
 
 ```bash
@@ -113,13 +119,13 @@ interrupt and QEMU must use under 40% of a host CPU at the idle desktop (it uses
 boot/        MBR, BIOS stage 2, bootinfo contract shared with the kernel
 efi/         UEFI loader
 kernel/core  entry, CPU and timing, interrupts and idle, memory, library, panic screen
-kernel/drivers  PCI, PS/2, input, AHCI, ACPI
+kernel/drivers  PCI, PS/2, input, AHCI (disks and CD/DVD), NVMe, ACPI
 kernel/usb   USB core, hub/HID/MSC class drivers, UHCI/OHCI/EHCI/xHCI
-kernel/fs    block layer and partitions, VFS, FAT
+kernel/fs    block layer and partitions, VFS, FAT, exFAT, ISO 9660
 kernel/gui   graphics, window manager, widgets, menus, dialogs, desktop, splash
 kernel/apps  applications
 tools/       image builder, font and icon generators, QEMU test harness
-tests/host   host-side FAT driver tests
+tests/host   host-side storage tests and fuzzer
 ```
 
 ## Limitations

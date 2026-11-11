@@ -80,7 +80,10 @@ works.
 - **NVMe SSDs** are tested in QEMU only (512- and 4096-byte blocks; MSI-X, INTx
   and polled). If an NVMe disk is missing, check the `nvme:` lines in BOOT.LOG and
   try F8 "Disable MSI"; "Disable NVMe controllers" turns the driver off.
-- **exFAT USB sticks** (most sticks larger than 32 GB) don't get a drive letter yet.
+- **exFAT** volumes (most USB sticks and SD cards larger than 32 GB) are read and
+  written, but have only been tested in QEMU and with images made by Linux tools.
+  Please report sticks formatted by Windows, a Mac or a camera that don't mount,
+  with `BOOT.LOG`.
 
 ## Compatibility list
 
