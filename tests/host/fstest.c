@@ -5,6 +5,8 @@
  * kernel code mounts them through a file-backed blockdev, and after every
  * scenario the result is verified with fsck.fat -n and mtools.
  *
+ * ISO 9660 tests (scenario "iso") are in isotest.c.
+ *
  * usage: fstest WORKDIR [-v] [scenario...]
  */
 #include <stdio.h>
@@ -2009,6 +2011,8 @@ static void s_hostile(void) {
     t_fuzz_regress();
 }
 
+#include "isotest.c"
+
 typedef struct { const char *name; void (*fn)(void); } scen_t;
 
 static void s_paths(void) { t_paths(); }
@@ -2337,7 +2341,7 @@ static void s_misc(void) {
 static const scen_t scenarios[] = {
     { "paths", s_paths }, { "fat12", s_fat12 }, { "fat16", s_fat16 }, { "fat32", s_fat32 },
     { "gpt", s_gpt }, { "4k", s_4k }, { "misc", s_misc }, { "random", s_random }, { "testdisks", s_testdisks },
-    { "hostile", s_hostile }, { "unicode", s_unicode }, { "format", s_format },
+    { "hostile", s_hostile }, { "unicode", s_unicode }, { "format", s_format }, { "iso", s_iso },
 };
 
 int main(int argc, char **argv) {

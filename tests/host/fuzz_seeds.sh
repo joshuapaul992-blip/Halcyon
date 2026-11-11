@@ -14,7 +14,7 @@
 # data area) and then truncated: the device is smaller than the file system,
 # which the driver has to cope with anyway.
 #
-# Needs: mkfs.fat, mtools, sfdisk, truncate, dd.
+# Needs: mkfs.fat, mtools, sfdisk, truncate, dd; xorriso for the ISO 9660 seeds.
 set -e
 OUT=${1:?usage: $0 OUTDIR}
 mkdir -p "$OUT"
@@ -155,6 +155,23 @@ PY
     $MKFS --offset=8 -S 4096 -F 12 -n GPT4K "$T/gpt4k.img" 800 >/dev/null
     populate "$T/gpt4k.img@@32768" 10
     seed gpt_4k 37 "$T/gpt4k.img"
+fi
+
+# --- ISO 9660 (whole-device images: descriptors at byte 32768) -------------
+if command -v xorriso >/dev/null; then
+    mkdir -p "$T/iso/SUB/INNER" "$T/iso/Long Directory Name"
+    printf 'hello from a seed\r\n' > "$T/iso/README.TXT"
+    printf 'inner\n' > "$T/iso/SUB/INNER/FILE.TXT"
+    seq -w 1 999999 | head -c 7000 > "$T/iso/SUB/MULTI.BIN"
+    printf 'long\n' > "$T/iso/Long Directory Name/A long file name.text"
+    k=0
+    while [ $k -lt 40 ]; do printf '%d\n' $k > "$T/iso/SUB/F$k.TXT"; k=$((k + 1)); done
+    xorriso -as mkisofs -quiet -J -V JOLIETSEED -o "$T/j.iso" "$T/iso" >/dev/null 2>&1
+    seed iso_joliet_rr 0 "$T/j.iso"
+    xorriso -as mkisofs -quiet -V RRSEED -o "$T/rr.iso" "$T/iso" >/dev/null 2>&1
+    seed iso_rr_4k 1 "$T/rr.iso"
+    xorriso -as mkisofs -quiet --norock -V PLAINSEED -o "$T/p.iso" "$T/iso" >/dev/null 2>&1
+    seed iso_plain $((5 << 2)) "$T/p.iso"
 fi
 
 ls -l "$OUT"

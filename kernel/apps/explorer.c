@@ -50,7 +50,9 @@ static int clip_cut;
 
 enum { CMD_NEWFOLDER = 1, CMD_NEWTEXT, CMD_RENAME, CMD_DELETE, CMD_COPY, CMD_CUT, CMD_PASTE, CMD_PROPS, CMD_CLOSE,
        CMD_OPEN, CMD_VIEW_ICONS, CMD_VIEW_DETAILS, CMD_REFRESH, CMD_BACK, CMD_UP, CMD_MYCOMP, CMD_MYDOCS,
-       CMD_TERMINAL, CMD_SYSINFO, CMD_CONTROL, CMD_OPEN_NOTEPAD, CMD_ABOUT, CMD_FORMAT };
+       CMD_TERMINAL, CMD_SYSINFO, CMD_CONTROL, CMD_OPEN_NOTEPAD, CMD_ABOUT, CMD_FORMAT, CMD_EJECT };
+
+int ahci_cd_eject(blockdev_t *bd) __attribute__((weak));   /* drivers/ahci.c */
 
 static menu_item_t file_items[] = {
     { "Open", "Enter", CMD_OPEN, MI_BOLD, 0 },
@@ -121,6 +123,7 @@ static menu_item_t ctx_bg_items[] = {
 static menu_t ctx_bg = { "", ctx_bg_items, ARRAY_SIZE(ctx_bg_items) };
 static menu_item_t ctx_drive_items[] = {
     { "Open", NULL, CMD_OPEN, MI_BOLD, 0 },
+    { "Eject", NULL, CMD_EJECT, 0, ICON_CDROM },     /* CD drives only */
     { "", NULL, 0, MI_SEPARATOR, 0 },
     { "Format...", NULL, CMD_FORMAT, 0, 0 },
     { "", NULL, 0, MI_SEPARATOR, 0 },
@@ -404,6 +407,15 @@ static void ex_menu(window_t *w, int id) {
             load(x);
         }
         break;
+    case CMD_EJECT: {
+        volume_t *v = x->sel >= 0 && !x->path[0] ? vfs_volume_by_letter(x->items[x->sel].letter) : NULL;
+        if (v && v->bd && ahci_cd_eject) {
+            int r = ahci_cd_eject(v->bd);
+            if (r && r != E_NODEV) msgbox(x->win, "Eject", strerror(r), ICON_WARNING, MB_OK);
+            load(x);
+        }
+        break;
+    }
     case CMD_CLOSE: wm_close(w); break;
     case CMD_VIEW_ICONS: x->view = 0; x->scroll = 0; wm_invalidate(w); break;
     case CMD_VIEW_DETAILS: x->view = 1; x->scroll = 0; wm_invalidate(w); break;
@@ -808,6 +820,12 @@ static void ex_event(window_t *w, gui_event_t *e) {
         if (e->type == GE_DBLCLICK && e->button == MOUSE_LEFT && i >= 0) { open_item(x, i); return; }
         if (e->button == MOUSE_RIGHT) {
             rect_t c = wm_client_rect(w);
+            if (i >= 0 && !x->path[0]) {
+                volume_t *v = vfs_volume_by_letter(x->items[i].letter);
+                int cd = v && drive_icon(v) == ICON_CDROM && ahci_cd_eject;
+                ctx_drive_items[1].flags = cd ? 0 : MI_DISABLED;
+                ctx_drive_items[3].flags = (!v || cd || v->is_boot || (v->bd && v->bd->readonly)) ? MI_DISABLED : 0;
+            }
             if (i >= 0) menu_popup(w, x->path[0] ? &ctx_file : &ctx_drive, c.x + e->x, c.y + e->y);
             else if (x->path[0]) menu_popup(w, &ctx_bg, c.x + e->x, c.y + e->y);
         }

@@ -1,4 +1,5 @@
-/* Fuzz harness for the Halcyon storage stack (kernel/fs/block.c, vfs.c, fat.c).
+/* Fuzz harness for the Halcyon storage stack (kernel/fs/block.c, vfs.c, fat.c,
+ * iso9660.c).
  *
  * Input: one config byte (fuzz_fs.h: sector size, read-only, boot disk,
  * I/O fault injection, operation variant) and a disk image. The image becomes a RAM block device that is registered
@@ -440,7 +441,7 @@ size_t LLVMFuzzerCustomMutator(uint8_t *data, size_t size, size_t max_size, unsi
         size_t start;
         switch (mrand() % 4) {
         case 0: start = mrand() % MIN(size, (size_t)8192); break;
-        case 1: start = 1 + (size_t)(mrand() % (MIN(size, (size_t)262144) / 512)) * 512; break;
+        case 1: start = 1 + (size_t)(mrand() % (size >= 512 ? MIN(size, (size_t)262144) / 512 : 1)) * 512; break;
         case 2: start = 1 + (size_t)(mrand() % (size / 512 ? size / 512 : 1)) * 512; break;
         default: start = mrand() % size; break;
         }

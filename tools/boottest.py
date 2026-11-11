@@ -18,6 +18,10 @@ which must mount as a volume "on nvme0" without NVMe errors and, with
 interrupts on, get a working interrupt:
   nvme    fat32gpt.img on an NVMe controller (512-byte LBAs)
   nvme4k  fat32_4k.img on an NVMe namespace with 4096-byte LBAs
+  cd      also an AHCI CD-ROM drive with an ISO 9660 + Joliet test disc
+          (built with xorriso): the disc must mount, and after the desktop is
+          up the disc is ejected and another one inserted through the QEMU
+          monitor; the volume must go away and the new one mount
 Exit status is the number of failed configurations.
 """
 import os
@@ -29,8 +33,9 @@ BUILD = os.environ.get("BUILD", "build")
 MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "uhci:uefi", "ehci:uefi", "ich9:uefi", "xhci:uefi",
           "xhci:bios:nomsi", "uhci:bios:pic", "xhci:uefi:pic", "ehci:bios:noirq",
-          "xhci:bios:nvme", "xhci:uefi:nvme4k", "xhci:bios:nvme+nomsi", "xhci:uefi:nvme+noirq"]
-VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0}
+          "xhci:bios:nvme", "xhci:uefi:nvme4k", "xhci:bios:nvme+nomsi", "xhci:uefi:nvme+noirq",
+          "xhci:bios:cd"]
+VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0}
 NVME_ERRORS = ["failed", "timed out", "fatal", "offline", "not responding", "no interrupt seen"]
 IDLE_MAX_CPU = 40      # % of one host CPU used by QEMU at the idle desktop
 TIMEOUT = {"uhci": 90, "ohci": 60}
@@ -49,6 +54,51 @@ def cpu_seconds(pid):
         return (int(f[11]) + int(f[12])) / os.sysconf("SC_CLK_TCK")
     except (OSError, IndexError, ValueError):
         return None
+
+
+def make_cd_isos():
+    """two small test discs for the cd variant"""
+    isos = []
+    for label, files in (("HALCYONCD", {"README.TXT": "Halcyon CD test disc\r\n",
+                                         "Folder/Long name \u00e9.txt": "Joliet\n"}),
+                         ("SECONDDISC", {"SECOND.TXT": "second disc\n"})):
+        src = os.path.join(BUILD, "ci_cdsrc_" + label)
+        subprocess.run(["rm", "-rf", src], check=True)
+        for name, data in files.items():
+            path = os.path.join(src, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "w", encoding="utf-8").write(data)
+        iso = os.path.abspath(os.path.join(BUILD, "ci_%s.iso" % label.lower()))
+        subprocess.run(["xorriso", "-as", "mkisofs", "-quiet", "-input-charset", "UTF-8", "-J", "-V", label,
+                        "-o", iso, src], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        isos.append(iso)
+    return isos
+
+
+def wait_log(log, pattern, start, timeout):
+    """wait until pattern appears in the log after offset start"""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        text = open(log, errors="replace").read()
+        if pattern in text[start:]:
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def cd_media_change(log, isos):
+    """eject the disc and insert another one through the QEMU monitor"""
+    mon = os.path.join(BUILD, "mon.sock")
+    fails = []
+    start = len(open(log, errors="replace").read())
+    subprocess.run([sys.executable, "tools/qemu_ctl.py", mon, "eject -f cd0"], stdout=subprocess.DEVNULL)
+    if not wait_log(log, "block: cd0: removed", start, 8):
+        fails.append("CD eject not seen")
+    start = len(open(log, errors="replace").read())
+    subprocess.run([sys.executable, "tools/qemu_ctl.py", mon, "change cd0 %s" % isos[1]], stdout=subprocess.DEVNULL)
+    if not wait_log(log, "ISO9660 'SECONDDISC' on cd0", start, 8):
+        fails.append("second CD not mounted")
+    return fails
 
 
 def run(cfg):
@@ -84,6 +134,10 @@ def run(cfg):
         extra += "-drive if=none,id=d0,format=raw,file=%s -device ide-hd,drive=d0,bus=ide.0" % sata
     if flags:
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
+    isos = None
+    if "cd" in opts:
+        isos = make_cd_isos()
+        extra += " -drive if=none,id=cd0,media=cdrom,file=%s -device ide-cd,drive=cd0,bus=ide.1" % isos[0]
     env = dict(os.environ, HEADLESS="1", BUILD=BUILD, EXTRA=extra)
     # boot from a scratch copy so tests never modify the release image
     img = os.path.join(BUILD, "ci_boot.img")
@@ -116,6 +170,10 @@ def run(cfg):
         if c0 is not None and c1 is not None:
             idle = (c1 - c0) * 100 / 4
         text = open(log, errors="replace").read()
+    cd_fails = []
+    if isos and p.poll() is None and "gui: desktop ready" in text:
+        cd_fails = cd_media_change(log, isos)
+        text = open(log, errors="replace").read()
     p.terminate()
     try:
         p.wait(5)
@@ -123,6 +181,10 @@ def run(cfg):
         p.kill()
     failures = [name for name, pat in checks if pat not in text]
     failures += ["log contains '%s'" % b for b in BAD if b in text]
+    if isos:
+        if "ISO9660 'HALCYONCD' on cd0" not in text:
+            failures.append("CD volume")
+        failures += cd_fails
     want_mode = {"": "irq: mode I/O APIC", "pic": "irq: mode 8259 PIC", "nomsi": "irq: mode I/O APIC",
                  "noirq": "interrupts disabled by boot option"}[irqmode]
     if want_mode not in text:

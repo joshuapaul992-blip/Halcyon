@@ -24,6 +24,9 @@
 #include "core/types.h"
 
 enum { BDEV_DISK_USB = 1, BDEV_DISK_SATA, BDEV_DISK_RAM, BDEV_PART, BDEV_DISK_NVME };
+/* ATAPI CD/DVD drive with a disc: 2048-byte sectors, read-only, removable.
+ * Not scanned for partitions (the whole disc is offered to the file systems). */
+enum { BDEV_DISK_CD = 8 };
 
 typedef struct blockdev blockdev_t;
 struct blockdev {

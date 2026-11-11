@@ -11,6 +11,8 @@
 #include "fileops.h"
 #include "core/irq.h"
 
+blockdev_t *ahci_cd_get(int i) __attribute__((weak));   /* drivers/ahci.c */
+
 void app_notepad_text(const char *title, const char *text);
 
 #define ROW_H 20
@@ -120,10 +122,17 @@ static void build(si_t *s) {
         } else {
             snprintf(d, 2048, "%s\n\nDevice: %s\nInterface: %s\nSector size: %u bytes\nSectors: %lu\nCapacity: %s\nRemovable: %s\nWrite protected: %s",
                      b->model, b->name, b->type == BDEV_DISK_USB ? "USB mass storage" : b->type == BDEV_DISK_SATA ? "SATA (AHCI)" :
-                     b->type == BDEV_DISK_NVME ? "NVMe" : "RAM",
+                     b->type == BDEV_DISK_NVME ? "NVMe" : b->type == BDEV_DISK_CD ? "SATA (AHCI) ATAPI CD/DVD" : "RAM",
                      b->sector_size, b->sector_count, sz, b->removable ? "yes" : "no", b->readonly ? "yes" : "no");
-            add(s, 1, b->type == BDEV_DISK_USB ? ICON_USBDRIVE : ICON_HDD, CAT_DISKS, d, "%s (%s, %s)", b->model[0] ? b->model : b->name, b->name, sz);
+            add(s, 1, b->type == BDEV_DISK_USB ? ICON_USBDRIVE : b->type == BDEV_DISK_CD ? ICON_CDROM : ICON_HDD, CAT_DISKS, d, "%s (%s, %s)", b->model[0] ? b->model : b->name, b->name, sz);
         }
+    }
+    /* CD/DVD drives without a disc have no registered block device */
+    for (int i = 0; ahci_cd_get && ahci_cd_get(i); i++) {
+        blockdev_t *b = ahci_cd_get(i);
+        if (b->present) continue;
+        snprintf(d, 2048, "%s\n\nDevice: %s\nInterface: SATA (AHCI) ATAPI CD/DVD\nMedium: none (or no data disc)", b->model, b->name);
+        add(s, 1, ICON_CDROM, CAT_DISKS, d, "%s (%s, no disc)", b->model[0] ? b->model : b->name, b->name);
     }
 
     /* volumes */

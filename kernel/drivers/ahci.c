@@ -1,11 +1,21 @@
 /* Halcyon OS - AHCI (SATA) disk driver
  *
- * Polled AHCI 1.x driver for ATA disks. Each port uses a single command
- * slot (slot 0); requests are split into chunks of at most AHCI_MAX_XFER
- * bytes. Buffers are DMAed to directly (everything is identity mapped)
- * unless they are odd-aligned (PRD addresses must be word aligned) or, on
- * HBAs without 64-bit addressing, reach above 4 GiB: then the request goes
- * through a per-port bounce buffer.
+ * Polled AHCI 1.x driver for ATA disks and ATAPI CD/DVD drives. Each port
+ * uses a single command slot (slot 0); requests are split into chunks of at
+ * most AHCI_MAX_XFER bytes. Buffers are DMAed to directly (everything is
+ * identity mapped) unless they are odd-aligned (PRD addresses must be word
+ * aligned) or, on HBAs without 64-bit addressing, reach above 4 GiB: then the
+ * request goes through a per-port bounce buffer.
+ *
+ * ATAPI: SCSI commands go in PACKET (A0h) commands, the CDB in the command
+ * table's ACMD area and the A bit in the command header. A CHECK CONDITION
+ * (status ERR) is followed by REQUEST SENSE; sense key / ASC / ASCQ are
+ * decoded in the log. A drive with a disc becomes a read-only removable
+ * blockdev "cdN" (BDEV_DISK_CD, 2048-byte sectors, READ(10)). Media changes
+ * are found by ahci_poll(), called from the main loop: every CD_POLL_MS a
+ * TEST UNIT READY per drive; UNIT ATTENTION or "medium not present"
+ * unregisters the disc, a ready unit with a new disc registers it (READ
+ * CAPACITY). Without CD drives ahci_poll() does nothing.
  */
 #include "drivers/ahci.h"
 #include "drivers/pci.h"
@@ -91,6 +101,20 @@
 #define ATA_FLUSH_CACHE     0xE7
 #define ATA_FLUSH_CACHE_EXT 0xEA
 #define ATA_IDENTIFY        0xEC
+#define ATA_PACKET          0xA0
+#define ATA_IDENTIFY_PACKET 0xA1
+
+/* SCSI / MMC commands (ATAPI) */
+#define SCSI_TEST_UNIT_READY 0x00
+#define SCSI_REQUEST_SENSE   0x03
+#define SCSI_START_STOP      0x1B
+#define SCSI_ALLOW_REMOVAL   0x1E
+#define SCSI_READ_CAPACITY   0x25
+#define SCSI_READ10          0x28
+
+#define CMD_ATAPI     (1u << 24)      /* PxCMD.ATAPI: device is ATAPI (LED) */
+#define HDR_ATAPI     (1u << 5)       /* command header A bit */
+#define IS_FATAL      ((1u << 29) | (1u << 28) | (1u << 27) | (1u << 26) | (1u << 24))
 
 #define FIS_TYPE_H2D        0x27
 
@@ -102,6 +126,13 @@
 #define AHCI_CMD_TIMEOUT    5000            /* ms */
 #define AHCI_FLUSH_TIMEOUT  30000           /* ms */
 #define AHCI_STOP_TIMEOUT   500             /* ms */
+#define CD_SECTOR           2048
+#define CD_READ_TIMEOUT     30000           /* ms: spin-up, retries on scratched discs */
+#define CD_TUR_TIMEOUT      5000
+#define CD_POLL_MS          2000            /* media change poll interval */
+#define CD_POLL_FAST_MS     250             /* after UNIT ATTENTION / while becoming ready */
+#define CD_POLL_SLOW_MS     30000           /* after a timeout */
+#define CD_MAX              8
 
 /* ---------------- DMA structures ---------------- */
 typedef struct {
@@ -149,14 +180,33 @@ typedef struct ahci_port {
     u32 sector_size;
     u64 sectors;
     blockdev_t bd;
+    /* ATAPI */
+    u8 atapi;
+    u8 dma_ok;                  /* packet data by DMA (else PIO) */
+    u8 dmadir;                  /* DMADIR feature bit required */
+    u8 cdb_len;                 /* 12 or 16 */
+    u8 sense_key, asc, ascq;    /* of the last failed packet command */
+    u8 registered;              /* disc registered as a blockdev */
+    u8 changed;                 /* UNIT ATTENTION / removal seen: current disc is stale */
+    u8 unreadable;              /* disc present but no usable data (until the next change) */
+    u8 state;                   /* CD_* (last logged) */
+    u8 *sense;                  /* 32-byte DMA buffer for REQUEST SENSE */
+    u64 next_poll;
 } ahci_port_t;
+
+enum { CD_UNKNOWN, CD_READY, CD_EMPTY, CD_SPINUP, CD_ERROR };
 
 /* weak: the driver also links (and logs) without a block layer */
 int blockdev_register(blockdev_t *bd) __attribute__((weak));
+void blockdev_unregister(blockdev_t *bd) __attribute__((weak));
 
 static int g_disk_count;
+static ahci_port_t *g_cds[CD_MAX];
+static int g_cd_count;
 
 int ahci_disk_count(void) { return g_disk_count; }
+int ahci_cd_count(void) { return g_cd_count; }
+blockdev_t *ahci_cd_get(int i) { return i >= 0 && i < g_cd_count ? &g_cds[i]->bd : NULL; }
 
 /* ---------------- register helpers ---------------- */
 static inline u32 hba_rd(ahci_hba_t *h, u32 off) { return mmio_read32(h->abar + off); }
@@ -291,14 +341,19 @@ static void idle_poll(u64 *last) {
     if (now != *last) { *last = now; g_idle_hook(); }
 }
 
-/* Build and run one command in slot 0. buf/bytes describe the data phase
- * (bytes == 0: no data). buf must be word aligned and DMA reachable. */
-static int port_exec(ahci_port_t *p, u8 cmd, u64 lba, u32 count, void *buf, u32 bytes,
-                     int write, u32 timeout_ms) {
+/* Run the command whose FIS (and, for ATAPI, CDB) is already in the command
+ * table, in slot 0. buf/bytes describe the data phase (bytes == 0: no data);
+ * buf must be word aligned and DMA reachable. Returns 0, E_IO, E_TIMEOUT or
+ * E_INVAL; on failure the port is recovered and the failure logged, except
+ * for an ATAPI CHECK CONDITION (*chk set): the caller asks for the sense. */
+static int port_run(ahci_port_t *p, void *buf, u32 bytes, int write, int atapi, u32 timeout_ms,
+                    u64 lba, u32 count, int *chk) {
     char nm[32];
     ahci_cmd_hdr_t *h = &p->clb[0];
     ahci_cmd_tbl_t *t = p->tbl;
+    u8 cmd = t->cfis[2];
     int nprd = 0;
+    if (chk) *chk = 0;
 
     /* PRDT */
     u64 addr = virt_to_phys(buf);
@@ -313,25 +368,8 @@ static int port_exec(ahci_port_t *p, u8 cmd, u64 lba, u32 count, void *buf, u32 
         addr += len; left -= len; nprd++;
     }
 
-    /* command FIS */
-    u8 *f = t->cfis;
-    memset(f, 0, 20);
-    f[0] = FIS_TYPE_H2D;
-    f[1] = 0x80;                                /* C: command register update */
-    f[2] = cmd;
-    if (cmd == ATA_READ_DMA_EXT || cmd == ATA_WRITE_DMA_EXT) {
-        f[4] = (u8)lba; f[5] = (u8)(lba >> 8); f[6] = (u8)(lba >> 16);
-        f[7] = 0x40;                            /* LBA mode */
-        f[8] = (u8)(lba >> 24); f[9] = (u8)(lba >> 32); f[10] = (u8)(lba >> 40);
-        f[12] = (u8)count; f[13] = (u8)(count >> 8);   /* 65536 -> 0 */
-    } else if (cmd == ATA_READ_DMA || cmd == ATA_WRITE_DMA) {
-        f[4] = (u8)lba; f[5] = (u8)(lba >> 8); f[6] = (u8)(lba >> 16);
-        f[7] = 0x40 | ((lba >> 24) & 0x0F);
-        f[12] = (u8)count;                      /* 256 -> 0 */
-    }
-
     /* command header: CFL = 5 dwords */
-    h->dw0 = 5 | (write ? (1u << 6) : 0) | ((u32)nprd << 16);
+    h->dw0 = 5 | (atapi ? HDR_ATAPI : 0) | (write ? (1u << 6) : 0) | ((u32)nprd << 16);
     h->prdbc = 0;
     h->ctba = (u32)virt_to_phys(t);
     h->ctbau = (u32)(virt_to_phys(t) >> 32);
@@ -380,11 +418,20 @@ static int port_exec(ahci_port_t *p, u8 cmd, u64 lba, u32 count, void *buf, u32 
     u32 tfd = px_rd(p, PX_TFD);
     is = px_rd(p, PX_IS) | p->is_acc;
     if (timed_out || (is & IS_ERR_MASK) || (tfd & (TFD_ERR | TFD_BSY | TFD_DRQ))) {
-        kprintf("ahci: %s: command %02x lba %lu count %u %s: IS %08x TFD %08x "
-                "(status %02x error %02x) SERR %08x CI %08x\n",
-                port_name(p, nm, sizeof nm), cmd, lba, count,
-                timed_out ? "timed out" : "failed", is, tfd, tfd & 0xFF, (tfd >> 8) & 0xFF,
-                px_rd(p, PX_SERR), px_rd(p, PX_CI));
+        int check = atapi && !timed_out && (tfd & TFD_ERR) && !(tfd & (TFD_BSY | TFD_DRQ)) && !(is & IS_FATAL);
+        if (check && chk) {
+            /* CHECK CONDITION: the sense key is in the error register */
+            *chk = 1;
+            p->sense_key = (u8)((tfd >> 12) & 0xF);
+        } else {
+            char pk[16] = "";
+            if (atapi) snprintf(pk, sizeof pk, " (packet %02x)", t->acmd[0]);
+            kprintf("ahci: %s: command %02x%s lba %lu count %u %s: IS %08x TFD %08x "
+                    "(status %02x error %02x) SERR %08x CI %08x\n",
+                    port_name(p, nm, sizeof nm), cmd, pk, lba, count,
+                    timed_out ? "timed out" : "failed", is, tfd, tfd & 0xFF, (tfd >> 8) & 0xFF,
+                    px_rd(p, PX_SERR), px_rd(p, PX_CI));
+        }
         port_recover(p);
         return timed_out ? E_TIMEOUT : E_IO;
     }
@@ -394,6 +441,126 @@ static int port_exec(ahci_port_t *p, u8 cmd, u64 lba, u32 count, void *buf, u32 
     return 0;
 }
 
+/* Build and run one ATA command in slot 0. buf/bytes describe the data phase
+ * (bytes == 0: no data). buf must be word aligned and DMA reachable. */
+static int port_exec(ahci_port_t *p, u8 cmd, u64 lba, u32 count, void *buf, u32 bytes,
+                     int write, u32 timeout_ms) {
+    /* command FIS */
+    u8 *f = p->tbl->cfis;
+    memset(f, 0, 20);
+    f[0] = FIS_TYPE_H2D;
+    f[1] = 0x80;                                /* C: command register update */
+    f[2] = cmd;
+    if (cmd == ATA_READ_DMA_EXT || cmd == ATA_WRITE_DMA_EXT) {
+        f[4] = (u8)lba; f[5] = (u8)(lba >> 8); f[6] = (u8)(lba >> 16);
+        f[7] = 0x40;                            /* LBA mode */
+        f[8] = (u8)(lba >> 24); f[9] = (u8)(lba >> 32); f[10] = (u8)(lba >> 40);
+        f[12] = (u8)count; f[13] = (u8)(count >> 8);   /* 65536 -> 0 */
+    } else if (cmd == ATA_READ_DMA || cmd == ATA_WRITE_DMA) {
+        f[4] = (u8)lba; f[5] = (u8)(lba >> 8); f[6] = (u8)(lba >> 16);
+        f[7] = 0x40 | ((lba >> 24) & 0x0F);
+        f[12] = (u8)count;                      /* 256 -> 0 */
+    }
+    return port_run(p, buf, bytes, write, 0, timeout_ms, lba, count, NULL);
+}
+
+/* ---------------- ATAPI ---------------- */
+static const char *sense_text(u8 key, u8 asc, u8 ascq) {
+    static const char *const keys[16] = {
+        "no sense", "recovered error", "not ready", "medium error", "hardware error", "illegal request",
+        "unit attention", "data protect", "blank check", "vendor specific", "copy aborted",
+        "aborted command", "equal", "volume overflow", "miscompare", "reserved" };
+    if (asc == 0x3A) return ascq == 1 ? "medium not present, tray closed" :
+                            ascq == 2 ? "medium not present, tray open" : "medium not present";
+    if (asc == 0x04 && ascq == 0x01) return "becoming ready";
+    if (asc == 0x04) return "not ready";
+    if (asc == 0x28) return "medium may have changed";
+    if (asc == 0x29) return "power on or reset";
+    if (asc == 0x30) return "incompatible medium (blank or audio disc?)";
+    if (asc == 0x21) return "logical block address out of range";
+    if (asc == 0x64) return "illegal mode for this track (audio track?)";
+    if (asc == 0x11) return "unrecovered read error";
+    if (asc == 0x20) return "invalid command";
+    if (asc == 0x24) return "invalid field in CDB";
+    if (asc == 0x5A) return "operator medium removal request";
+    return keys[key & 0xF];
+}
+
+/* Run a packet command (CDB of p->cdb_len bytes; data in, by DMA if the
+ * drive does it). On CHECK CONDITION the sense is fetched into
+ * p->sense_key / asc / ascq and E_IO returned. */
+static int atapi_packet(ahci_port_t *p, const u8 *cdb, void *buf, u32 bytes, u32 timeout_ms, u64 lba) {
+    ahci_cmd_tbl_t *t = p->tbl;
+    int chk;
+    p->sense_key = p->asc = p->ascq = 0;
+    memset(t->acmd, 0, sizeof t->acmd);
+    memcpy(t->acmd, cdb, p->cdb_len);
+    u8 *f = t->cfis;
+    memset(f, 0, 20);
+    f[0] = FIS_TYPE_H2D;
+    f[1] = 0x80;
+    f[2] = ATA_PACKET;
+    if (bytes && p->dma_ok) {
+        f[3] = 0x01 | (p->dmadir ? 0x04 : 0);   /* DMA, device to host */
+    } else {
+        u32 bcl = bytes ? MIN(bytes, 0xFFFEu) : 0;     /* PIO byte count limit */
+        f[5] = (u8)bcl; f[6] = (u8)(bcl >> 8);
+    }
+    u32 count = cdb[0] == SCSI_READ10 ? (u32)((cdb[7] << 8) | cdb[8]) : 0;
+    int r = port_run(p, buf, bytes, 0, 1, timeout_ms, lba, count, &chk);
+    if (!chk) return r;
+
+    /* REQUEST SENSE (fixed format, 18 bytes) */
+    u8 key = p->sense_key;
+    static const u8 rs[16] = { SCSI_REQUEST_SENSE, 0, 0, 0, 18, 0 };
+    memset(t->acmd, 0, sizeof t->acmd);
+    memcpy(t->acmd, rs, p->cdb_len);
+    memset(f, 0, 20);
+    f[0] = FIS_TYPE_H2D;
+    f[1] = 0x80;
+    f[2] = ATA_PACKET;
+    if (p->dma_ok) f[3] = 0x01 | (p->dmadir ? 0x04 : 0);
+    else { f[5] = 18; f[6] = 0; }
+    memset(p->sense, 0, 32);
+    int r2 = port_run(p, p->sense, 18, 0, 1, CD_TUR_TIMEOUT, 0, 0, &chk);
+    if (!r2 && (p->sense[0] & 0x7E) == 0x70) {
+        p->sense_key = p->sense[2] & 0xF;
+        p->asc = p->sense[12];
+        p->ascq = p->sense[13];
+    } else {
+        p->sense_key = key;
+    }
+    return E_IO;
+}
+
+static int atapi_simple(ahci_port_t *p, u8 op, u8 b1, u8 b4, u32 timeout_ms) {
+    u8 cdb[16] = { op, b1, 0, 0, b4 };
+    return atapi_packet(p, cdb, NULL, 0, timeout_ms, 0);
+}
+
+/* READ(10) of count 2048-byte blocks; one retry for errors other than a
+ * media change */
+static int cd_read10(ahci_port_t *p, u64 lba, u32 count, void *buf) {
+    char nm[32];
+    u8 cdb[16] = { SCSI_READ10, 0, (u8)(lba >> 24), (u8)(lba >> 16), (u8)(lba >> 8), (u8)lba,
+                   0, (u8)(count >> 8), (u8)count, 0 };
+    int r = E_IO;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        r = atapi_packet(p, cdb, buf, count * CD_SECTOR, CD_READ_TIMEOUT, lba);
+        if (!r) return 0;
+        if (p->sense_key == 6 || (p->sense_key == 2 && p->asc == 0x3A)) {
+            p->changed = 1;           /* the disc went away or was swapped */
+            p->next_poll = 0;
+            break;
+        }
+        if (r == E_TIMEOUT) break;
+    }
+    kprintf("ahci: %s: %s: READ lba %lu count %u failed: sense %x/%02x/%02x (%s)\n",
+            port_name(p, nm, sizeof nm), p->bd.name, lba, count, p->sense_key, p->asc, p->ascq,
+            sense_text(p->sense_key, p->asc, p->ascq));
+    return r;
+}
+
 /* ---------------- block device interface ---------------- */
 static int ahci_rw(blockdev_t *bd, u64 lba, u32 count, void *buf, int write) {
     ahci_port_t *p = bd ? (ahci_port_t *)bd->priv : NULL;
@@ -401,6 +568,7 @@ static int ahci_rw(blockdev_t *bd, u64 lba, u32 count, void *buf, int write) {
     if (!bd->present) return E_NODEV;
     if (lba >= p->sectors || count > p->sectors - lba) return E_INVAL;
     if (p->busy) return E_BUSY;                 /* re-entered from the idle hook */
+    if (p->atapi && (write || p->changed)) return write ? E_ROFS : E_IO;
     p->busy = 1;
 
     u32 ss = p->sector_size;
@@ -421,7 +589,8 @@ static int ahci_rw(blockdev_t *bd, u64 lba, u32 count, void *buf, int write) {
         u32 bytes = n * ss;
         void *dma = bounce ? (void *)p->bounce : (void *)b;
         if (write && bounce) memcpy(p->bounce, b, bytes);
-        rc = port_exec(p, cmd, lba, n, dma, bytes, write, AHCI_CMD_TIMEOUT);
+        rc = p->atapi ? cd_read10(p, lba, n, dma)
+                      : port_exec(p, cmd, lba, n, dma, bytes, write, AHCI_CMD_TIMEOUT);
         if (rc) break;
         if (!write && bounce) memcpy(b, p->bounce, bytes);
         b += bytes; lba += n; count -= n;
@@ -528,7 +697,7 @@ static int port_identify(ahci_port_t *p) {
 /* ---------------- port bring-up ---------------- */
 static void port_free(ahci_port_t *p) {
     if (p->hba->ports[p->index] == p) p->hba->ports[p->index] = NULL;
-    dma_free(p->clb); dma_free(p->fis); dma_free(p->tbl); dma_free(p->bounce);
+    dma_free(p->clb); dma_free(p->fis); dma_free(p->tbl); dma_free(p->bounce); dma_free(p->sense);
     kfree(p);
 }
 
@@ -591,6 +760,205 @@ static ahci_port_t *port_prepare(ahci_hba_t *hba, int index) {
     return p;
 }
 
+/* ---------------- ATAPI CD/DVD drives ---------------- */
+static inline u32 be32(const u8 *b) { return ((u32)b[0] << 24) | ((u32)b[1] << 16) | ((u32)b[2] << 8) | b[3]; }
+
+static int cd_identify(ahci_port_t *p) {
+    char nm[32], serial[24], fw[12];
+    port_name(p, nm, sizeof nm);
+    u16 *id = (u16 *)p->bounce;
+    memset(id, 0, 512);
+    int rc = port_exec(p, ATA_IDENTIFY_PACKET, 0, 0, id, 512, 0, AHCI_CMD_TIMEOUT);
+    if (rc) {
+        kprintf("ahci: %s: IDENTIFY PACKET DEVICE failed (%d)\n", nm, rc);
+        return rc;
+    }
+    if ((id[0] & 0xC000) != 0x8000) {
+        kprintf("ahci: %s: IDENTIFY PACKET data says not an ATAPI device, skipped\n", nm);
+        return E_NOTSUP;
+    }
+    u32 type = (id[0] >> 8) & 0x1F;
+    if (type != 5) {
+        kprintf("ahci: %s: ATAPI device type %u (not a CD/DVD drive) unsupported, skipped\n", nm, type);
+        return E_NOTSUP;
+    }
+    p->cdb_len = (id[0] & 3) == 1 ? 16 : 12;
+    p->dma_ok = (id[49] & (1u << 8)) != 0;
+    p->dmadir = (id[62] & 0x8000) != 0;
+    ata_string(id, 27, 20, p->bd.model, sizeof p->bd.model);
+    ata_string(id, 10, 10, serial, sizeof serial);
+    ata_string(id, 23, 4, fw, sizeof fw);
+    kprintf("ahci: %s: CD/DVD drive \"%s\" serial \"%s\" fw \"%s\", %u-byte packets, %s%s\n", nm,
+            p->bd.model, serial, fw, p->cdb_len, p->dma_ok ? "DMA" : "PIO", p->dmadir ? " (DMADIR)" : "");
+    return 0;
+}
+
+static void cd_detach(ahci_port_t *p, const char *why) {
+    if (!p->registered) return;
+    kprintf("ahci: %s: disc %s\n", p->bd.name, why);
+    p->registered = 0;
+    if (blockdev_unregister) blockdev_unregister(&p->bd);
+    p->bd.present = 0;
+}
+
+/* a ready unit: READ CAPACITY and register the disc */
+static void cd_attach(ahci_port_t *p) {
+    blockdev_t *bd = &p->bd;
+    u8 cdb[16] = { SCSI_READ_CAPACITY };
+    u8 *cap = p->bounce;
+    memset(cap, 0, 8);
+    p->busy = 1;
+    int r = atapi_packet(p, cdb, cap, 8, CD_TUR_TIMEOUT, 0);
+    p->busy = 0;
+    p->changed = 0;
+    u32 last = be32(cap), blen = be32(cap + 4);
+    if (r || !last || last == 0xFFFFFFFF) {
+        if (r) kprintf("ahci: %s: disc without readable data: READ CAPACITY sense %x/%02x/%02x (%s)\n", bd->name,
+                       p->sense_key, p->asc, p->ascq, sense_text(p->sense_key, p->asc, p->ascq));
+        else kprintf("ahci: %s: disc without readable data (capacity %u)\n", bd->name, last);
+        p->unreadable = 1;
+        return;
+    }
+    if (blen != CD_SECTOR)      /* some drives report 2352 or 0 for data discs too */
+        kprintf("ahci: %s: drive reports %u-byte blocks, using 2048\n", bd->name, blen);
+    p->sectors = (u64)last + 1;
+    p->sector_size = CD_SECTOR;
+    bd->sector_size = CD_SECTOR;
+    bd->sector_count = p->sectors;
+    p->registered = 1;
+    char sz[24];
+    fmt_size(p->sectors * CD_SECTOR, sz, sizeof sz);
+    kprintf("ahci: %s: disc inserted, %lu blocks of 2048 bytes (%s)\n", bd->name, p->sectors, sz);
+    if (blockdev_register) {
+        int rc = blockdev_register(bd);
+        if (rc) {
+            kprintf("ahci: %s: blockdev_register failed (%d)\n", bd->name, rc);
+            p->registered = 0;
+            bd->present = 0;
+        }
+    }
+}
+
+/* TEST UNIT READY and act on the result: register a new disc, drop a
+ * removed or changed one. Returns the CD_* state (CD_UNKNOWN after a
+ * UNIT ATTENTION: test again). */
+static int cd_check(ahci_port_t *p) {
+    char nm[32];
+    port_name(p, nm, sizeof nm);
+    p->busy = 1;
+    int r = atapi_simple(p, SCSI_TEST_UNIT_READY, 0, 0, CD_TUR_TIMEOUT);
+    p->busy = 0;
+    int st;
+    u32 next = CD_POLL_MS;
+    if (!r) st = CD_READY;
+    else if (r == E_IO && p->sense_key == 6) st = CD_UNKNOWN;
+    else if (r == E_IO && p->sense_key == 2 && p->asc == 0x3A) st = CD_EMPTY;
+    else if (r == E_IO && p->sense_key == 2 && p->asc == 0x04) st = CD_SPINUP;
+    else st = CD_ERROR;
+
+    if (st == CD_UNKNOWN) {
+        /* power-on reset, or the disc was changed: whatever is registered is stale */
+        if (p->asc != 0x29) kprintf("ahci: %s: unit attention: %s\n", p->bd.name, sense_text(6, p->asc, p->ascq));
+        cd_detach(p, "changed");
+        p->changed = 0;
+        p->unreadable = 0;
+        next = CD_POLL_FAST_MS;
+    } else if (st != p->state) {
+        if (st == CD_READY) kprintf("ahci: %s: unit ready\n", p->bd.name);
+        else if (st == CD_ERROR && r != E_IO) kprintf("ahci: %s: TEST UNIT READY failed (%d)\n", p->bd.name, r);
+        else kprintf("ahci: %s: %s (sense %x/%02x/%02x)\n", p->bd.name,
+                     sense_text(p->sense_key, p->asc, p->ascq), p->sense_key, p->asc, p->ascq);
+        p->state = (u8)st;
+    }
+    if (st == CD_EMPTY) {
+        cd_detach(p, "removed");
+        p->changed = 0;
+        p->unreadable = 0;
+    } else if (st == CD_READY) {
+        if (p->changed) cd_detach(p, "changed");
+        if (!p->registered && !p->unreadable) cd_attach(p);
+    } else if (st == CD_SPINUP) {
+        next = CD_POLL_FAST_MS;
+    } else if (st == CD_ERROR && r == E_TIMEOUT) {
+        next = CD_POLL_SLOW_MS;
+    }
+    p->next_poll = time_ms() + next;
+    return st;
+}
+
+/* ATAPI device found by port_finish: identify it and look for a disc */
+static void cd_init(ahci_port_t *p) {
+    char nm[32];
+    port_name(p, nm, sizeof nm);
+    if (g_cd_count >= CD_MAX) {
+        kprintf("ahci: %s: too many CD drives, skipped\n", nm);
+        port_stop(p);
+        port_free(p);
+        return;
+    }
+    p->atapi = 1;
+    p->cdb_len = 12;
+    p->sense = dma_alloc(32, 32);
+    if (!p->sense) {
+        port_stop(p);
+        port_free(p);
+        return;
+    }
+    px_wr(p, PX_CMD, px_rd(p, PX_CMD) | CMD_ATAPI);
+    port_clear_errors(p);
+    port_start_cmd(p);
+    if (cd_identify(p)) {
+        port_stop(p);
+        port_free(p);
+        return;
+    }
+    blockdev_t *bd = &p->bd;
+    snprintf(bd->name, sizeof bd->name, "cd%d", g_cd_count);
+    bd->type = BDEV_DISK_CD;
+    bd->sector_size = CD_SECTOR;
+    bd->removable = 1;
+    bd->readonly = 1;
+    bd->present = 0;
+    bd->read = ahci_read;
+    bd->write = NULL;
+    bd->priv = p;
+    g_cds[g_cd_count++] = p;
+    kprintf("ahci: %s: CD/DVD drive %s\n", nm, bd->name);
+    /* the first commands after a reset report UNIT ATTENTION (power on) */
+    for (int i = 0; i < 4 && cd_check(p) == CD_UNKNOWN; i++) {}
+}
+
+void ahci_poll(void) {
+    static u8 active;
+    if (!g_cd_count || active) return;
+    active = 1;
+    for (int i = 0; i < g_cd_count; i++) {
+        ahci_port_t *p = g_cds[i];
+        if (!p->busy && time_ms() >= p->next_poll) cd_check(p);
+        idle_wake_at(p->next_poll);
+    }
+    active = 0;
+}
+
+int ahci_cd_eject(blockdev_t *bd) {
+    for (int i = 0; i < g_cd_count; i++) {
+        ahci_port_t *p = g_cds[i];
+        if (bd != &p->bd && !(bd && bd->parent == &p->bd)) continue;
+        if (p->busy) return E_BUSY;
+        cd_detach(p, "ejected");
+        p->busy = 1;
+        atapi_simple(p, SCSI_ALLOW_REMOVAL, 0, 0, CD_TUR_TIMEOUT);       /* in case it is locked */
+        int r = atapi_simple(p, SCSI_START_STOP, 0, 0x02, CD_READ_TIMEOUT);   /* LoEj, stop */
+        p->busy = 0;
+        if (r) kprintf("ahci: %s: eject failed: sense %x/%02x/%02x (%s)\n", p->bd.name, p->sense_key, p->asc,
+                       p->ascq, sense_text(p->sense_key, p->asc, p->ascq));
+        p->unreadable = 0;
+        p->next_poll = time_ms() + CD_POLL_MS;
+        return r;
+    }
+    return E_NODEV;
+}
+
 /* Bring-up, phase 2 (after the link wait): check the device, IDENTIFY it
  * and register the disk. */
 static void port_finish(ahci_port_t *p) {
@@ -624,6 +992,11 @@ static void port_finish(ahci_port_t *p) {
     }
 
     u32 sig = px_rd(p, PX_SIG);
+    if (sig == SIG_ATAPI) {
+        kprintf("ahci: %s: ATAPI device, link %s Gbps\n", nm, spd);
+        cd_init(p);
+        return;
+    }
     if (sig != SIG_ATA) {
         kprintf("ahci: %s: %s (signature %08x, %s Gbps) unsupported, skipped\n",
                 nm, sig_name(sig), sig, spd);
@@ -724,11 +1097,18 @@ static void hba_irq_setup(ahci_hba_t *h) {
         if (h->ports[i]) px_wr(h->ports[i], PX_IE, AHCI_PORT_IE);
     hba_wr(h, HBA_IS, 0xFFFFFFFF);
     hba_wr(h, HBA_GHC, hba_rd(h, HBA_GHC) | GHC_IE);
-    /* one harmless non-data command (CHECK POWER MODE) produces the first
+    /* one harmless non-data command (CHECK POWER MODE; TEST UNIT READY on
+     * an ATAPI drive, which may abort the former) produces the first
      * interrupt, which proves MSI or teaches the INTx route */
     for (int i = 0; i < 32; i++) {
         if (!h->ports[i]) continue;
-        port_exec(h->ports[i], 0xE5, 0, 0, NULL, 0, 0, 1000);
+        ahci_port_t *p = h->ports[i];
+        if (p->atapi) {
+            if (atapi_simple(p, SCSI_TEST_UNIT_READY, 0, 0, 1000) && p->sense_key == 6) {
+                p->changed = 1;                 /* don't lose a UNIT ATTENTION */
+                p->next_poll = 0;
+            }
+        } else port_exec(h->ports[i], 0xE5, 0, 0, NULL, 0, 0, 1000);
         break;
     }
     u64 end = time_ms() + 20;
@@ -839,6 +1219,6 @@ void ahci_init(void) {
         found++;
         hba_init(d);
     }
-    kprintf("ahci: %d controller(s), %d disk(s), init took %lu ms\n", found, g_disk_count,
-            time_ms() - t0);
+    kprintf("ahci: %d controller(s), %d disk(s), %d CD/DVD drive(s), init took %lu ms\n", found, g_disk_count,
+            g_cd_count, time_ms() - t0);
 }

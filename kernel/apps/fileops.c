@@ -136,6 +136,7 @@ int drive_icon(volume_t *v) {
     if (!v->bd) return ICON_HDD;
     blockdev_t *d = v->bd->parent ? v->bd->parent : v->bd;
     if (d->type == BDEV_DISK_USB) return ICON_USBDRIVE;
+    if (d->type == BDEV_DISK_CD) return ICON_CDROM;
     if (!strcmp(v->fs_name, "FAT12") && d->sector_count <= 5760) return ICON_FLOPPY;
     return ICON_HDD;
 }
@@ -144,5 +145,6 @@ const char *drive_kind(volume_t *v) {
     int ic = drive_icon(v);
     if (ic == ICON_USBDRIVE) return "Removable Disk";
     if (ic == ICON_FLOPPY) return "Floppy Disk";
+    if (ic == ICON_CDROM) return "CD Drive";
     return "Local Disk";
 }

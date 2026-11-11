@@ -7,6 +7,17 @@
  *     last LBA if the primary is damaged)
  *   - no partition table: the whole disk is offered to the file systems
  *     ("superfloppy": floppy images, some USB sticks)
+ *   - hybrid ISO images (isohybrid, xorriso --protective-msdos-label or
+ *     -isohybrid-gpt-basdat) dd'ed to a USB stick or disk: when the disk has
+ *     an ISO 9660 volume descriptor at byte 32768 and a partition entry
+ *     covers it (starts within the first 32 KiB; type 0 entries included),
+ *     the whole disk is offered to the file systems first (it mounts as
+ *     ISO 9660), then the partitions as usual (e.g. an EFI system image).
+ *     A partition that holds its own ISO descriptors (xorriso
+ *     -partition_offset) mounts by itself instead. Stale descriptors left
+ *     below a normal layout (partitions from 1 MiB) are ignored.
+ *   - CD/DVD (BDEV_DISK_CD): never scanned for partitions, the whole disc
+ *     is offered to the file systems.
  */
 #include "core/types.h"
 #include "core/lib.h"
@@ -14,6 +25,7 @@
 #include "fs/block.h"
 #include "fs/vfs.h"
 #include "fs/fat.h"
+#include "fs/iso9660.h"
 
 #define MAX_LOGICAL   128
 #define MAX_GPT_PARTS 256
@@ -238,6 +250,32 @@ static int scan_gpt(blockdev_t *disk, u8 *buf) {
     return count;
 }
 
+/* ---- hybrid ISO images ---- */
+
+#define ISO_VD_BYTE 32768u
+
+/* an MBR entry (other than the GPT protective one, even of type 0) that
+ * starts below the ISO 9660 volume descriptors */
+static int mbr_low_entry(const u8 *s, u32 ss) {
+    for (int i = 0; i < 4; i++) {
+        const u8 *e = s + 446 + 16 * i;
+        if (e[4] == 0xEE || !rd32(e + 12)) continue;
+        if ((u64)rd32(e + 8) * ss < ISO_VD_BYTE) return 1;
+    }
+    return 0;
+}
+
+static int hybrid_iso(blockdev_t *disk, int low_entry, int nparts) {
+    if (!iso9660_detect(disk)) return 0;
+    int covered = low_entry || nparts == 0;
+    for (blockdev_t *b = g_devs; b; b = b->next) {
+        if (b->parent != disk || b->part_start * disk->sector_size > ISO_VD_BYTE) continue;
+        if (iso9660_detect(b)) return 0;        /* self-contained ISO partition */
+        covered = 1;
+    }
+    return covered;
+}
+
 /* ---- registration ---- */
 
 static void mount_children(blockdev_t *disk) {
@@ -257,6 +295,11 @@ int blockdev_register(blockdev_t *bd) {
     list_add(bd);
     kprintf("block: %s: %s, %lu sectors of %u bytes%s%s\n", bd->name, bd->model, bd->sector_count,
             bd->sector_size, bd->removable ? ", removable" : "", bd->readonly ? ", read-only" : "");
+
+    if (bd->type == BDEV_DISK_CD) {
+        vfs_try_mount(bd);
+        return 0;
+    }
 
     u8 *s0 = kmalloc(bd->sector_size), *buf = kmalloc(bd->sector_size);
     if (!s0 || !buf) { kfree(s0); kfree(buf); return E_NOMEM; }
@@ -297,11 +340,16 @@ int blockdev_register(blockdev_t *bd) {
     } else if (mbr) {
         nparts = scan_mbr(bd, s0, buf);
     }
+    int low_entry = mbr ? mbr_low_entry(s0, bd->sector_size) : 0;
     kfree(s0);
     kfree(buf);
 
     if (nparts >= 0) {
         kprintf("block: %s: %d partition(s)\n", bd->name, nparts);
+        if (hybrid_iso(bd, low_entry, nparts)) {
+            kprintf("block: %s: hybrid ISO 9660 image, whole disk offered\n", bd->name);
+            vfs_try_mount(bd);
+        }
         mount_children(bd);
     } else {
         /* no partition table: superfloppy (or unknown) */

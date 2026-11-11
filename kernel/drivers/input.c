@@ -10,6 +10,7 @@ static u8 leds = LED_NUM;
 static u32 led_gen;
 
 void usb_poll(void) __attribute__((weak));
+void ahci_poll(void) __attribute__((weak));   /* CD/DVD media change */
 
 static void push(const input_event_t *e) {
     int n = (qhead + 1) % QSIZE;
@@ -33,6 +34,7 @@ int input_get(input_event_t *ev) {
 void input_poll_devices(void) {
     ps2_poll();
     if (usb_poll) usb_poll();
+    if (ahci_poll) ahci_poll();
 }
 
 u8 input_mods(void) {
