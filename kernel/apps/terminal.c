@@ -512,6 +512,10 @@ static void run_command(term_t *t, char *line) {
             while (*redir == ' ') redir++;
             char *e = redir + strlen(redir);
             while (e > redir && e[-1] == ' ') *--e = 0;
+            if (*redir == '"') { redir++; char *q = strchr(redir, '"'); if (q) *q = 0; }
+            /* trim the command part */
+            e = p;
+            while (e > line && e[-1] == ' ') *--e = 0;
             break;
         }
     }
