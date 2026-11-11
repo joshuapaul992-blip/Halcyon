@@ -33,5 +33,6 @@ struct mm_stats {
     u64 heap_blocks;
 };
 void mm_get_stats(struct mm_stats *st);
+u64  mm_heap_free(void);          /* bytes not allocated (may be fragmented) */
 
 #endif

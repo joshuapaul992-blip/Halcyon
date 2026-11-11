@@ -129,6 +129,7 @@ static long con_write(proc_t *p, u64 ubuf, u64 len) {
 
 static long con_read(proc_t *p, u64 ubuf, u64 len) {
     if (!p->con || !p->con->read) return 0;          /* no console: end of input */
+    if (!user_writable(ubuf, MIN(len, 512))) return E_INVAL;   /* before waiting for a line */
     char buf[512];
     int n = p->con->read(p->con_ctx, buf, (int)MIN(len, sizeof buf));
     if (n <= 0) return n;

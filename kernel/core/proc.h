@@ -63,6 +63,7 @@ void proc_detach_console(void *con_ctx);
 int  copyin(void *dst, u64 uva, u64 len);
 int  copyout(u64 uva, const void *src, u64 len);
 int  copyin_str(char *dst, u64 uva, u64 max);       /* E_NAMETOOLONG if no NUL within max */
+int  user_writable(u64 uva, u64 len);               /* mapped and writable by the current process */
 
 /* grow the process's memory (sbrk) */
 int  vm_grow(proc_t *p, u64 va, u64 len);

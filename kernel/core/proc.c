@@ -14,6 +14,7 @@
 #define PTE_ADDR 0x000FFFFFFFFFF000ull
 #define PML4_USER_FIRST 64
 #define PML4_USER_LAST  255
+#define KERNEL_RESERVE  (32ull << 20)       /* heap kept free for the kernel */
 
 u64 *mm_kernel_pml4(void);                         /* mm.c */
 void irq_timeslice(u64 ms);                        /* irq.c */
@@ -35,13 +36,74 @@ proc_t *proc_by_pid(u32 pid) {
 int proc_alive(u32 pid) { proc_t *p = proc_by_pid(pid); return p && p->state == P_RUNNING; }
 int proc_exit_code(u32 pid) { proc_t *p = proc_by_pid(pid); return p ? p->exit_code : E_NOENT; }
 
+/* ---------------- page pool ---------------- */
+/* User pages and page tables come from 1 MiB chunks of the kernel heap
+ * (the heap's first-fit list would be far too slow for single pages); a chunk
+ * goes back to the heap when all of its pages are free again. */
+#define CHUNK_PAGES 256
+typedef struct chunk {
+    u8 *base;
+    u32 nfree;
+    u64 used[CHUNK_PAGES / 64];
+    struct chunk *next;
+} chunk_t;
+static chunk_t *chunks;
+
+static void *page_alloc(void) {
+    chunk_t *c = chunks;
+    while (c && !c->nfree) c = c->next;
+    if (!c) {
+        if (mm_heap_free() < KERNEL_RESERVE + CHUNK_PAGES * 4096) return NULL;
+        c = kzalloc(sizeof *c);
+        u8 *b = c ? kmalloc_aligned(CHUNK_PAGES * 4096, 4096) : NULL;
+        if (!b) { kfree(c); return NULL; }
+        c->base = b;
+        c->nfree = CHUNK_PAGES;
+        c->next = chunks;
+        chunks = c;
+    }
+    for (int w = 0; w < CHUNK_PAGES / 64; w++) {
+        if (c->used[w] == ~0ull) continue;
+        int bit = __builtin_ctzll(~c->used[w]);
+        c->used[w] |= 1ull << bit;
+        c->nfree--;
+        u8 *pg = c->base + (u64)(w * 64 + bit) * 4096;
+        memset(pg, 0, 4096);
+        return pg;
+    }
+    return NULL;
+}
+
+static chunk_t *free_hint;
+static void page_free(void *pg) {
+    chunk_t *h = free_hint;
+    if (h && (u8 *)pg >= h->base && (u8 *)pg < h->base + CHUNK_PAGES * 4096 && h->nfree + 1 < CHUNK_PAGES) {
+        u64 i = (u64)((u8 *)pg - h->base) / 4096;      /* fast path: same chunk as last time, not emptied */
+        h->used[i / 64] &= ~(1ull << (i % 64));
+        h->nfree++;
+        return;
+    }
+    chunk_t **pp = &chunks;
+    for (; *pp; pp = &(*pp)->next) {
+        chunk_t *c = *pp;
+        if ((u8 *)pg < c->base || (u8 *)pg >= c->base + CHUNK_PAGES * 4096) continue;
+        u64 i = (u64)((u8 *)pg - c->base) / 4096;
+        c->used[i / 64] &= ~(1ull << (i % 64));
+        free_hint = c;
+        if (++c->nfree == CHUNK_PAGES) {
+            *pp = c->next;
+            if (free_hint == c) free_hint = NULL;
+            kfree(c->base);
+            kfree(c);
+        }
+        return;
+    }
+    kprintf("proc: page_free: %p is not a user page\n", pg);
+}
+
 /* ---------------- address spaces ---------------- */
 
-static u64 *table_new(void) {
-    u64 *t = kmalloc_aligned(4096, 4096);
-    if (t) memset(t, 0, 4096);
-    return t;
-}
+static u64 *table_new(void) { return page_alloc(); }
 
 static int user_range(u64 va, u64 len) {
     return va >= USER_BASE && va < USER_END && len <= USER_END - va;
@@ -71,9 +133,8 @@ static int vm_alloc(proc_t *p, u64 va, u64 len) {
         if (!pte) return E_NOMEM;
         if (*pte & PTE_P) continue;
         if (p->pages >= USER_MAX_PAGES) return E_NOMEM;
-        void *frame = kmalloc_aligned(4096, 4096);
+        void *frame = page_alloc();          /* keeps the kernel's reserve */
         if (!frame) return E_NOMEM;
-        memset(frame, 0, 4096);
         *pte = (u64)(uptr)frame | PTE_P | PTE_RW | PTE_US;
         p->pages++;
     }
@@ -94,14 +155,14 @@ static void vm_destroy(proc_t *p) {
                 if (!(l2[i2] & PTE_P)) continue;
                 u64 *l1 = (u64 *)(uptr)(l2[i2] & PTE_ADDR);
                 for (int i1 = 0; i1 < 512; i1++)
-                    if (l1[i1] & PTE_P) kfree((void *)(uptr)(l1[i1] & PTE_ADDR));
-                kfree(l1);
+                    if (l1[i1] & PTE_P) page_free((void *)(uptr)(l1[i1] & PTE_ADDR));
+                page_free(l1);
             }
-            kfree(l2);
+            page_free(l2);
         }
-        kfree(l3);
+        page_free(l3);
     }
-    kfree(p->pml4);
+    page_free(p->pml4);
     p->pml4 = NULL;
     p->pages = 0;
 }
@@ -130,6 +191,13 @@ static u8 *uaddr(u64 va, int write) {
     u64 *pte = walk(p, va, 0);
     if (!pte || !(*pte & PTE_P) || !(*pte & PTE_US) || (write && !(*pte & PTE_RW))) return NULL;
     return (u8 *)(uptr)((*pte & PTE_ADDR) + (va & 0xFFF));
+}
+
+int user_writable(u64 uva, u64 len) {
+    if (!len) return 1;
+    if (!user_range(uva, len)) return 0;
+    for (u64 a = uva & ~0xFFFull; a < uva + len; a += 4096) if (!uaddr(a < uva ? uva : a, 1)) return 0;
+    return 1;
 }
 
 int copyin(void *dst, u64 uva, u64 len) {
@@ -401,7 +469,8 @@ void proc_user_fault(struct regs *r) {
     const char *what = r->vector < ARRAY_SIZE(exc_names) ? exc_names[r->vector] : "an exception";
     if (r->vector == 14)
         snprintf(p->fault, sizeof p->fault, "%s: %s address %#lx%s (at %#lx)", what, (r->error & 2) ? "writing" : "reading",
-                 cr2, (r->error & 1) ? " (protected)" : (cr2 < 0x10000 ? " (a null pointer)" : ""), r->rip);
+                 cr2, cr2 < 0x10000 ? " (a null pointer)" : cr2 < USER_BASE || cr2 >= USER_END ? " (kernel memory)" : "",
+                 r->rip);
     else
         snprintf(p->fault, sizeof p->fault, "%s at %#lx", what, r->rip);
     p->exit_code = -(int)(1000 + r->vector);

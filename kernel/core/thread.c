@@ -132,7 +132,10 @@ static void schedule(void) {
         } while (t != start);
         if (pick) {
             if (pick != cur) switch_to(pick);
-            else cur->state = T_RUNNING;
+            else {
+                cur->state = T_RUNNING;
+                if (thread_switch_hook) thread_switch_hook(cur);   /* a user thread gets a new time slice */
+            }
             break;
         }
         /* nothing can run: sleep until the earliest deadline or an interrupt */

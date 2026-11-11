@@ -167,6 +167,8 @@ void *krealloc(void *p, size_t size) {
     return n;
 }
 
+u64 mm_heap_free(void) { return heap_size - heap_used; }
+
 void mm_get_stats(struct mm_stats *st) {
     st->total_ram = total_ram;
     st->heap_size = heap_size;
