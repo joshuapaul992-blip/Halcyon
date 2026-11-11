@@ -110,40 +110,40 @@ testing sets its pace.
 - A software renderer behind it, written for speed: perspective-correct
   triangle setup, SSE2 inner loops, tiles. Target: textured scenes at 640x480
   at interactive frame rates on one core.
-- The API is the contract for M12: the same programs later run on the GPU, and
-  the software renderer stays as the fallback for any GPU without a 3D driver.
+- Halcyon's own programs use it; Linux programs (M14) get their 3D from Mesa
+  instead (M12, or Mesa's own software renderer without a GPU driver).
 - Frames reach the window through M9's shared memory (no copy per frame).
 - Demos: a 3D screensaver (ties in with M8) and a small 3D game or viewer.
 - Fully testable without hardware: the renderer also builds on the host and
   the CI compares rendered scenes with reference images.
 - Depends on M9 (threads, shared memory).
 
-### M12: Hardware 3D (NVIDIA, Pascal first)
+### M12: Hardware 3D: Mesa on NVIDIA (Pascal first)
 
-- The M11 API on the GPU, first on the GTX 1070. Second-generation Maxwell
-  (900 series) shares Pascal's instruction set and firmware model, so it
-  comes almost for free; Tesla to Kepler would each need their own shader
-  back end and come later, if at all.
-- Kernel side: GPU memory management (VRAM and per-process GPU page tables, so
-  programs stay isolated on the GPU too), command channels, fences, and
-  recovery from GPU faults (end the program, reset the engine).
-- The graphics engine needs NVIDIA's signed GP104 firmware (from
-  linux-firmware); for 3D it is mandatory, not optional.
-- Shaders: the fixed-function pipeline is turned into GPU machine code by a
-  small generator for the Maxwell/Pascal instruction set, not a full shader
-  compiler. Programmable shaders (and with them a compiler) are a later step.
-  The alternative, porting Mesa's nouveau driver, needs a far larger C/C++
-  runtime and kernel interface than Halcyon has; not recommended at first.
-  **Open decision:** M16 (Roblox) needs OpenGL ES 3 or Vulkan with
-  programmable shaders, which this design does not provide. If M16 stays in
-  the plan, M12 is better done as a Mesa port on top of M14, and the shader
-  generator above is skipped.
+Decided: a Mesa port, so programs get modern OpenGL, OpenGL ES 3 and (later)
+Vulkan with programmable shaders, as M16 needs.
+
+- Mesa itself runs unmodified as Linux libraries on M14, the distribution's
+  build. Halcyon's kernel provides what Mesa's nouveau driver talks to: the
+  Linux DRM device files (`/dev/dri/card0`, `renderD128`) with the nouveau
+  interface (GPU memory objects, per-process GPU address spaces, command
+  submission, fences, mode setting for the compositor).
+- Behind that interface, Halcyon's own NVIDIA kernel driver, extending M10 with
+  GPU memory management, command channels, the graphics engine and recovery
+  from GPU faults (end the program, reset the engine). The Linux nouveau kernel
+  driver (MIT-licensed) is the reference and source for porting.
+- First on the GTX 1070; second-generation Maxwell (900 series) uses the same
+  firmware model and comes almost for free. Other generations later.
+- Needs NVIDIA's signed GP104 firmware (from linux-firmware); mandatory for 3D.
+- OpenGL / OpenGL ES through Mesa's nouveau driver is the mature path on
+  Pascal; Vulkan (NVK) on Pascal is less mature.
 - The card stays at its boot clocks (no power-management firmware for Pascal),
-  so it is much slower than under NVIDIA's own driver, but still far faster than
+  so it is much slower than under NVIDIA's own driver, but far faster than
   software.
-- Tested on the GTX 1070 only (VFIO passthrough or bare metal); none of it can
-  run in the CI.
-- Depends on M10 (10a, 10b) and M11.
+- The M14 compositor then takes GPU buffers (dma-buf) directly, and Firefox
+  can render on the GPU.
+- Tested on the GTX 1070 only (VFIO passthrough or bare metal).
+- Depends on M10 (10a, 10b) and M14.
 
 ### M13: Intel and AMD graphics
 
@@ -162,21 +162,22 @@ NVIDIA. Proposed range, matching M10's Pascal (2016):
   this needs an AtomBIOS interpreter (the Linux radeon/amdgpu version is
   MIT-licensed). Vega and RDNA are deferred: their security processor must load
   signed firmware first, and their display code (DCN) is very large.
-- Hardware 3D on Intel or AMD is not part of M13: each needs its own shader back
-  end and command submission, a separate milestone after M12 if wanted. Until
-  then they use M11's software renderer.
+- Hardware 3D on Intel or AMD is not part of M13. With M12's design it would
+  mean the Linux DRM interface for Intel (i915) or AMD (radeon/amdgpu) behind
+  the kernel driver, with Mesa's matching drivers on top: a separate milestone
+  after M12 if wanted. Until then Mesa and M11 render in software.
 - Testing: QEMU emulates neither. AMD cards can be tested through VFIO
   passthrough; Intel integrated GPUs mostly on bare metal.
 - Depends on M5. Independent of M10 to M12, so it can move earlier if running
   well on laptops matters more than the NVIDIA card.
 
-### M14 (proposed): Linux compatibility layer
+### M14: Linux compatibility layer
 
 Both M15 and M16 need far more than Halcyon's program interface offers: a full
 C/C++ runtime, POSIX threads and futexes, `mmap` with protection changes
 (JIT compilers), signals (JITs use fault handlers), sockets and `poll`,
 shared libraries (`dlopen`), thread-local storage, and several CPU cores to
-be usable. The proposed way to get all of it at once:
+be usable. Decided: get all of it at once by running Linux programs.
 
 - Run unmodified Linux x86-64 programs: the Linux system call interface on top
   of Halcyon's kernel (the approach of FreeBSD's Linux emulation and WSL 1), a
@@ -194,15 +195,11 @@ be usable. The proposed way to get all of it at once:
 Only three engines render today's web: Gecko (Firefox), Blink (Chromium) and
 WebKit. Ladybird, a new independent engine, is promising but not yet complete.
 
-- **Recommended: the official Linux Firefox build, unmodified, on M14.** No
+- **Decided: the official Linux Firefox build, unmodified, on M14.** No
   port to maintain, and the security updates a browser needs every few weeks
   come for free. Firefox's own software renderer (SWGL) draws without a GPU;
   with M12 it can use the GPU. Its sandbox needs Linux features (seccomp,
   namespaces) that M14 can add later or switch off at first.
-- Alternative, a native port: Firefox with a new Halcyon window back end
-  (beside its GTK, Windows and macOS ones), or WPE WebKit, the WebKit version
-  made for porting to new platforms. Either still needs most of M14's POSIX
-  layer, and every release has to be ported again.
 - Halcyon side: the browser as the default for web links, downloads into the
   file system, and a handler for app links (needed by M16).
 - Depends on M14 (and M6, M5; M7 for sound).
@@ -218,9 +215,9 @@ layers), so the launcher runs the x86-64 build of the Android app.
   (JNI): the native code calls into hundreds of Android and Roblox Java
   classes, which must be reimplemented. This is most of the work, and it is
   reverse engineering.
-- Graphics: OpenGL ES 3 or Vulkan with programmable shaders (see the open
-  decision under M12). Audio through M7, input (mouse lock, keyboard,
-  controllers), the window through M14's compositor.
+- Graphics: OpenGL ES 3 or Vulkan through Mesa (M12). Audio through M7,
+  input (mouse lock, keyboard, controllers), the window through M14's
+  compositor.
 - Browser integration: roblox.com's "Play" buttons and app links open the
   launcher through M15's link handler; parts of the app that show web pages
   (Android WebView) can be served by M15's engine.
@@ -230,6 +227,7 @@ layers), so the launcher runs the x86-64 build of the Android app.
   upkeep (Sober is maintained by a dedicated team). Roblox does not support
   unofficial runtimes and could block them, and running one may conflict with
   its terms of use, with a risk to the account.
-- Depends on M14, M15, M7, and GPU 3D (M12 as a Mesa port).
+- Depends on M14, M15, M7 and M12.
 
-**Recommended order:** 5 → 9 → 6 → 7 → 8 → 10 → 11 → 12 → 13 → 14 → 15 → 16.
+**Recommended order:** 5 → 9 → 6 → 7 → 8 → 10 → 11 → 13 → 14 → 15 → 12 → 16
+(M12 moved after M14, which Mesa runs on; Firefox does not need it).
