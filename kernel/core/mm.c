@@ -176,6 +176,7 @@ void mm_get_stats(struct mm_stats *st) {
 
 void mm_init(void) {
     paging_init();
+    mm_map_mmio(g_bootinfo.fb_addr, (u64)g_bootinfo.fb_pitch * g_bootinfo.fb_height);
 
     u64 kend = ALIGN_UP((u64)(uptr)_bss_end, 0x10000);
     u64 best_base = 0, best_len = 0;
