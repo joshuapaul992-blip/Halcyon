@@ -1,0 +1,35 @@
+BearSSL 0.6, vendored for Halcyon's HTTPS (userland/lib/web/tls.c)
+===================================================================
+
+Upstream:  https://bearssl.org/  (Thomas Pornin)
+Archive:   https://bearssl.org/bearssl-0.6.tar.gz  (released 2018-08-14)
+SHA-256:   6705bba1714961b41a728dfc5debbe348d2966c117649392f8c8139efc83ff14
+License:   MIT (LICENSE.txt in this directory; the notice is also in every source file)
+
+The publisher gives no checksum or signature for the archive. It was checked
+against the upstream Git repository instead (https://www.bearssl.org/git/BearSSL):
+`git archive v0.6` (tag v0.6, commit 8ef7680081c61b486622f2d983c0d3d21e83caad,
+tagged by Thomas Pornin) is identical file for file to the archive, except
+for the repository's .gitignore, which the archive does not have.
+
+What is here: src/ and inc/ (the C sources, the headers and the T0 sources
+the generated parsers come from), LICENSE.txt and README.txt, unmodified.
+Left out: the build system (Makefile, mk/, conf/, build/), the T0 compiler
+(T0/, T0Comp.exe), tools/ (brssl), samples/, test/ and the Doxygen file.
+Nothing from the download was built or run with its own scripts: the
+Makefile compiles src/*.c with Halcyon's rules (see "libraries linked only
+into the programs that use them" there), against the compiler's
+freestanding headers and the few C library headers in ../bearssl-port/.
+
+Configuration (Makefile, BEAR_CFLAGS): no OS random source and no OS clock
+(BR_USE_URANDOM=0, BR_RDRAND=0, BR_USE_UNIX_TIME=0, ...): libweb seeds every
+connection from getrandom() and gives the X.509 engine the time from the
+real-time clock. AES-NI and SSE2 code is compiled in and used when the CPU
+has it (runtime CPUID check).
+
+Limits that matter: BearSSL speaks TLS 1.0 to 1.2 (libweb allows 1.2 only);
+there is no TLS 1.3, so servers that only accept TLS 1.3 cannot be reached.
+No revocation checks (OCSP / CRL).
+
+To update: download a new release into an empty directory, compare with the
+Git tag, replace src/ and inc/ here, update this file, run tests/web/run.sh.
