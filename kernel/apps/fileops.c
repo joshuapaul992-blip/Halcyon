@@ -2,6 +2,7 @@
 #include "fileops.h"
 #include "core/lib.h"
 #include "core/mm.h"
+#include "core/kernel.h"
 #include "icons.h"
 
 int fileops_delete_tree(const char *path) {
@@ -147,4 +148,124 @@ const char *drive_kind(volume_t *v) {
     if (ic == ICON_FLOPPY) return "Floppy Disk";
     if (ic == ICON_CDROM) return "CD Drive";
     return "Local Disk";
+}
+
+/* ------------------------------------------------------------------ */
+/* copy / move / delete with progress (worker thread)                   */
+
+#define FOP_CHUNK (128 * 1024)
+
+static void fop_count(fileop_t *op, const char *path) {
+    vfs_dirent_t st;
+    if (op->cancel || vfs_stat(path, &st) < 0) return;
+    op->total_items++;
+    if (!st.is_dir) { op->total_bytes += st.size; return; }
+    vfs_dirent_t *ents;
+    int n = vfs_list(path, &ents);
+    if (n <= 0) return;
+    char *child = kmalloc(VFS_MAX_PATH);
+    for (int i = 0; i < n && child && !op->cancel; i++) {
+        vfs_join(path, ents[i].name, child, VFS_MAX_PATH);
+        fop_count(op, child);
+    }
+    kfree(child);
+    kfree(ents);
+}
+
+static int fop_copy_file(fileop_t *op, const char *src, const char *dst) {
+    vfs_file_t *in = NULL, *out = NULL;
+    u8 *buf = kmalloc(FOP_CHUNK);
+    if (!buf) return E_NOMEM;
+    int r = vfs_open(src, VFS_O_READ, &in);
+    if (!r) r = vfs_open(dst, VFS_O_WRITE | VFS_O_CREATE | VFS_O_EXCL, &out);
+    while (!r) {
+        if (op->cancel) { r = E_CANCELED; break; }
+        int n = vfs_read(in, buf, FOP_CHUNK);
+        if (n <= 0) { r = n; break; }
+        int w = vfs_write(out, buf, (u32)n);
+        if (w != n) { r = w < 0 ? w : E_NOSPC; break; }
+        op->done_bytes += (u64)n;
+    }
+    if (in) vfs_close(in);
+    if (out) {
+        vfs_close(out);
+        if (r) vfs_unlink(dst);            /* no half-copied files */
+    }
+    kfree(buf);
+    return r;
+}
+
+static int fop_copy(fileop_t *op, const char *src, const char *dst) {
+    vfs_dirent_t st;
+    int r = vfs_stat(src, &st);
+    if (r < 0) return r;
+    strlcpy(op->current, vfs_basename(src), sizeof op->current);
+    op->done_items++;
+    if (!st.is_dir) return fop_copy_file(op, src, dst);
+    size_t sl = strlen(src);
+    if (!strncasecmp(src, dst, sl) && (dst[sl] == '/' || dst[sl] == 0)) return E_INVAL;   /* into itself */
+    r = vfs_mkdir(dst);
+    if (r < 0 && r != E_EXIST) return r;
+    vfs_dirent_t *ents;
+    int n = vfs_list(src, &ents);
+    if (n < 0) return n;
+    char *a = kmalloc(VFS_MAX_PATH), *b = kmalloc(VFS_MAX_PATH);
+    r = (a && b) ? 0 : E_NOMEM;
+    for (int i = 0; i < n && r >= 0; i++) {
+        if (op->cancel) { r = E_CANCELED; break; }
+        vfs_join(src, ents[i].name, a, VFS_MAX_PATH);
+        vfs_join(dst, ents[i].name, b, VFS_MAX_PATH);
+        r = fop_copy(op, a, b);
+    }
+    kfree(a); kfree(b); kfree(ents);
+    return r < 0 ? r : 0;
+}
+
+static int fop_delete(fileop_t *op, const char *path) {
+    vfs_dirent_t st;
+    int r = vfs_stat(path, &st);
+    if (r < 0) return r;
+    if (st.is_dir) {
+        vfs_dirent_t *ents;
+        int n = vfs_list(path, &ents);
+        if (n < 0) return n;
+        char *child = kmalloc(VFS_MAX_PATH);
+        r = child ? 0 : E_NOMEM;
+        for (int i = 0; i < n && !r; i++) {
+            if (op->cancel) { r = E_CANCELED; break; }
+            vfs_join(path, ents[i].name, child, VFS_MAX_PATH);
+            r = fop_delete(op, child);
+        }
+        kfree(child);
+        kfree(ents);
+        if (r) return r;
+    }
+    strlcpy(op->current, vfs_basename(path), sizeof op->current);
+    r = vfs_unlink(path);
+    op->done_items++;
+    if (!st.is_dir) op->done_bytes += st.size;
+    return r;
+}
+
+void fileop_execute(fileop_t *op) {
+    op->start_ms = time_ms();
+    op->counting = 1;
+    fop_count(op, op->src);
+    op->counting = 0;
+    int r;
+    if (op->cancel) r = E_CANCELED;
+    else if (op->kind == FOP_DELETE) r = fop_delete(op, op->src);
+    else if (op->kind == FOP_MOVE && toupper(op->src[0]) == toupper(op->dst[0])) r = vfs_rename(op->src, op->dst);
+    else {
+        r = fop_copy(op, op->src, op->dst);
+        /* a move across drives deletes the source only after a full copy */
+        if (!r && op->kind == FOP_MOVE) {
+            op->kind = FOP_DELETE;
+            op->done_bytes = op->done_items = 0;
+            r = fop_delete(op, op->src);
+        }
+    }
+    vfs_sync_all();
+    op->result = r;
+    op->done = 1;
 }

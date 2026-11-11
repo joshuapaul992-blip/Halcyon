@@ -296,12 +296,14 @@ static void cmd_delete(ex_t *x) {
     snprintf(msg, sizeof msg, it->is_dir ? "Are you sure you want to delete the folder '%s' and all of its contents?"
                                          : "Are you sure you want to delete '%s'?", it->name);
     if (msgbox(x->win, it->is_dir ? "Confirm Folder Delete" : "Confirm File Delete", msg, ICON_WARNING, MB_YESNO) != ID_YES) return;
-    char p[VFS_MAX_PATH];
-    item_path(x, x->sel, p, sizeof p);
-    wm_set_busy(1);
-    int r = fileops_delete_tree(p);
-    wm_set_busy(0);
-    if (r < 0) report(x, "Cannot delete the item.", r);
+    fileop_t *op = kzalloc(sizeof *op);
+    if (!op) return;
+    op->kind = FOP_DELETE;
+    item_path(x, x->sel, op->src, sizeof op->src);
+    int r = fileop_run(x->win, op);
+    kfree(op);
+    if (!wm_alive(x->win)) return;
+    if (r < 0 && r != E_CANCELED) report(x, "Cannot delete the item.", r);
     int keep = x->sel;
     load(x);
     x->sel = MIN(keep, x->n - 1);
@@ -329,15 +331,15 @@ static void cmd_paste(ex_t *x) {
     } else {
         fileops_unique_name(x->path, base, dst, sizeof dst);
     }
-    wm_set_busy(1);
-    int r;
-    if (clip_cut && toupper(clip_path[0]) == toupper(x->path[0])) r = vfs_rename(clip_path, dst);
-    else {
-        r = fileops_copy_tree(clip_path, dst);
-        if (r >= 0 && clip_cut) r = fileops_delete_tree(clip_path);
-    }
-    wm_set_busy(0);
-    if (r < 0) report(x, clip_cut ? "Cannot move the item." : "Cannot copy the item.", r);
+    fileop_t *op = kzalloc(sizeof *op);
+    if (!op) return;
+    op->kind = clip_cut ? FOP_MOVE : FOP_COPY;
+    strlcpy(op->src, clip_path, sizeof op->src);
+    strlcpy(op->dst, dst, sizeof op->dst);
+    int r = fileop_run(x->win, op);
+    kfree(op);
+    if (!wm_alive(x->win)) return;
+    if (r < 0 && r != E_CANCELED) report(x, clip_cut ? "Cannot move the item." : "Cannot copy the item.", r);
     if (clip_cut) clip_path[0] = 0;
     load(x);
     select_name(x, vfs_basename(dst));

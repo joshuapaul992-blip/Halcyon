@@ -134,6 +134,7 @@ const char *strerror(int e) {
     case E_NODEV: return "No such device";
     case E_BUSY: return "Device busy";
     case E_NAMETOOLONG: return "Name too long";
+    case E_CANCELED: return "Canceled";
     }
     return "Unknown error";
 }
