@@ -81,9 +81,17 @@ tools/ci.sh
 This runs the following checks; `.github/workflows/ci.yml` runs the same script:
 
 - a warning-free build
-- the host FAT test suite (`tests/host/run.sh`)
+- the host FAT test suite (`tests/host/run.sh`), including about 80 deliberately
+  corrupted disk images and the fuzzer's regression inputs
 - a QEMU boot matrix (`tools/boottest.py`) covering UHCI, OHCI, EHCI, EHCI with
   companions, and xHCI, under BIOS and UEFI
+
+The partition and FAT code can also be fuzzed with libFuzzer, ASan and UBSan
+(needs clang and `libclang-rt-dev`):
+
+```bash
+make -C tests/host fuzz-run FUZZ_TIME=900 FUZZ_JOBS=2
+```
 
 Each boot must reach the desktop, mount the boot stick and a SATA disk, and write
 `BOOT.LOG`.
