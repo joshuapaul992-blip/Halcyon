@@ -69,7 +69,10 @@ typedef struct hal_event {
     int button, buttons, dz;
     int id;                      /* EVT_COMMAND: control id; EVT_KEY: key code (usage) */
     int pressed, mods;           /* EVT_KEY */
-    unsigned int ch;             /* EVT_KEY: character (Unicode code point) or 0 */
+    unsigned int ch;             /* EVT_KEY: character (Unicode code point) or 0; id 0 = the accent of
+                                    a dead key that did not compose, just before the key's own event */
+    int vk;                      /* EVT_KEY: the key's letter 'A'..'Z' or digit '0'..'9' on the keyboard
+                                    layout, for Ctrl shortcuts (US letters on Russian and Greek), or 0 */
 } hal_event_t;
 
 /* SYS_WIN_CREATE flags */

@@ -148,27 +148,40 @@ static void textbox_paint(window_t *w, gc_t *g, widget_t *wd) {
     gfx_sunken_field(g, wd->r, dis || (wd->style & WS_READONLY) ? HEX(0xF4F3EE) : HEX(0xFFFFFF));
     rect_t in = rect_inset(wd->r, 3);
     gc_t sub = gc_sub(g, in);
+    /* shown: the text, or one '*' per character of a password; map[] turns a
+     * byte offset in the text into one in shown */
     char shown[sizeof wd->text];
+    static int map[sizeof wd->text];
     int n = (int)strlen(wd->text);
-    for (int i = 0; i < n; i++) shown[i] = (wd->style & WS_PASSWORD) ? '*' : wd->text[i];
-    shown[n] = 0;
+    int pw = (wd->style & WS_PASSWORD) != 0, sn = 0;
+    for (int i = 0; i < n;) {
+        int nx = utf8_after(wd->text, n, i);
+        for (int j = i; j < nx; j++) map[j] = sn;
+        if (pw) shown[sn++] = '*';
+        else while (i < nx) shown[sn++] = wd->text[i++];
+        i = nx;
+    }
+    map[n] = sn;
+    shown[sn] = 0;
+    int cur = map[CLAMP(wd->cursor, 0, n)], anc = map[CLAMP(wd->sel_anchor, 0, n)];
     /* keep cursor visible */
-    int cx = gfx_text_width_n(&font_ui, shown, wd->cursor);
+    int cx = gfx_text_width_n(&font_ui, shown, cur);
     if (cx - wd->scroll > in.w - 2) wd->scroll = cx - in.w + 2;
     if (cx - wd->scroll < 0) wd->scroll = cx;
     int ty = (in.h - font_ui.height) / 2;
     int focused = w->focus == wd && wm_active() == w;
-    int s0 = MIN(wd->cursor, wd->sel_anchor), s1 = MAX(wd->cursor, wd->sel_anchor);
+    int s0 = MIN(cur, anc), s1 = MAX(cur, anc);
     if (focused && s1 > s0) {
         int x0 = gfx_text_width_n(&font_ui, shown, s0) - wd->scroll;
         int x1 = gfx_text_width_n(&font_ui, shown, s1) - wd->scroll;
         gfx_fill(&sub, mkrect(x0, ty - 1, x1 - x0, font_ui.height + 2), g_theme->select);
     }
     int x = -wd->scroll;
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < sn;) {
         int sel = focused && i >= s0 && i < s1;
-        char c[2] = { shown[i], 0 };
-        x = gfx_text(&sub, &font_ui, x, ty, c, dis ? HEX(0xA19F94) : sel ? g_theme->select_text : HEX(0x000000));
+        int nx = utf8_after(shown, sn, i);
+        x = gfx_text_n(&sub, &font_ui, x, ty, shown + i, nx - i, dis ? HEX(0xA19F94) : sel ? g_theme->select_text : HEX(0x000000));
+        i = nx;
     }
     if (focused) gfx_vline(&sub, cx - wd->scroll, ty - 1, font_ui.height + 2, HEX(0x000000));
 }
@@ -292,14 +305,14 @@ static int textbox_key(window_t *w, widget_t *wd, input_event_t *k) {
         if (wd->on_change) wd->on_change(w, wd);
         break;
     default:
-        if ((k->mods & MOD_CTRL) && k->key == KEY_A) { wd->sel_anchor = 0; wd->cursor = len; break; }
-        if ((k->mods & MOD_CTRL) && (k->key == KEY_A + 2 || k->key == KEY_A + 23)) {   /* ^C / ^X */
+        if (key_shortcut(k, 'A')) { wd->sel_anchor = 0; wd->cursor = len; break; }
+        if (key_shortcut(k, 'C') || key_shortcut(k, 'X')) {
             int s0 = MIN(wd->cursor, wd->sel_anchor), s1 = MAX(wd->cursor, wd->sel_anchor);
             if (s1 > s0 && !(wd->style & WS_PASSWORD)) clipboard_set(wd->text + s0, s1 - s0);
-            if (k->key == KEY_A + 23 && !ro) { textbox_delete_sel(wd); if (wd->on_change) wd->on_change(w, wd); }
+            if (key_shortcut(k, 'X') && !ro) { textbox_delete_sel(wd); if (wd->on_change) wd->on_change(w, wd); }
             break;
         }
-        if ((k->mods & MOD_CTRL) && k->key == KEY_A + 21) {   /* ^V */
+        if (key_shortcut(k, 'V')) {
             if (ro) break;
             int cl; const char *c = clipboard_get(&cl);
             textbox_delete_sel(wd);
@@ -313,12 +326,15 @@ static int textbox_key(window_t *w, widget_t *wd, input_event_t *k) {
             if (wd->on_change) wd->on_change(w, wd);
             break;
         }
-        if (k->ch >= 32 && k->ch != 127 && !ro) {
+        if (key_is_text(k) && !ro) {
+            char u[4];
+            int n = utf8_put(k->ch, u);
             textbox_delete_sel(wd);
             len = (int)strlen(wd->text);
-            if (len >= 255) break;
-            memmove(wd->text + wd->cursor + 1, wd->text + wd->cursor, len - wd->cursor + 1);
-            wd->text[wd->cursor++] = k->ch;
+            if (len + n > 255) break;
+            memmove(wd->text + wd->cursor + n, wd->text + wd->cursor, len - wd->cursor + 1);
+            memcpy(wd->text + wd->cursor, u, n);
+            wd->cursor += n;
             wd->sel_anchor = wd->cursor;
             if (wd->on_change) wd->on_change(w, wd);
             break;

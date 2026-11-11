@@ -2,6 +2,7 @@
 #include "gui/wm.h"
 #include "core/lib.h"
 #include "core/mm.h"
+#include "core/unicode.h"
 #include "fs/vfs.h"
 #include "fileops.h"
 
@@ -850,17 +851,18 @@ static void ex_event(window_t *w, gui_event_t *e) {
         case KEY_HOME: ns = 0; break;
         case KEY_END: ns = x->n - 1; break;
         default:
-            if (k->mods & MOD_CTRL) {
-                if (k->key == KEY_A + 2) cmd_copy(x, 0);
-                else if (k->key == KEY_A + 23) cmd_copy(x, 1);
-                else if (k->key == KEY_A + 21) cmd_paste(x);
+            if ((k->mods & MOD_CTRL) && !key_is_text(k)) {
+                if (key_shortcut(k, 'C')) cmd_copy(x, 0);
+                else if (key_shortcut(k, 'X')) cmd_copy(x, 1);
+                else if (key_shortcut(k, 'V')) cmd_paste(x);
                 return;
             }
-            if (k->ch > 32 && x->n) {
-                /* jump to the next item starting with the typed letter */
+            if (k->ch > 32 && k->ch != 127 && x->n) {
+                /* jump to the next item starting with the typed character */
                 for (int j = 1; j <= x->n; j++) {
                     int idx = (x->sel + j + x->n) % x->n;
-                    if (tolower(x->items[idx].name[0]) == tolower(k->ch)) { ns = idx; break; }
+                    const char *nm = x->items[idx].name;
+                    if (uc_upper(utf8_next(&nm)) == uc_upper(k->ch)) { ns = idx; break; }
                 }
             }
             break;

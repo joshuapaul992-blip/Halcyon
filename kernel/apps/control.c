@@ -251,6 +251,7 @@ static void list_change(window_t *w, widget_t *lb) {
 static void on_apply(window_t *w, widget_t *b) { apply(w); }
 static void on_ok(window_t *w, widget_t *b) { apply(w); wm_close(w); }
 static void on_cancel(window_t *w, widget_t *b) { wm_close(w); }
+static void on_keyboard(window_t *w, widget_t *b) { app_keyboard(); }
 
 static void cp_tick(window_t *w) {
     cpanel_t *c = w->data;
@@ -304,6 +305,8 @@ void app_control(void) {
     cn->style |= WS_CANCEL; cn->on_click = on_cancel;
     widget_t *ap = widget_add(w, W_BUTTON, mkrect(CP_W - 12 - 75, CP_H - 35, 75, 23), "Apply", ID_APPLY);
     ap->style |= WS_DISABLED; ap->on_click = on_apply;
+    widget_t *kb = widget_add(w, W_BUTTON, mkrect(12, CP_H - 35, 90, 23), "Keyboard...", 0);
+    kb->on_click = on_keyboard;
     w->focus = tl;
     cp_win = w;
 }

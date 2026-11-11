@@ -11,6 +11,7 @@
 #include "fs/block.h"
 #include "drivers/pci.h"
 #include "usb/usb.h"
+#include "drivers/keymap.h"
 #include "fileops.h"
 
 #define MAX_LINES 1000
@@ -422,6 +423,7 @@ static void cmd_help(term_t *t) {
         "  IRQ                   interrupts, timer and CPU usage\n"
         "  FORMAT [x: | device]  format a disk (FAT, FAT32, exFAT)\n"
         "  TASKLIST / TASKKILL   running programs / end one   NAME [args]  run C:\\PROGRAMS\\NAME.EXE\n"
+        "  KEYBOARD [id | /L]    keyboard settings, switch layout, list layouts\n"
         "\nAny command's output can be redirected with > file or >> file.\n");
 }
 
@@ -532,6 +534,32 @@ static void cmd_format(term_t *t, int argc, char **argv) {
         format_size(total, a, sizeof a); format_size(freeb, b2, sizeof b2);
         tprintf(t, "Drive %c: %s, %s total, %s available.\n", v->letter, v->fs_name, a, b2);
     }
+}
+
+/* KEYBOARD: the Keyboard settings dialog; KEYBOARD id switches to an
+ * installed layout; KEYBOARD /L lists the layouts */
+static void cmd_keyboard(term_t *t, int argc, char **argv) {
+    int idx[INPUT_MAX_LAYOUTS];
+    int n = input_layouts(idx, INPUT_MAX_LAYOUTS);
+    if (argc < 2) {
+        tprintf(t, "Active keyboard layout: %s (%s)\n", kl_layouts[input_layout()].name, kl_layouts[input_layout()].id);
+        app_keyboard();
+        return;
+    }
+    if (!strcasecmp(argv[1], "/L")) {
+        for (int i = 0; i < kl_layout_count; i++) {
+            int inst = 0;
+            for (int j = 0; j < n; j++) if (idx[j] == i) inst = 1;
+            tprintf(t, "%c %-8s %-4s %s%s\n", i == input_layout() ? '*' : ' ', kl_layouts[i].id, kl_layouts[i].abbr,
+                    kl_layouts[i].name, i == input_layout_default() ? " (default)" : inst ? " (installed)" : "");
+        }
+        return;
+    }
+    int k = kl_find(argv[1]);
+    for (int j = 0; k >= 0 && j < n; j++)
+        if (idx[j] == k) { input_layout_select(k); tprintf(t, "Keyboard layout: %s\n", kl_layouts[k].name); return; }
+    if (k < 0) tprintf(t, "There is no keyboard layout \"%s\". KEYBOARD /L lists them.\n", argv[1]);
+    else tprintf(t, "%s is not installed: add it in Keyboard settings (KEYBOARD).\n", kl_layouts[k].name);
 }
 
 static void execute(term_t *t, int argc, char **argv, const char *rest) {
@@ -687,7 +715,8 @@ static void execute(term_t *t, int argc, char **argv, const char *rest) {
         if (argc > 1 && resolve(t, argv[1], p, sizeof p) == 0) shell_open(p); else tputs(t, "usage: start file\n");
     }
     else if (!strcasecmp(c, "paint")) app_paint(NULL);
-    else if (!strcasecmp(c, "calc") && !calc_program()) app_calc();     /* else CALC.EXE below */
+    else if (!strcasecmp(c, "calc") && !calc_program()) app_calc();
+    else if (!strcasecmp(c, "keyboard")) cmd_keyboard(t, argc, argv);     /* else CALC.EXE below */
     else if (!strcasecmp(c, "sysinfo") || !strcasecmp(c, "msinfo")) app_sysinfo();
     else if (!strcasecmp(c, "control")) app_control();
     else if (!strcasecmp(c, "exit")) wm_close(t->win);
@@ -946,11 +975,11 @@ static void term_event(window_t *w, gui_event_t *e) {
     input_event_t *k = &e->key;
     t->scroll = 0;
     t->caret_on = 1; t->caret_t = time_ms();
-    if (k->mods & MOD_CTRL) {
-        if (k->key == KEY_A + 2 && t->con) { tputs(t, "^C\n"); proc_kill(t->con->pid, NULL); t->inlen = t->incur = 0; }
-        else if (k->key == KEY_A + 2) { char p[VFS_MAX_PATH + 4]; prompt_str(t, p, sizeof p); tputs(t, p); tputs(t, t->input); tputs(t, "^C\n"); t->inlen = t->incur = 0; }
-        else if (k->key == KEY_A + 11) execute(t, 1, (char *[]){ "cls" }, NULL);
-        else if (k->key == KEY_A + 21) { gui_event_t pe = { .type = GE_MOUSE_DOWN, .button = MOUSE_RIGHT }; term_event(w, &pe); return; }
+    if ((k->mods & MOD_CTRL) && !key_is_text(k)) {
+        if (key_shortcut(k, 'C') && t->con) { tputs(t, "^C\n"); proc_kill(t->con->pid, NULL); t->inlen = t->incur = 0; }
+        else if (key_shortcut(k, 'C')) { char p[VFS_MAX_PATH + 4]; prompt_str(t, p, sizeof p); tputs(t, p); tputs(t, t->input); tputs(t, "^C\n"); t->inlen = t->incur = 0; }
+        else if (key_shortcut(k, 'L')) execute(t, 1, (char *[]){ "cls" }, NULL);
+        else if (key_shortcut(k, 'V')) { gui_event_t pe = { .type = GE_MOUSE_DOWN, .button = MOUSE_RIGHT }; term_event(w, &pe); return; }
         wm_invalidate(w);
         return;
     }
@@ -986,10 +1015,14 @@ static void term_event(window_t *w, gui_event_t *e) {
     case KEY_PAGEUP: t->scroll = MIN(MAX(0, total_rows(t) - t->rows), t->rows); break;
     case KEY_TAB: complete(t); break;
     default:
-        if ((u8)k->ch >= 32 && k->ch != 127 && t->inlen < LINE_MAX - 1) {
-            memmove(t->input + t->incur + 1, t->input + t->incur, t->inlen - t->incur);
-            t->input[t->incur++] = k->ch;
-            t->inlen++;
+        if (key_is_text(k)) {
+            char u[4];
+            int n = utf8_put(k->ch, u);
+            if (t->inlen + n > LINE_MAX - 1) break;
+            memmove(t->input + t->incur + n, t->input + t->incur, t->inlen - t->incur);
+            memcpy(t->input + t->incur, u, n);
+            t->incur += n;
+            t->inlen += n;
         }
     }
     if (wm_alive(w)) wm_invalidate(w);

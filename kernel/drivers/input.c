@@ -1,5 +1,6 @@
-/* Halcyon OS - input event queue and US keyboard layout */
+/* Halcyon OS - input event queue, keyboard layout state */
 #include "input.h"
+#include "keymap.h"
 #include "core/lib.h"
 
 #define QSIZE 256
@@ -49,35 +50,73 @@ u8 input_leds(void) { return leds; }
 u32 input_led_generation(void) { return led_gen; }
 int input_key_down(u8 key) { return keys_down[key]; }
 
-/* US layout: HID usage -> {normal, shifted} */
-static const char keymap[][2] = {
-    [0x04] = {'a', 'A'}, {'b', 'B'}, {'c', 'C'}, {'d', 'D'}, {'e', 'E'}, {'f', 'F'}, {'g', 'G'},
-    {'h', 'H'}, {'i', 'I'}, {'j', 'J'}, {'k', 'K'}, {'l', 'L'}, {'m', 'M'}, {'n', 'N'}, {'o', 'O'},
-    {'p', 'P'}, {'q', 'Q'}, {'r', 'R'}, {'s', 'S'}, {'t', 'T'}, {'u', 'U'}, {'v', 'V'}, {'w', 'W'},
-    {'x', 'X'}, {'y', 'Y'}, {'z', 'Z'},
-    [0x1E] = {'1', '!'}, {'2', '@'}, {'3', '#'}, {'4', '$'}, {'5', '%'}, {'6', '^'}, {'7', '&'},
-    {'8', '*'}, {'9', '('}, {'0', ')'},
-    [0x28] = {'\n', '\n'}, {27, 27}, {'\b', '\b'}, {'\t', '\t'}, {' ', ' '},
-    [0x2D] = {'-', '_'}, {'=', '+'}, {'[', '{'}, {']', '}'}, {'\\', '|'}, {'#', '~'}, {';', ':'},
-    {'\'', '"'}, {'`', '~'}, {',', '<'}, {'.', '>'}, {'/', '?'},
-    [0x54] = {'/', '/'}, {'*', '*'}, {'-', '-'}, {'+', '+'}, {'\n', '\n'},
-    [0x64] = {'\\', '|'},
-};
-static const char keypad_num[] = "1234567890.";
+/* ---------------- keyboard layouts ---------------- */
+static int installed[INPUT_MAX_LAYOUTS] = { 0 }, ninstalled = 1;   /* kl_layouts[0] is US */
+static int active, deflt;                   /* kl_layouts indexes */
+static kl_state_t kst = { &kl_layouts[0], 0 };
+static u32 layout_gen;
+static int hotkey_armed;                    /* Left Alt+Shift held with nothing else */
 
-static char translate(u8 key, u8 mods) {
-    if (mods & (MOD_CTRL | MOD_ALT | MOD_GUI)) {
-        if ((mods & MOD_CTRL) && key >= 0x04 && key <= 0x1D) return (char)(key - 0x04 + 1);  /* ^A.. */
-        return 0;
+int input_layout(void) { return active; }
+int input_layout_default(void) { return deflt; }
+u32 input_layout_generation(void) { return layout_gen; }
+
+int input_layouts(int *idx, int max) {
+    int n = MIN(ninstalled, max);
+    for (int i = 0; i < n; i++) idx[i] = installed[i];
+    return n;
+}
+
+void input_layout_select(int idx) {
+    if (idx < 0 || idx >= kl_layout_count) return;
+    active = idx;
+    kst.layout = &kl_layouts[idx];
+    kst.dead = 0;
+    layout_gen++;
+}
+
+void input_layout_next(void) {
+    if (ninstalled < 2) return;
+    int pos = 0;
+    for (int i = 0; i < ninstalled; i++) if (installed[i] == active) pos = i;
+    input_layout_select(installed[(pos + 1) % ninstalled]);
+}
+
+void input_layouts_set(const int *idx, int n, int def) {
+    int m = 0;
+    for (int i = 0; i < n && m < INPUT_MAX_LAYOUTS; i++) {
+        if (idx[i] < 0 || idx[i] >= kl_layout_count) continue;
+        int dup = 0;
+        for (int j = 0; j < m; j++) if (installed[j] == idx[i]) dup = 1;
+        if (!dup) installed[m++] = idx[i];
     }
-    if (key >= KEY_KP_1 && key <= KEY_KP_DOT) {
-        if (leds & LED_NUM) return keypad_num[key - KEY_KP_1];
-        return 0;
+    if (!m) installed[m++] = 0;
+    ninstalled = m;
+    int ok = 0, keep = 0;
+    for (int i = 0; i < m; i++) {
+        if (installed[i] == def) ok = 1;
+        if (installed[i] == active) keep = 1;
     }
-    if (key >= ARRAY_SIZE(keymap)) return 0;
-    int shift = (mods & MOD_SHIFT) != 0;
-    if (key >= 0x04 && key <= 0x1D && (leds & LED_CAPS)) shift = !shift;
-    return keymap[key][shift];
+    deflt = ok ? def : installed[0];
+    if (keep) layout_gen++;
+    else input_layout_select(deflt);
+}
+
+static int is_modifier(u8 key) { return key >= KEY_LCTRL && key <= KEY_RGUI; }
+
+/* Left Alt+Shift switches the layout when released, if no other key was
+ * pressed meanwhile (as Windows: Alt+Shift+Tab does not switch) */
+static void layout_hotkey(u8 key, int pressed) {
+    if (pressed) {
+        int lalt_shift = keys_down[KEY_LALT] && (keys_down[KEY_LSHIFT] || keys_down[KEY_RSHIFT]);
+        int others = keys_down[KEY_LCTRL] || keys_down[KEY_RCTRL] || keys_down[KEY_RALT] ||
+                     keys_down[KEY_LGUI] || keys_down[KEY_RGUI];
+        if (!is_modifier(key) || others) hotkey_armed = 0;
+        else if (lalt_shift) hotkey_armed = 1;
+    } else if (hotkey_armed && (key == KEY_LALT || key == KEY_LSHIFT || key == KEY_RSHIFT)) {
+        hotkey_armed = 0;
+        input_layout_next();
+    }
 }
 
 void input_key(u8 key, int pressed) {
@@ -87,12 +126,33 @@ void input_key(u8 key, int pressed) {
         if (key == KEY_SCROLLLOCK) { leds ^= LED_SCROLL; led_gen++; }
     }
     keys_down[key] = pressed ? 1 : 0;
+    layout_hotkey(key, pressed);
     input_event_t e = { 0 };
     e.type = EV_KEY;
     e.key = key;
     e.pressed = pressed ? 1 : 0;
     e.mods = input_mods();
-    e.ch = pressed ? translate(key, e.mods) : 0;
+    e.vk = kl_vk(kst.layout, key);
+    if (pressed) {
+        u32 m = 0, c[2];
+        if (e.mods & MOD_SHIFT) m |= KLM_SHIFT;
+        if (e.mods & MOD_CTRL) m |= KLM_CTRL;
+        if (e.mods & MOD_ALT) m |= KLM_ALT;
+        if (e.mods & MOD_GUI) m |= KLM_GUI;
+        if (keys_down[KEY_RALT]) m |= KLM_RALT;
+        if (leds & LED_CAPS) m |= KLM_CAPS;
+        if (leds & LED_NUM) m |= KLM_NUM;
+        int n = kl_translate(&kst, key, m, c);
+        if (n == 2) {
+            /* a dead key that did not compose: its accent first, as a key-less event */
+            input_event_t a = e;
+            a.key = 0;
+            a.vk = 0;
+            a.ch = c[0];
+            push(&a);
+        }
+        if (n) e.ch = c[n - 1];
+    }
     push(&e);
 }
 
