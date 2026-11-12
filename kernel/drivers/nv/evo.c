@@ -115,6 +115,8 @@ static void save(nv_evo_t *e, u32 reg) {
     e->saved.n++;
 }
 static void swr(nv_evo_t *e, u32 reg, u32 v) { save(e, reg); wr(e, reg, v); }
+void nv_evo_save(nv_evo_t *e, u32 reg) { save(e, reg); }
+int nv_evo_wait(nv_evo_t *e, u32 reg, u32 m, u32 v, u32 us, u32 *last) { return wait(e, reg, m, v, us, last); }
 static void smask(nv_evo_t *e, u32 reg, u32 m, u32 v) { save(e, reg); mask(e, reg, m, v); }
 
 u32 nv_evo_core_ctrl_reg(const nv_evo_gen_t *g) { return g->gf119 ? 0x610490 : 0x610200; }
@@ -146,6 +148,8 @@ static int bar_flush(nv_evo_t *e) {
     }
     return 0;
 }
+
+int nv_evo_bar_flush(nv_evo_t *e) { return bar_flush(e); }
 
 /* ---------------- the VRAM allocator ---------------- */
 
@@ -316,7 +320,7 @@ static void head_507d(const nv_evo_gen_t *g, nv_evo_stream_t *s, const nv_evo_he
     M(s, 0x0868 + i, 4, wh(c->w, c->h), storage, params, c->vram_handle);
     M(s, 0x08C0 + i, 1, 0u);
     /* base / overlay usage bounds, dither, procamp */
-    M(s, 0x0900 + i, 1, 0u);
+    M(s, 0x0900 + i, 1, nv_evo_base_bounds(g, c->base));
     M(s, 0x0904 + i, 1, 0x00000100u);
     M(s, 0x08A0 + i, 1, 0u);
     M(s, 0x08A8 + i, 1, NV_EVO_PROCAMP);              /* RGB, saturation 1024 (unity): 0 is grayscale */
@@ -351,8 +355,8 @@ static void head_907d(const nv_evo_gen_t *g, nv_evo_stream_t *s, const nv_evo_he
     M(s, 0x0468 + i, 4, wh(c->w, c->h), c->storage_raw ? c->storage_raw : ((c->pitch >> 8) << 8) | 0x01000000u, 0x0000CF00u,
       c->vram_handle);
     M(s, 0x04B0 + i, 1, 0u);
-    /* base (917d: no base channel, bounds 0) / overlay bounds, dither, procamp */
-    M(s, 0x04D0 + i, 1, 0u);
+    /* base (10b: no base channel, bounds 0; 10d: 32 bpp) / overlay bounds, dither, procamp */
+    M(s, 0x04D0 + i, 1, nv_evo_base_bounds(g, c->base));
     M(s, 0x04D4 + i, 1, 0x00000100u);
     M(s, (g->mthd == MTHD_917D ? 0x04A0 : 0x0490) + i, 1, 0u);
     M(s, 0x0498 + i, 1, NV_EVO_PROCAMP);              /* RGB, saturation 1024 (unity): 0 is grayscale */
@@ -414,6 +418,43 @@ int nv_evo_dmaobj(const nv_evo_gen_t *g, u8 *inst, u32 obj, u32 handle, u64 star
         if ((hd == 0 && ct == 0) || hd == handle) {
             put32(slot, handle);
             put32(slot + 4, context);
+            return 0;
+        }
+    }
+    return E_NOSPC;
+}
+
+/* the same, straight into the instance memory in VRAM, for channel chid (a
+ * base channel: nv50_disp_dmac_bind chid << 28 | chid, gf119_disp_dmac_bind
+ * chid << 27 | 1); the object is built in the CPU's copy first */
+int nv_evo_bind(nv_evo_t *e, u32 obj, u32 handle, int chid, u64 start, u64 limit) {
+    if (obj < EVO_RAMHT_BYTES || obj + 24 > EVO_INST_BYTES || (obj & 15) || chid < 0 || chid > 15) return E_INVAL;
+    if (!vram_ok(e, e->inst, EVO_INST_BYTES)) return E_INVAL;
+    u8 o[24];
+    memset(o, 0, sizeof o);
+    u32 context;
+    if (e->g->gf119) {
+        put32(o + 0x00, 0x00000049u);
+        put32(o + 0x04, (u32)(start >> 8));
+        put32(o + 0x08, (u32)(limit >> 8));
+        context = 0x00000001u | ((u32)chid << 27) | ((u32)obj << 9);
+    } else {
+        put32(o + 0x00, 0x0019003Du);
+        put32(o + 0x04, (u32)limit);
+        put32(o + 0x08, (u32)start);
+        put32(o + 0x0C, (u32)(limit >> 32) << 24 | (u32)(start >> 32));
+        put32(o + 0x14, 0x00010000u);
+        context = ((u32)chid << 28) | (u32)chid | ((u32)obj << 10);
+    }
+    for (u32 i = 0; i < 24; i += 4) vwr32(e, e->inst + obj + i, get32(o + i));
+    u32 h = nv_evo_ramht_hash(handle, chid);
+    for (u32 n = 0; n < EVO_RAMHT_BYTES / 8; n++) {
+        u64 slot = e->inst + ((h + n) % (EVO_RAMHT_BYTES / 8)) * 8;
+        u32 hd = vrd32(e, slot), ct = vrd32(e, slot + 4);
+        if ((hd == 0 && ct == 0) || (hd == handle && ct == context)) {
+            vwr32(e, slot, handle);
+            vwr32(e, slot + 4, context);
+            if (vrd32(e, slot) != handle) return E_IO;
             return 0;
         }
     }
@@ -508,6 +549,11 @@ static void head_state(nv_evo_t *e, int h, int asy, nv_evo_head_state_t *s) {
         s->offset = rd(e, 0x610a84 + o); s->size = rd(e, 0x610b18 + o); s->storage = rd(e, 0x610b20 + o);
         s->params = rd(e, 0x610ac8 + o); s->ctxdma = rd(e, 0x610a38 + o);
     }
+}
+
+void nv_evo_head_state(nv_evo_t *e, int head, int asy, nv_evo_head_state_t *s) {
+    if (head < 0 || head >= EVO_HEADS) { memset(s, 0, sizeof *s); return; }
+    head_state(e, head, asy, s);
 }
 
 void nv_evo_read_state(nv_evo_t *e, int asy) {
@@ -881,30 +927,34 @@ static u32 super_pending(nv_evo_t *e) {
     return s & 0x70;
 }
 
-/* a channel error on the core channel: logged, cleared; 1 if there was one */
-static int chan_error(nv_evo_t *e) {
+/* a channel error (gf119_disp_intr_error, gp102_disp_intr_error,
+ * nv50_disp_intr_error; chid: the channel's user id): logged, cleared; 1 if
+ * there was one */
+int nv_evo_chan_error(nv_evo_t *e, int chid, const char *what) {
     static const char *type[8] = { "none", "push buffer", "trap", "reserved method", "invalid argument", "invalid state", "?",
                                    "unresolvable handle" };
+    if (chid < 0 || chid > 15) return 0;
     if (e->g->gf119) {
         u32 st = rd(e, 0x61009c);
-        if (nv_bad_read(st) || !(st & 1)) return 0;
-        u32 base = e->g->push_gp102 ? 0x6111f0 : 0x6101f0;
+        if (nv_bad_read(st) || !(st & (1u << chid))) return 0;
+        u32 base = (e->g->push_gp102 ? 0x6111f0 : 0x6101f0) + (u32)chid * 12;
         u32 stat = rd(e, base), data = rd(e, base + 4), code = rd(e, base + 8);
-        nv_evo_log(e, "core channel error: %s, method %04x, data %08x (%08x %08x)",
+        nv_evo_log(e, "%s channel error: %s, method %04x, data %08x (%08x %08x)", what,
                    e->g->push_gp102 ? "?" : type[(stat >> 12) & 7], stat & 0xFFC, data, stat, code);
-        wr(e, 0x61009c, 1);
+        wr(e, 0x61009c, 1u << chid);
         wr(e, base, 0x90000000);
     } else {
         u32 st = rd(e, 0x610020);
-        if (nv_bad_read(st) || !(st & 0x00010000)) return 0;
-        u32 addr = rd(e, 0x610080), data = rd(e, 0x610084);
-        nv_evo_log(e, "core channel error: %s, method %04x, data %08x (%08x)", type[(addr >> 12) & 7], addr & 0xFFC, data, addr);
-        wr(e, 0x610020, 0x00010000);
-        wr(e, 0x610080, 0x90000000);
+        if (nv_bad_read(st) || !(st & (0x00010000u << chid))) return 0;
+        u32 addr = rd(e, 0x610080 + (u32)chid * 8), data = rd(e, 0x610084 + (u32)chid * 8);
+        nv_evo_log(e, "%s channel error: %s, method %04x, data %08x (%08x)", what, type[(addr >> 12) & 7], addr & 0xFFC, data, addr);
+        wr(e, 0x610020, 0x00010000u << chid);
+        wr(e, 0x610080 + (u32)chid * 8, 0x90000000);
     }
     e->errors++;
     return 1;
 }
+static int chan_error(nv_evo_t *e) { return nv_evo_chan_error(e, 0, "core"); }
 
 /* ---------------- the core channel ---------------- */
 
@@ -944,23 +994,24 @@ static int chan_init(nv_evo_t *e) {
     return 0;
 }
 
-/* write the stream into the push buffer and move PUT (the channel is idle) */
-static int kick(nv_evo_t *e, const nv_evo_stream_t *s) {
+/* write the stream into a push buffer and move PUT (the channel is idle) */
+int nv_evo_kick(nv_evo_t *e, u64 push, u32 *put, int user, const nv_evo_stream_t *s) {
     /* (at most 400 words: after a wrap the new PUT can never equal GET) */
     if (s->overflow || s->n <= 0 || s->n > 400) { fail(e, "method stream overflow"); return E_INVAL; }
     u32 words = (u32)s->n;
-    if (e->put / 4 + words + 1 > EVO_PUSH_MAX) {
-        vwr32(e, e->push + e->put, NV_EVO_JUMP(0));      /* wrap: the hardware jumps back to 0 */
-        e->put = 0;
+    if (*put / 4 + words + 1 > EVO_PUSH_MAX) {
+        vwr32(e, push + *put, NV_EVO_JUMP(0));           /* wrap: the hardware jumps back to 0 */
+        *put = 0;
     }
-    for (u32 i = 0; i < words; i++) vwr32(e, e->push + e->put + i * 4, s->w[i]);
-    if (vrd32(e, e->push + e->put) != s->w[0]) { fail(e, "the push buffer in VRAM does not read back"); return E_IO; }
+    for (u32 i = 0; i < words; i++) vwr32(e, push + *put + i * 4, s->w[i]);
+    if (vrd32(e, push + *put) != s->w[0]) { fail(e, "the push buffer in VRAM does not read back"); return E_IO; }
     int r = bar_flush(e);
     if (r) { fail(e, "BAR flush timed out"); return r; }
-    e->put += words * 4;
-    wr(e, 0x640000, e->put);
+    *put += words * 4;
+    wr(e, 0x640000 + (u32)user * 0x1000, *put);
     return 0;
 }
+static int kick(nv_evo_t *e, const nv_evo_stream_t *s) { return nv_evo_kick(e, e->push, &e->put, 0, s); }
 
 static int chan_idle(nv_evo_t *e, u32 us) {
     u64 end = now(e) + us;

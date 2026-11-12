@@ -228,7 +228,7 @@ nv: $(OUT)/nvtest
 
 # M10b: the EVO display engine (evo.c, evodp.c, evopll.c, evoscript.c)
 # against a simulated display engine and DisplayPort sink (evotest.c)
-EVOSRCS := $(addprefix $(ROOT)/kernel/drivers/nv/,evo.c evodp.c evopll.c evoscript.c vbios.c chip.c)
+EVOSRCS := $(addprefix $(ROOT)/kernel/drivers/nv/,evo.c evochan.c evodp.c evopll.c evoscript.c vbios.c chip.c)
 EVOHDRS := $(ROOT)/kernel/drivers/nv/evo.h $(NVHDRS)
 $(OUT)/evotest: evotest.c $(EVOSRCS) $(EVOHDRS) Makefile
 	@mkdir -p $(OUT)

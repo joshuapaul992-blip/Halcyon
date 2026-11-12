@@ -122,6 +122,7 @@ typedef struct nv_evo_head_cfg {
     u32 proto;                  /* EVO_PROTO_* */
     u8  depth;                  /* EVO_DEPTH_* */
     u32 or_heads;               /* every head the OR drives afterwards (owner mask) */
+    u8  base;                   /* 10d: the base channel may show 32 bpp surfaces on this head (usage bounds) */
 } nv_evo_head_cfg_t;
 
 /* the methods for one head (and its OR) in nouveau's order: view, mode,
@@ -264,8 +265,21 @@ typedef struct nv_evo_fw {
 } nv_evo_fw_t;
 
 /* registers saved at takeover and put back by nv_evo_release */
-#define EVO_SAVE_MAX 48
+#define EVO_SAVE_MAX 96
 typedef struct nv_evo_saved { int n; struct { u32 reg, val; } r[EVO_SAVE_MAX]; } nv_evo_saved_t;
+
+/* 10d: a base (page flips) or cursor channel of one head */
+typedef struct nv_evo_chan {
+    u8  up;                     /* started and running */
+    u8  pending;                /* base: an image (or its removal) queued, not yet seen done */
+    u8  shown;                  /* base: the base layer shows a surface (else the core layer does) */
+    u8  slot;                   /* base: notifier slot of the last image */
+    int ctrl, user;             /* control register index, PUT / GET or PIO window */
+    u32 put;                    /* base: bytes */
+    u32 ntfy;                   /* base: the notifier (offset in the sync page) of the pending image */
+    u64 queued_us;
+    u32 flips, errors, busy;    /* completed images, channel errors, cursor moves dropped (FREE never came) */
+} nv_evo_chan_t;
 
 struct nv_evo {
     /* set by the caller */
@@ -299,6 +313,11 @@ struct nv_evo {
     struct nv_evo_dp *dp[EVO_ORS];   /* DP state per SOR being set up (evodp.c) */
     u32 supers, errors, timeouts, script_ops, script_refused;
     char why[96];               /* the last failure */
+    /* 10d (evochan.c): VRAM for the base channels' push buffers (+ head * 4 KiB)
+     * and the cursor images (+ head * 32 KiB + slot * 16 KiB); 0: none */
+    u64 basepush, cursimg;
+    u32 chan_us;                /* base / cursor channel start and stop (200 ms) */
+    nv_evo_chan_t base[EVO_HEADS], curs[EVO_HEADS];
 };
 
 /* bring up: read the state (fw), the caps copies, take the display engine
@@ -380,5 +399,123 @@ int  nv_evo_script_reg_ok(u32 reg);
 /* ---------------- the supervisor's steps (evo.c) ---------------- */
 /* the video PLL of a head (evopll.c): 0 or E_* */
 int  nv_evo_vpll_set(nv_evo_t *e, int head, u32 khz);
+
+/* ---------------- shared by evo.c and evochan.c ---------------- */
+/* push a stream into a DMA channel's push buffer at push (VRAM), move PUT
+ * (user: the channel's PUT / GET window); the channel must be idle; 0 or E_* */
+int  nv_evo_kick(nv_evo_t *e, u64 push, u32 *put, int user, const nv_evo_stream_t *s);
+/* a channel error (chid: the channel's user id): logged as "<what> channel
+ * error", cleared; 1 if there was one */
+int  nv_evo_chan_error(nv_evo_t *e, int chid, const char *what);
+int  nv_evo_bar_flush(nv_evo_t *e);
+/* wait until (reg & m) == v, at most us; 0 or E_TIMEOUT */
+int  nv_evo_wait(nv_evo_t *e, u32 reg, u32 m, u32 v, u32 us, u32 *last);
+/* remember a register before the first write (nv_evo_release puts it back) */
+void nv_evo_save(nv_evo_t *e, u32 reg);
+/* one head's armed (asy = 0) or assembly state */
+void nv_evo_head_state(nv_evo_t *e, int head, int asy, nv_evo_head_state_t *s);
+/* a context DMA (VRAM start..limit) at inst + obj in VRAM, bound to channel
+ * chid in the object table (nvkm_ramht_insert with the channel's context
+ * bits); 0 or E_* */
+int  nv_evo_bind(nv_evo_t *e, u32 obj, u32 handle, int chid, u64 start, u64 limit);
+
+/* ---------------- 10d: page flips, the hardware cursor, vertical blank, several heads (evochan.c) ----------------
+ * Ported from nouveau (MIT): dispnv50/base507c.c, base827c.c, base907c.c,
+ * curs507a.c, wndw.c (the base and cursor channels' methods), head507d.c,
+ * head827d.c, head907d.c, head917d.c (cursor and base usage bounds in the
+ * core channel), nvkm/engine/disp/nv50.c, gf119.c, gp102.c (dmac / pioc
+ * channel bring-up, channel ids, errors), head*.c (the scanline position),
+ * outp.c (choosing an output resource). */
+
+enum { EVO_CHAN_BASE = 1, EVO_CHAN_CURS = 2 };
+/* a channel's ids (nvkm_disp_chan_user): ctrl indexes the control registers
+ * (0x610200 / 0x610490 + ctrl * 0x10), user the PUT / GET or PIO window
+ * (0x640000 + user * 0x1000), the error bit and the object table's chid */
+void nv_evo_chan_ids(const nv_evo_gen_t *g, int kind, int head, int *ctrl, int *user);
+u16  nv_evo_base_class(const nv_evo_gen_t *g);   /* 507c, 827c, 837c, 857c, 907c, 917c, 927c */
+u16  nv_evo_curs_class(const nv_evo_gen_t *g);   /* 507a, 827a, 857a, 907a, 917a */
+
+#define EVO_CURS_SIZE   64                       /* 64 x 64 A8R8G8B8 on every EVO generation */
+#define EVO_CURS_BYTES  (EVO_CURS_SIZE * EVO_CURS_SIZE * 4)
+/* the base channel's notifiers in the sync page (nouveau's NV50_DISP_BASE_NTFY:
+ * 0x40 per channel after the core's, two slots used in turn) */
+static inline u32 nv_evo_base_ntfy(int head, int slot) { return (u32)(1 + head) * 0x40 + 0x20 + (u32)(slot & 1) * 0x10; }
+/* the context DMAs a base channel resolves (objects at 0x1040 + head * 0x40) */
+static inline u32 nv_evo_base_obj(int head) { return 0x1040u + (u32)head * 0x40; }
+/* the PIO cursor channel's position word (SET_CURSOR_HOT_SPOT_POINT_OUT: signed 16-bit x, y) */
+static inline u32 nv_evo_curs_point(int x, int y) { return ((u32)(y & 0xFFFF) << 16) | (u32)(x & 0xFFFF); }
+
+/* method streams (host tests compare them word for word):
+ *   base_init: the base LUT off (507c / 827c), also the output LUT, the LUT
+ *     context DMA and the colour space conversion owned by the core (907c+)
+ *   base_image: SET_NOTIFIER_CONTROL / CONTEXT_DMA_NOTIFIER (ntfy_set),
+ *     the surface (image_set: present at the next vertical blank, interval
+ *     1), UPDATE; iso_handle 0: the base layer off (image_clr)
+ *   curs: HEAD_SET_CONTROL_CURSOR / OFFSET_CURSOR (/ CONTEXT_DMA_CURSOR)
+ *     on (64 x 64 A8R8G8B8, alpha blended) or off
+ *   core_layer: a lit head's core surface again (the fallback when flips
+ *     are given up), with the cursor re-specified when it is on */
+void nv_evo_base_init_methods(const nv_evo_gen_t *g, nv_evo_stream_t *s);
+void nv_evo_base_image_methods(const nv_evo_gen_t *g, nv_evo_stream_t *s, u32 ntfy, u32 sync_handle, u32 iso_handle, u64 offset,
+                               int w, int h, u32 pitch);
+void nv_evo_curs_methods(const nv_evo_gen_t *g, nv_evo_stream_t *s, int head, int on, u64 offset, u32 handle);
+void nv_evo_core_layer_methods(const nv_evo_gen_t *g, nv_evo_stream_t *s, int head, u64 offset, int w, int h, u32 pitch, u32 handle,
+                               int base, int curs_on, u64 curs_offset);
+/* HEAD_SET_BASE_CHANNEL_USAGE_BOUNDS for 32 bpp (0: unusable) */
+u32  nv_evo_base_bounds(const nv_evo_gen_t *g, int usable);
+
+/* the base channel of a head: start (context DMAs bound to it, error
+ * reporting, push buffer, LUT / CSC methods), stop; 0 or E_* (e->why) */
+int  nv_evo_base_start(nv_evo_t *e, int head);
+void nv_evo_base_stop(nv_evo_t *e, int head);
+/* queue a surface for the next vertical blank (returns at once); 0, E_BUSY
+ * (one already queued), E_IO */
+int  nv_evo_base_flip(nv_evo_t *e, int head, u64 offset, int w, int h, u32 pitch);
+/* the queued image: 1 done (the notifier says begun or finished and the
+ * channel fetched everything; also when nothing is queued), 0 pending, E_IO
+ * (channel error) */
+int  nv_evo_base_poll(nv_evo_t *e, int head);
+/* the base layer off (the core layer shows again), waited for at most us; 0 or E_* */
+int  nv_evo_base_off(nv_evo_t *e, int head, u32 us);
+/* the cursor channel of a head */
+int  nv_evo_curs_start(nv_evo_t *e, int head);
+void nv_evo_curs_stop(nv_evo_t *e, int head);
+/* the image's top left in head coordinates (may be negative); 0 or E_BUSY
+ * (the channel did not take it within 1 ms: dropped) */
+int  nv_evo_curs_move(nv_evo_t *e, int head, int x, int y);
+u64  nv_evo_curs_offset(const nv_evo_t *e, int head, int slot);
+/* an ARGB image of size x size (<= 64; padded transparent) into a slot's VRAM; 0 or E_* */
+int  nv_evo_curs_upload(nv_evo_t *e, int head, int slot, const u32 *argb, int size);
+/* every base and cursor channel stopped (restore) */
+void nv_evo_chans_stop(nv_evo_t *e);
+
+/* vertical blank, polled from the scanline position (nv50_head_rgpos:
+ * 0x616340 + head * 0x800): 1 in the blank, 0 not, E_* unreadable / no raster */
+int  nv_evo_in_vblank(nv_evo_t *e, int head, u32 *vline);
+/* wait for the start of the next vertical blank, at most max_us (and two
+ * frames); 0, E_TIMEOUT (the counter does not move), E_NOTSUP (no raster) */
+int  nv_evo_wait_vblank(nv_evo_t *e, int head, u32 max_us);
+/* microseconds until the next vertical blank begins (an estimate; 0 in the blank) */
+u32  nv_evo_us_to_vblank(nv_evo_t *e, int head);
+
+/* several heads: what each head drives */
+typedef struct nv_evo_use { u8 on; int dcb, or_type, or_id; u32 khz; } nv_evo_use_t;
+/* the output resource for DCB output k on head (nvkm_outp_acquire): the
+ * OR id or E_NOSPC / E_INVAL / E_NODEV with why. A DAC or (before GM200) a
+ * SOR another head uses is refused; from GM200 a pad macro's sub-link another
+ * head's output uses is refused, then: the SOR routed to k, a free one, one
+ * only the firmware used */
+int  nv_evo_pick_or(const nv_evo_t *e, const nv_evo_use_t use[EVO_HEADS], int k, int head, int *or_type, char *why, int whyn);
+/* the fastest pixel clock one head may need: what the generation's fastest
+ * output carries (DisplayPort 4 lanes at its top rate, dual-link TMDS, DAC) */
+u32  nv_evo_head_max_khz(const nv_evo_gen_t *g);
+/* head may run khz next to the others: per head and in total (heads x the
+ * per-head limit); 0 or E_NOSPC with why */
+int  nv_evo_bw_check(const nv_evo_t *e, const nv_evo_use_t use[EVO_HEADS], int head, u32 khz, char *why, int whyn);
+/* plan several monitors (host tests, the driver's log): for each wanted DCB
+ * output in order a head from head_mask that it can use, an OR, its VPLL;
+ * err 0 or why it cannot be lit. Returns how many can be lit. */
+typedef struct nv_evo_plan { int dcb; u32 khz; int head, or_type, or_id, err; char why[80]; } nv_evo_plan_t;
+int  nv_evo_plan(const nv_evo_t *e, nv_evo_plan_t *p, int n, u32 head_mask);
 
 #endif
