@@ -799,6 +799,76 @@ static void put_hiberfil(const img_t *im, const char *sig) {
     ntfs3g_umount(mnt);
 }
 
+static void set_encrypted(u8 *rec, void *ctx) {
+    ntfs_attr_t *a = rec_find_attr(rec, NTFS_AT_STANDARD_INFORMATION);
+    if (a) ((ntfs_std_info_t *)((u8 *)a + a->r.value_offset))->file_attributes |= NTFS_FA_ENCRYPTED;
+}
+
+/* the first run of $DATA far outside the volume */
+static void hostile_run(u8 *rec, void *ctx) {
+    ntfs_attr_t *a = rec_find_attr(rec, NTFS_AT_DATA);
+    if (!a || !a->non_resident) { CHECK(0, "hostile_run: no non-resident $DATA"); return; }
+    u8 *mp = (u8 *)a + a->nr.mapping_pairs_offset;
+    u32 lb = mp[0] & 15, ob = mp[0] >> 4;
+    for (u32 i = 0; i < ob; i++) mp[1 + lb + i] = i + 1 == ob ? 0x7F : 0xFF;
+}
+
+/* sizes of 2^62 */
+static void hostile_size(u8 *rec, void *ctx) {
+    ntfs_attr_t *a = rec_find_attr(rec, NTFS_AT_DATA);
+    if (!a || !a->non_resident) { CHECK(0, "hostile_size: no non-resident $DATA"); return; }
+    a->nr.data_size = a->nr.initialized_size = a->nr.allocated_size = 1ll << 62;
+}
+#define hostile_alist hostile_size
+
+/* every entry of the directory's first index block points back to that block */
+static void hostile_index_loop(const img_t *im, u32 dir) {
+    ngeo_t g;
+    ngeo(im, &g);
+    u8 *r = malloc(g.rsize);
+    int fd = open(im->path, O_RDWR);
+    pread(fd, r, g.rsize, (off_t)(g.mft + (u64)dir * g.rsize));
+    ntfs_fixup_read(r, g.rsize, NTFS_FIXUP_STRIDE);
+    ntfs_attr_t *a = rec_find_attr(r, NTFS_AT_INDEX_ALLOCATION);
+    CHECK(a && a->non_resident, "hostile_index_loop: no index allocation in record %u", dir);
+    if (!a || !a->non_resident) { close(fd); free(r); return; }
+    u8 *mp = (u8 *)a + a->nr.mapping_pairs_offset;
+    u32 lb = mp[0] & 15, ob = mp[0] >> 4;
+    u64 lcn = 0;
+    for (u32 i = 0; i < ob; i++) lcn |= (u64)mp[1 + lb + i] << (8 * i);
+    u8 *b = malloc(4096), *nb = calloc(1, 4096);
+    pread(fd, b, 4096, (off_t)(lcn * g.csize));
+    ntfs_fixup_read(b, 4096, NTFS_FIXUP_STRIDE);
+    ntfs_index_block_t *h = (ntfs_index_block_t *)b;
+    u8 *e = (u8 *)&h->ih + h->ih.entries_offset, *end = (u8 *)&h->ih + h->ih.index_length;
+    CHECK(h->magic == NTFS_MAGIC_INDX, "hostile_index_loop: not an index block");
+    u32 o = 0, room = h->ih.allocated_size - h->ih.entries_offset;
+    while (e < end) {
+        ntfs_index_entry_t *x = (ntfs_index_entry_t *)e;
+        u32 l = x->length;
+        if (!l || l > 1024) break;
+        if (!(x->flags & NTFS_IE_END) && o + l + 8 + 24 > room) { e += l; continue; }  /* (no room: dropped) */
+        memcpy(nb + o, e, l);
+        ntfs_index_entry_t *y = (ntfs_index_entry_t *)(nb + o);
+        y->length = (u16)(l + 8);
+        y->flags |= NTFS_IE_NODE;
+        memset(nb + o + l, 0, 8);           /* sub-node VCN 0: this block */
+        o += l + 8;
+        if (x->flags & NTFS_IE_END) break;
+        e += l;
+    }
+    memcpy((u8 *)&h->ih + h->ih.entries_offset, nb, o);
+    h->ih.index_length = h->ih.entries_offset + o;
+    h->ih.flags = NTFS_INDEX_LARGE;
+    ((u16 *)(b + h->usa_offset))[0]--;
+    ntfs_fixup_write(b, 4096, NTFS_FIXUP_STRIDE);
+    pwrite(fd, b, 4096, (off_t)(lcn * g.csize));
+    close(fd);
+    free(b);
+    free(nb);
+    free(r);
+}
+
 static void s_ntfssafe(void) {
     if (!ntfs_tools()) return;
     img_t base, im;
@@ -925,6 +995,69 @@ static void s_ntfssafe(void) {
         pwrite(fd, &b, 1, (off_t)(g.mirr + g.rsize + 200));
         close(fd);
         safe_mount("mirror mismatch", &im, 1, 0, "chkdsk", 0);
+    }
+    /* files that are listed but not opened: Windows-compressed (WOF),
+     * encrypted (EFS); writes to them are refused */
+    FRESH();
+    {
+        const char *mnt = ntfs3g_mount(&im, 1);
+        sh("cd %s && python3 -c \"import os,struct\n"
+           "open('wof.bin','wb').write(b'x'*5000)\n"
+           "d=struct.pack('<IIII',1,0,2,1)\n"
+           "os.setxattr('wof.bin','system.ntfs_reparse_data',struct.pack('<IHH',0x80000017,len(d),0)+d)\n"
+           "open('efs.bin','wb').write(b'y'*100)\"", q(mnt));
+        ntfs3g_umount(mnt);
+        static char out[256];
+        sh_out(out, sizeof out, "ntfsinfo -F /efs.bin %s | grep 'Dumping Inode' | head -1 | sed 's/.*Inode \\([0-9]*\\).*/\\1/'", q(im.path));
+        u32 rec = (u32)atoi(out);
+        CHECK(rec >= 16, "efs.bin record %s", out);
+        if (rec >= 16) rec_patch(&im, rec, set_encrypted, NULL);
+        hdisk_t *h = ntfs_attach(&im, 512, 1, 0);
+        char L = letter_of(h);
+        vfs_file_t *f;
+        CHECK(v_listed(P(L, ""), "wof.bin", NULL) && v_listed(P(L, ""), "efs.bin", NULL), "[refused] not listed");
+        EXPECT(vfs_open(P(L, "wof.bin"), VFS_O_READ, &f), E_NOTSUP);
+        EXPECT(vfs_open(P(L, "efs.bin"), VFS_O_READ, &f), E_PERM);
+        EXPECT(vfs_open(P(L, "efs.bin"), VFS_O_RDWR, &f), E_PERM);
+        OK(vfs_unlink(P(L, "wof.bin")));          /* deleting works (and removes its $Reparse entry) */
+        OK(vfs_unlink(P(L, "efs.bin")));
+        disk_detach(h);
+        ntfs_verify("refused", &im);
+    }
+    /* hostile structures with valid fixups: the volume mounts, the damage
+     * fails the operations that meet it and makes the volume read-only */
+    {
+        img_t hb;
+        ntfs_img(&hb, "safe_hostile_base.img", 8, "tiny", NULL);
+        static const char *const cases[] = { "index loop", "run outside", "huge size" };
+        for (size_t c = 0; c < ARRAY_SIZE(cases); c++) {
+            sh("cp %s %s", q(hb.path), q(im.path));
+            static char out[256];
+            sh_out(out, sizeof out, "ntfsinfo -F /dir %s | grep 'Dumping Inode' | head -1 | sed 's/.*Inode \\([0-9]*\\).*/\\1/'", q(im.path));
+            u32 dir = (u32)atoi(out);
+            sh_out(out, sizeof out, "ntfsinfo -F /b.bin %s | grep 'Dumping Inode' | head -1 | sed 's/.*Inode \\([0-9]*\\).*/\\1/'", q(im.path));
+            u32 file = (u32)atoi(out);
+            if (c == 0) hostile_index_loop(&im, dir);
+            if (c == 1 && file >= 16) rec_patch(&im, file, hostile_run, NULL);
+            if (c == 2 && file >= 16) rec_patch(&im, file, hostile_alist, NULL);
+            hdisk_t *h = ntfs_attach(&im, 512, 1, 0);
+            char L = letter_of(h);
+            CHECK(L, "[%s] not mounted", cases[c]);
+            if (!L) { disk_detach(h); continue; }
+            vfs_dirent_t *ents;
+            int n = vfs_list(P(L, "dir"), &ents);
+            if (n >= 0) kfree(ents);
+            u64 sz;
+            int err;
+            u8 *d = v_read_all(P(L, "b.bin"), &sz, &err);
+            free(d);
+            if (c == 0) CHECK(n < 0, "[%s] listing a looping index = %d", cases[c], n);
+            if (c > 0) CHECK(!d, "[%s] reading a damaged file worked", cases[c]);
+            vfs_write_file(P(L, "dir/new.txt"), (const u8 *)"x", 1);
+            CHECK(vfs_volume_by_letter(L)->readonly, "[%s] still writable", cases[c]);
+            disk_detach(h);
+        }
+        unlink(hb.path);
     }
 #undef FRESH
     unlink(im.path);
