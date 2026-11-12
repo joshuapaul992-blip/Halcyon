@@ -1,5 +1,13 @@
-/* Halcyon OS - Explorer: My Computer / folder browser and file manager */
+/* Halcyon OS - Explorer: My Computer / folder browser and file manager.
+ * The built-in fallback for EXPLORER.EXE (frozen: new features go into the
+ * program). Since M8 it deletes to the Recycle Bin (Shift+Delete for good),
+ * hides the bins' folders, and takes part in drag and drop: an item can be
+ * dragged out of it, and items dropped on it are copied or moved into the
+ * folder under the pointer or the one it shows. */
 #include "gui/wm.h"
+#include "gui/dnd.h"
+#include "recycle.h"
+#include "core/settings.h"
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/unicode.h"
@@ -31,6 +39,8 @@ typedef struct ex {
     rect_t view_r;
     int content_h;
     int sb_drag;
+    int press, press_x, press_y;    /* a left press on an item (drag and drop) */
+    int drop_hl;                    /* the folder item a drag is over */
     link_t links[MAX_LINKS]; int nlinks; int link_hover;
     int tb_hover, tb_pressed;
     window_t *win;
@@ -201,6 +211,7 @@ static void load(ex_t *x) {
         x->items = kzalloc(sizeof(item_t) * (n + 1));
         for (int i = 0; i < n; i++) {
             if (ents[i].attr & (VFS_ATTR_HIDDEN | VFS_ATTR_VOLUME)) continue;
+            if (strlen(x->path) <= 3 && ents[i].is_dir && !strcasecmp(ents[i].name, RB_DIR)) continue;   /* a Recycle Bin */
             item_t *it = &x->items[x->n++];
             strlcpy(it->name, ents[i].name, sizeof it->name);
             it->is_dir = ents[i].is_dir;
@@ -217,6 +228,10 @@ static void load(ex_t *x) {
 
 static void navigate(ex_t *x, const char *path, int push) {
     char norm[VFS_MAX_PATH] = "";
+    if (!strcasecmp(path, "Recycle Bin")) {
+        msgbox(x->win, "Recycle Bin", "The Recycle Bin is shown by EXPLORER.EXE, which cannot run now.", ICON_INFO, MB_OK);
+        path = "";
+    }
     if (path[0] && strcasecmp(path, "My Computer")) {
         if (vfs_normalize(path, norm, sizeof norm) < 0) {
             msgbox(x->win, "Explorer", "The path is not valid.", ICON_ERROR, MB_OK);
@@ -301,9 +316,21 @@ static void cmd_rename(ex_t *x) {
     select_name(x, name);
 }
 
-static void cmd_delete(ex_t *x) {
+static void cmd_delete(ex_t *x, int perm) {
     if (!x->path[0] || x->sel < 0) return;
     item_t *it = &x->items[x->sel];
+    if (!perm) {
+        /* to the Recycle Bin (it asks, and deletes for good where there is no bin) */
+        char p[VFS_MAX_PATH + 1];
+        item_path(x, x->sel, p, VFS_MAX_PATH);
+        p[strlen(p) + 1] = 0;
+        fileop_recycle(x->win, p, 1, settings_get_int("recycle.confirm", 1));
+        if (!wm_alive(x->win)) return;
+        int keep = x->sel;
+        load(x);
+        x->sel = MIN(keep, x->n - 1);
+        return;
+    }
     char msg[VFS_MAX_NAME + 96];
     snprintf(msg, sizeof msg, it->is_dir ? "Are you sure you want to delete the folder '%s' and all of its contents?"
                                          : "Are you sure you want to delete '%s'?", it->name);
@@ -403,7 +430,7 @@ static void ex_menu(window_t *w, int id) {
     case CMD_NEWFOLDER: cmd_new(x, 1); break;
     case CMD_NEWTEXT: cmd_new(x, 0); break;
     case CMD_RENAME: cmd_rename(x); break;
-    case CMD_DELETE: cmd_delete(x); break;
+    case CMD_DELETE: cmd_delete(x, 0); break;
     case CMD_COPY: cmd_copy(x, 0); break;
     case CMD_CUT: cmd_copy(x, 1); break;
     case CMD_PASTE: cmd_paste(x); break;
@@ -640,7 +667,7 @@ static void paint_view(window_t *w, ex_t *x, gc_t *g) {
             rect_t r = item_rect(x, i);
             if (r.y + r.h < v.y + 22 || r.y > v.y + v.h) continue;
             item_t *it = &x->items[i];
-            int sel = i == x->sel;
+            int sel = i == x->sel || i == x->drop_hl;
             if (sel) gfx_fill(gg, mkrect(r.x + 2, r.y, c1 - 4, r.h), th->select);
             else if (i == x->hover) gfx_fill(gg, mkrect(r.x + 2, r.y, c1 - 4, r.h), color_lighten(th->select, 200));
             gfx_icon(gg, r.x + 6, r.y + 1, &icons16[it->icon]);
@@ -673,7 +700,7 @@ static void paint_view(window_t *w, ex_t *x, gc_t *g) {
         for (int i = 0; i < x->n; i++) {
             rect_t r = item_rect(x, i);
             item_t *it = &x->items[i];
-            int sel = i == x->sel;
+            int sel = i == x->sel || i == x->drop_hl;
             if (sel) gfx_rounded(gg, r, 3, 15, color_lighten(th->select, 170), color_lighten(th->select, 140));
             else if (i == x->hover) gfx_rounded(gg, r, 3, 15, color_lighten(th->select, 215), color_lighten(th->select, 200));
             gfx_icon(gg, r.x + 6, r.y + 6, &icons48[it->icon]);
@@ -696,7 +723,7 @@ static void paint_view(window_t *w, ex_t *x, gc_t *g) {
             rect_t r = item_rect(x, i);
             if (r.y + r.h < v.y || r.y > v.y + v.h) continue;
             item_t *it = &x->items[i];
-            int sel = i == x->sel;
+            int sel = i == x->sel || i == x->drop_hl;
             int ix = r.x + (r.w - 32) / 2;
             if (sel) gfx_icon_tinted(gg, ix, r.y + 4, &icons32[it->icon], th->select, 100);
             else gfx_icon(gg, ix, r.y + 4, &icons32[it->icon]);
@@ -777,6 +804,18 @@ static void ex_event(window_t *w, gui_event_t *e) {
     ex_t *x = w->data;
     int y0 = menubar_height(w);
     if (e->type == GE_MOUSE_MOVE || e->type == GE_MOUSE_LEAVE) {
+        if (x->press >= 0 && (e->buttons & MOUSE_LEFT) && (e->x - x->press_x) * (e->x - x->press_x) + (e->y - x->press_y) * (e->y - x->press_y) > 16) {
+            /* drag the item away */
+            int i = x->press;
+            x->press = -1;
+            if (x->path[0] && i < x->n) {
+                char p[VFS_MAX_PATH + 1];
+                item_path(x, i, p, VFS_MAX_PATH);
+                volume_t *v = vfs_volume_by_letter(p[0]);
+                dnd_begin(w, p, (int)strlen(p) + 1, 1, v && v->readonly ? DND_COPY : DND_COPY | DND_MOVE, x->items[i].icon);
+            }
+            return;
+        }
         if (x->sb_drag && (e->buttons & MOUSE_LEFT)) {
             rect_t v = x->view_r;
             int track = v.h - 34;
@@ -794,7 +833,7 @@ static void ex_event(window_t *w, gui_event_t *e) {
         }
         return;
     }
-    if (e->type == GE_MOUSE_UP) { x->sb_drag = 0; return; }
+    if (e->type == GE_MOUSE_UP) { x->sb_drag = 0; x->press = -1; return; }
     if (e->type == GE_WHEEL) {
         x->scroll = CLAMP(x->scroll - e->dz * 57, 0, max_scroll(x));
         wm_invalidate(w);
@@ -828,6 +867,7 @@ static void ex_event(window_t *w, gui_event_t *e) {
         int i = item_at(x, e->x, e->y);
         if (i != x->sel) { x->sel = i; wm_invalidate(w); }
         if (e->type == GE_DBLCLICK && e->button == MOUSE_LEFT && i >= 0) { open_item(x, i); return; }
+        if (e->button == MOUSE_LEFT && i >= 0) { x->press = i; x->press_x = e->x; x->press_y = e->y; }
         if (e->button == MOUSE_RIGHT) {
             rect_t c = wm_client_rect(w);
             if (i >= 0 && !x->path[0]) {
@@ -848,7 +888,7 @@ static void ex_event(window_t *w, gui_event_t *e) {
         switch (k->key) {
         case KEY_ENTER: open_item(x, x->sel); return;
         case KEY_BACKSPACE: go_up(x); return;
-        case KEY_DELETE: cmd_delete(x); return;
+        case KEY_DELETE: cmd_delete(x, (k->mods & MOD_SHIFT) != 0); return;
         case KEY_F2: cmd_rename(x); return;
         case KEY_F5: ex_menu(w, CMD_REFRESH); return;
         case KEY_LEFT: if (k->mods & MOD_ALT) { ex_menu(w, CMD_BACK); return; } ns = x->view == 1 ? ns : ns - 1; break;
@@ -899,6 +939,64 @@ static void ex_resize(window_t *w) {
     }
 }
 
+/* drag and drop: items dropped here go into the folder under the pointer
+ * or this folder (a move on the same drive, a copy across; Ctrl copies,
+ * Shift moves) */
+typedef struct { window_t *w; char *paths; int count, kind; char dir[VFS_MAX_PATH]; } kdrop_t;
+static void job_drop(void *a) {
+    kdrop_t *j = a;
+    fileop_transfer(wm_alive(j->w) ? j->w : NULL, j->kind, j->paths, j->count, j->dir);
+    if (wm_alive(j->w)) { ex_t *x = j->w->data; load(x); }
+    kfree(j->paths);
+    kfree(j);
+}
+
+static int ex_dnd(window_t *w, dnd_event_t *e) {
+    ex_t *x = w->data;
+    if (e->type == DND_END) { if (e->effect) load(x); return 0; }
+    if (e->type == DND_LEAVE) { if (x->drop_hl >= 0) { x->drop_hl = -1; wm_invalidate(w); } return 0; }
+    int len = 0, count = 0;
+    const char *paths = dnd_paths(e->serial, &len, &count);
+    char dir[VFS_MAX_PATH] = "";
+    int i = item_at(x, e->x, e->y), hl = -1;
+    if (i >= 0 && x->items[i].is_dir) { item_path(x, i, dir, sizeof dir); hl = i; }
+    else if (x->path[0] && rect_contains(x->view_r, e->x, e->y)) strlcpy(dir, x->path, sizeof dir);
+    int effect = DND_NONE;
+    volume_t *v = dir[0] ? vfs_volume_by_letter(dir[0]) : NULL;
+    if (paths && dir[0] && v && !v->readonly) {
+        int here = 1;
+        effect = toupper(paths[0]) == toupper(dir[0]) ? DND_MOVE : DND_COPY;
+        if (e->mods & MOD_CTRL) effect = DND_COPY;
+        else if (e->mods & MOD_SHIFT) effect = DND_MOVE;
+        for (const char *p = paths; p < paths + len && *p; p += strlen(p) + 1) {
+            size_t l = strlen(p);
+            char d[VFS_MAX_PATH];
+            if (!strncasecmp(p, dir, l) && (!dir[l] || dir[l] == '/')) { effect = DND_NONE; break; }
+            vfs_dirname(p, d, sizeof d);
+            if (strcasecmp(d, dir)) here = 0;
+        }
+        if (here && effect == DND_MOVE) effect = DND_NONE;
+    }
+    if (!effect) hl = -1;
+    if (hl != x->drop_hl) { x->drop_hl = hl; wm_invalidate(w); }
+    if (e->type == DND_DROP) {
+        x->drop_hl = -1;
+        wm_invalidate(w);
+        if (!e->effect || !dir[0] || !paths) return 0;
+        kdrop_t *j = kzalloc(sizeof *j);
+        if (!j || !(j->paths = kmalloc((size_t)len + 1))) { kfree(j); return 0; }
+        memcpy(j->paths, paths, (size_t)len);
+        j->paths[len] = 0;
+        j->w = w;
+        j->count = count;
+        j->kind = e->effect == DND_COPY ? FOP_COPY : FOP_MOVE;
+        strlcpy(j->dir, dir, sizeof j->dir);
+        gui_post(job_drop, j);
+        return 0;
+    }
+    return DND_ANSWER(effect, effect ? DND_COPY | DND_MOVE : 0);
+}
+
 static void ex_destroy(window_t *w) {
     ex_t *x = w->data;
     kfree(x->items);
@@ -910,7 +1008,7 @@ void app_explorer(const char *path) {
     w->min_w = 360; w->min_h = 240;
     ex_t *x = kzalloc(sizeof *x);
     x->win = w;
-    x->sel = -1; x->hover = -1; x->link_hover = -1; x->tb_hover = -1;
+    x->sel = -1; x->hover = -1; x->link_hover = -1; x->tb_hover = -1; x->press = -1; x->drop_hl = -1;
     w->data = x;
     w->on_paint = ex_paint;
     w->on_event = ex_event;
@@ -918,6 +1016,7 @@ void app_explorer(const char *path) {
     w->on_tick = ex_tick;
     w->on_resize = ex_resize;
     w->on_destroy = ex_destroy;
+    w->on_dnd = ex_dnd;
     menubar_attach(w, ex_menus, ARRAY_SIZE(ex_menus));
     int ay = MENUBAR_H + TOOLBAR_H + 3;
     x->addr = widget_add(w, W_TEXTBOX, mkrect(62, ay, w->client->w - 62 - 50, 22), "", 1);

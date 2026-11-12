@@ -1071,6 +1071,7 @@ static int screen_changed(void) {
 }
 
 void usergui_init(void);
+void recycle_test_hook(void);
 void gui_main(void) {
     gui_thread = thread_current();
     usergui_init();
@@ -1100,6 +1101,7 @@ void gui_main(void) {
         shell_run(autorun, args);
     }
     format_test_hook();
+    recycle_test_hook();                    /* apps/recycletest.c: fw_cfg opt/halcyon/recycletest */
     for (;;) gui_step();
 }
 

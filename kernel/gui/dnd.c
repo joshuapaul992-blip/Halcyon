@@ -123,11 +123,9 @@ static void update_target(int force_over) {
     redraw();
 }
 
-int dnd_begin(window_t *src, const char *paths, int len, int count, int allowed, int icon) {
+static int begin(window_t *src, const char *paths, int len, int count, int allowed, int icon, int button) {
     if (D.active || D.menu) return E_BUSY;
     if (len <= 0 || len > MAX_PATHS_BYTES || count <= 0) return E_INVAL;
-    int buttons = wm_mouse_buttons();
-    int button = (buttons & MOUSE_LEFT) ? MOUSE_LEFT : (buttons & MOUSE_RIGHT) ? MOUSE_RIGHT : 0;
     if (!button) return E_AGAIN;
     char *copy = kmalloc((size_t)len + 1);
     if (!copy) return E_NOMEM;
@@ -154,6 +152,18 @@ int dnd_begin(window_t *src, const char *paths, int len, int count, int allowed,
     update_target(1);
     return (int)D.serial;
 }
+
+int dnd_begin(window_t *src, const char *paths, int len, int count, int allowed, int icon) {
+    int buttons = wm_mouse_buttons();
+    return begin(src, paths, len, count, allowed, icon,
+                 (buttons & MOUSE_LEFT) ? MOUSE_LEFT : (buttons & MOUSE_RIGHT) ? MOUSE_RIGHT : 0);
+}
+
+int dnd_test_begin(const char *paths, int len, int count, int icon) {
+    return begin(NULL, paths, len, count, DND_COPY | DND_MOVE, icon, MOUSE_LEFT);
+}
+
+int dnd_effect(void) { return D.active ? D.effect : -1; }
 
 void dnd_answer(window_t *w, u32 serial, int effect, int possible) {
     if (!D.active || serial != D.serial || w != D.twin || D.tkind != T_WINDOW) return;

@@ -44,9 +44,12 @@ int  dnd_active(void);
 const char *dnd_paths(u32 serial, int *len, int *count);
 /* a target's late answer (programs) */
 void dnd_answer(window_t *w, u32 serial, int effect, int possible);
-/* move the pointer of a drag to screen x, y and drop there (test hooks) */
+/* test hooks (apps/recycletest.c): a drag without a mouse button, moved to
+ * screen x, y and dropped there; the effect the target answered */
+int  dnd_test_begin(const char *paths, int len, int count, int icon);
 void dnd_test_move(int x, int y);
 void dnd_test_drop(void);
+int  dnd_effect(void);
 
 /* window manager hooks (gui/wm.c) */
 void dnd_pointer(int x, int y, int old_buttons, int buttons);
