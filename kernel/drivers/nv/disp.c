@@ -15,10 +15,22 @@
  * frame buffer. Interrupts: the GPU's are masked (PMC) and INTx is off
  * while the driver owns the display; the supervisor is polled.
  *
+ * 10d adds, per head: page flips through the base channel (completed when
+ * its notifier says so, polled; a flip that does not complete in four
+ * frames, or a channel that does not start, ends flips on that head: the
+ * core layer shows the buffer, single buffered as in 10b), the hardware
+ * cursor (images in VRAM, enabled in the core channel, positions through
+ * the cursor channel; any failure: the software cursor), the vertical blank
+ * from the scanline counter, and several heads lit at once, each with its
+ * own output resource (evochan.c: nv_evo_pick_or) and video PLL. No
+ * interrupt path: flips are found by poll, woken at the expected vertical
+ * blank (idle_wake_at). See docs/DESIGN-M10-NVIDIA.md, "10d".
+ *
  * Switches: nv.disable=1 and F8 Safe Mode (nothing of M10), nv.modeset=0
  * (identification only), nv.scripts=0 (no VBIOS display scripts),
- * display.disable=nv (the display core), the start guard
- * (display.nv.guard). */
+ * nv.flip=0 (single buffered), nv.hwcursor=0 (software cursor), nv.heads=N
+ * (at most N heads lit), display.disable=nv (the display core), the start
+ * guard (display.nv.guard). */
 #include "nv.h"
 #include "evo.h"
 #include "drivers/display.h"
@@ -26,10 +38,17 @@
 #include "core/io.h"
 #include "core/mm.h"
 #include "core/kernel.h"
+#include "core/irq.h"
 #include "core/settings.h"
 
 #define MiB (1ull << 20)
-#define NVD_LOG 8192
+#define NVD_LOG 32768
+/* inside the 2 MiB block of our objects: the instance memory (64 KiB), the
+ * core push buffer, the notifiers, the base push buffers, the cursor images */
+#define CTL_PUSH    0x010000
+#define CTL_SYNC    0x011000
+#define CTL_BASE    0x012000                         /* + head * 4 KiB */
+#define CTL_CURS    0x020000                         /* + head * 32 KiB + slot * 16 KiB */
 
 typedef struct nvd_conn {
     int nvc;                    /* d->conn[] */
@@ -42,6 +61,32 @@ typedef struct nvd_conn {
     int hdmi, digital;          /* from the EDID */
     int hpd;                    /* last hot-plug sense */
 } nvd_conn_t;
+
+/* a hardware head */
+typedef struct nvd_head {
+    int on, dcb, or_type, or_id;
+    u32 khz;
+    /* the core layer's surface (set_mode) */
+    u64 core_off;
+    int fb_w, fb_h;
+    u32 fb_pitch;
+    u32 frame_ms;
+    /* 10d: page flips through the base channel */
+    int flips;                  /* the base channel runs for this head */
+    display_fb_t *pend;         /* the buffer of the queued flip */
+    u64 flip_ms;
+    u64 vis_off;                /* the buffer on screen (base layer, else the core layer) */
+    u32 flips_done;
+    /* 10d: the hardware cursor */
+    int curs;                   /* the cursor channel runs for this head */
+    int curs_on;                /* enabled in the core channel */
+    int curs_slot;              /* the image the core channel points at */
+    int curs_hx, curs_hy, curs_x, curs_y;
+    u32 curs_sum[2];            /* each slot's image (checksum; 0: empty) */
+    int curs_busy_run;          /* moves dropped in a row */
+    u32 curs_updates;
+    int vbl_fail;
+} nvd_head_t;
 
 typedef struct nvd {
     nv_device_t *d;
@@ -59,7 +104,10 @@ typedef struct nvd {
     int nconn;
     nvd_conn_t conn[DISPLAY_MAX_CONNECTORS];
     int hw_head[DISPLAY_MAX_HEADS];   /* display head index -> hardware head */
-    struct { int on, dcb, or_type, or_id; } head[EVO_HEADS];
+    nvd_head_t head[EVO_HEADS];
+    int want_flip, want_curs;   /* nv.flip, nv.hwcursor */
+    int heads_avail, heads_used;      /* the engine's heads, the ones registered (nv.heads) */
+    char flip_why[96], curs_why[96];  /* why page flips / the hardware cursor are off */
     nv_evo_dp_t dp[EVO_ORS];
     u16 pci_cmd;
     int pci_cmd_saved;
@@ -231,6 +279,7 @@ static int nvd_mode_valid(display_adapter_t *a, display_connector_t *dc, const d
     const nv_dcb_output_t *o = dcb(n, c->sel);
     if (!o || (m->flags & DT_INTERLACE) || !m->t.clock_khz || m->t.clock_khz < 25000) return 0;
     if (m->w > n->g->max_w || m->h > n->g->max_h) return 0;
+    if (m->t.clock_khz > nv_evo_head_max_khz(n->g)) return 0;
     if (o->type == NV_OUT_DP) return c->dp_ok && nv_dp_fits(c->dp.lanes_max, c->dp.bw_max, m->t.clock_khz, 24);
     return m->t.clock_khz <= max_clock(n, c, o);
 }
@@ -269,34 +318,15 @@ static void nvd_fb_free(display_adapter_t *a, display_fb_t *fb) {
 
 /* ---------------- the output resource for an output ---------------- */
 
-static int or_used_by_other(nvd_t *n, int head, int type, int id) {
-    for (int h = 0; h < EVO_HEADS; h++)
-        if (h != head && n->head[h].on && n->head[h].or_type == type && n->head[h].or_id == id) return 1;
-    return 0;
-}
-
-/* nvkm_outp_acquire: the OR already driving it, else a free one */
-static int pick_or(nvd_t *n, int k, int head, int *type) {
-    const nv_dcb_output_t *o = dcb(n, k);
-    nv_evo_t *e = &n->e;
-    if (!o) return -1;
-    if (o->type == NV_OUT_CRT) {
-        *type = 1;
-        int id = o->or_mask ? __builtin_ctz(o->or_mask) : -1;
-        return id >= 0 && id < e->ndacs && (e->dac_mask & (1u << id)) && !or_used_by_other(n, head, 1, id) ? id : -1;
+/* what every hardware head drives now (nv_evo_pick_or, nv_evo_bw_check) */
+static void use_of(nvd_t *n, nv_evo_use_t use[EVO_HEADS]) {
+    for (int h = 0; h < EVO_HEADS; h++) {
+        use[h].on = (u8)n->head[h].on;
+        use[h].dcb = n->head[h].dcb;
+        use[h].or_type = n->head[h].or_type;
+        use[h].or_id = n->head[h].or_id;
+        use[h].khz = n->head[h].khz;
     }
-    *type = 0;
-    if (!n->g->route) {
-        int id = o->or_mask ? __builtin_ctz(o->or_mask) : -1;
-        return id >= 0 && id < e->nsors && (e->sor_mask & (1u << id)) && !or_used_by_other(n, head, 0, id) ? id : -1;
-    }
-    for (int i = 0; i < e->nsors; i++)
-        if ((e->sor_mask & (1u << i)) && e->sor_outp[i] == k && !or_used_by_other(n, head, 0, i)) return i;
-    for (int i = 0; i < e->nsors; i++)
-        if ((e->sor_mask & (1u << i)) && e->sor_outp[i] < 0 && !e->sor_arm[i].heads && !or_used_by_other(n, head, 0, i)) return i;
-    for (int i = 0; i < e->nsors; i++)
-        if ((e->sor_mask & (1u << i)) && !or_used_by_other(n, head, 0, i)) return i;
-    return -1;
 }
 
 static u32 or_heads_of(nvd_t *n, int type, int id, int except) {
@@ -324,6 +354,85 @@ static void fw_off(nvd_t *n, nv_evo_stream_t *s, int head, int or_type, int or_i
     }
 }
 
+/* ---------------- 10d: flips and the cursor given up ---------------- */
+
+/* a core channel update of its own (cursor, core layer); 0 or E_* */
+static int core_update(nvd_t *n, nv_evo_stream_t *s) {
+    nv_evo_update(n->g, s, 1);
+    return nv_evo_submit(&n->e, s, 1);
+}
+
+/* point a lit head's core layer at a buffer (the fallback from flips) */
+static int core_layer(nvd_t *n, int head, u64 off) {
+    nvd_head_t *hd = &n->head[head];
+    if (!hd->on || hd->core_off == off) return 0;
+    nv_evo_stream_t s;
+    memset(&s, 0, sizeof s);
+    nv_evo_core_layer_methods(n->g, &s, head, off, hd->fb_w, hd->fb_h, hd->fb_pitch, EVO_HANDLE_VRAM, 1, hd->curs_on,
+                              nv_evo_curs_offset(&n->e, head, hd->curs_slot));
+    int r = core_update(n, &s);
+    if (!r) hd->core_off = off;
+    return r;
+}
+
+/* page flips end on this head: the base layer off and its channel stopped,
+ * the core layer shows `show` (a VRAM offset, ~0: leave it), the display
+ * core single-buffers from now on (10b) */
+static void flips_off(nvd_t *n, display_head_t *dh, int head, u64 show, const char *why) {
+    nv_evo_t *e = &n->e;
+    nvd_head_t *hd = &n->head[head];
+    nvlog(n, "head %d: page flips given up (%s): single-buffered scanout from the core channel", head, why);
+    snprintf(n->flip_why, sizeof n->flip_why, "head %d: %s", head, why);
+    if (e->base[head].up && (e->base[head].shown || e->base[head].pending) && nv_evo_base_off(e, head, 50000))
+        nvlog(n, "head %d: the base layer stays on (%s): the picture may stop following; nv.flip=0 avoids this", head, e->why);
+    nv_evo_base_stop(e, head);
+    hd->flips = 0;
+    hd->pend = NULL;
+    if (dh) dh->caps &= ~HEAD_CAP_FLIP;
+    if (show != ~0ull && hd->on) {
+        int r = core_layer(n, head, show);
+        nvlog(n, "head %d: the core layer shows VRAM %llx: %s", head, (unsigned long long)show, r ? e->why : "done");
+        hd->vis_off = show;
+    }
+}
+
+/* the hardware cursor ends (the display core draws it in software); on
+ * every head, since the display core then stops moving it on the others */
+static void curs_off(nvd_t *n, display_head_t *dh, int head, const char *why) {
+    (void)dh;
+    nvlog(n, "head %d: hardware cursor given up (%s): the software cursor is used on every head", head, why);
+    snprintf(n->curs_why, sizeof n->curs_why, "head %d: %s", head, why);
+    for (int k = 0; k < n->a->nheads; k++) {
+        int h = n->hw_head[k];
+        nvd_head_t *hd = &n->head[h];
+        if (hd->curs_on && hd->on) {
+            nv_evo_stream_t s;
+            memset(&s, 0, sizeof s);
+            nv_evo_curs_methods(n->g, &s, h, 0, 0, 0);
+            core_update(n, &s);
+        }
+        hd->curs_on = 0;
+        nv_evo_curs_stop(&n->e, h);
+        hd->curs = 0;
+        n->a->heads[k].caps &= ~HEAD_CAP_CURSOR;
+    }
+}
+
+static display_head_t *dhead_of(nvd_t *n, int head) {
+    for (int k = 0; k < n->a->nheads; k++) if (n->hw_head[k] == head) return &n->a->heads[k];
+    return NULL;
+}
+
+/* before the core channel changes a head (mode, off): the base layer off */
+static void base_quiet(nvd_t *n, int head) {
+    nvd_head_t *hd = &n->head[head];
+    nv_evo_t *e = &n->e;
+    hd->pend = NULL;
+    if (!hd->flips || !(e->base[head].shown || e->base[head].pending)) return;
+    if (nv_evo_base_off(e, head, 100000)) flips_off(n, dhead_of(n, head), head, ~0ull, "the base layer did not go off for a mode set");
+    else hd->vis_off = hd->core_off;
+}
+
 /* ---------------- set_mode ---------------- */
 
 static int head_off(nvd_t *n, int head) {
@@ -344,6 +453,8 @@ static int head_off(nvd_t *n, int head) {
     }
     int r = nv_evo_submit(e, &s, 1);
     n->head[head].on = 0;
+    n->head[head].curs_on = 0;
+    n->head[head].khz = 0;
     nvlog(n, "head %d off: %s", head, r ? e->why : "done");
     return r;
 }
@@ -354,13 +465,28 @@ static int nvd_set_mode(display_head_t *dh, display_connector_t *dc, const displ
     nv_evo_t *e = &n->e;
     int head = n->hw_head[dh->index];
     if (!n->taken) return E_IO;
+    base_quiet(n, head);
     if (!m) return head_off(n, head) ? E_IO : 0;
     nvd_conn_t *c = &n->conn[dc->index];
     int k = c->sel;
     const nv_dcb_output_t *o = dcb(n, k);
     if (!o || !fb || !m->t.clock_khz) { snprintf(a->why, sizeof a->why, "%s: no output or timing", dc->name); return E_INVAL; }
-    int or_type = 0, or_id = pick_or(n, k, head, &or_type);
-    if (or_id < 0) { snprintf(a->why, sizeof a->why, "%s: no free output resource", dc->name); nvlog(n, "%s", a->why); return E_NOSPC; }
+    /* several heads: an output resource no other head uses (pad macros
+     * shared between connectors), within the per-head and total pixel clock */
+    nv_evo_use_t use[EVO_HEADS];
+    use_of(n, use);
+    char why[80];
+    int or_type = 0, or_id = nv_evo_pick_or(e, use, k, head, &or_type, why, sizeof why);
+    if (or_id < 0) {
+        snprintf(a->why, sizeof a->why, "%s: no output resource: %s", dc->name, why);
+        nvlog(n, "%s", a->why);
+        return E_NOSPC;
+    }
+    if (nv_evo_bw_check(e, use, head, m->t.clock_khz, why, sizeof why)) {
+        snprintf(a->why, sizeof a->why, "%s: %s", dc->name, why);
+        nvlog(n, "%s", a->why);
+        return E_NOSPC;
+    }
 
     nv_evo_timing_t t = { m->t.clock_khz, m->t.hactive, m->t.hsync_start, m->t.hsync_end, m->t.htotal,
                           m->t.vactive, m->t.vsync_start, m->t.vsync_end, m->t.vtotal,
@@ -378,6 +504,7 @@ static int nvd_set_mode(display_head_t *dh, display_connector_t *dc, const displ
     cfg.or_type = or_type;
     cfg.or_id = or_id;
     cfg.or_heads = or_heads_of(n, or_type, or_id, head) | (1u << head);
+    cfg.base = (u8)n->head[head].flips;             /* 10d: the base channel may show 32 bpp surfaces */
     int dual = 0;
     switch (o->type) {
     case NV_OUT_CRT: cfg.proto = EVO_PROTO_CRT; cfg.depth = EVO_DEPTH_DEFAULT; break;
@@ -426,13 +553,129 @@ static int nvd_set_mode(display_head_t *dh, display_connector_t *dc, const displ
         return E_IO;
     }
     n->first_set_done = 1;
-    n->head[head].on = 1;
-    n->head[head].dcb = k;
-    n->head[head].or_type = or_type;
-    n->head[head].or_id = or_id;
-    nvlog(n, "%s: on (%u supervisor rounds so far, %u script opcodes, %u writes refused)", dc->name, e->supers, e->script_ops,
-          e->script_refused);
+    nvd_head_t *hd = &n->head[head];
+    hd->on = 1;
+    hd->dcb = k;
+    hd->or_type = or_type;
+    hd->or_id = or_id;
+    hd->khz = m->t.clock_khz;
+    hd->core_off = hd->vis_off = fb->handle;
+    hd->fb_w = m->w;
+    hd->fb_h = m->h;
+    hd->fb_pitch = fb->pitch;
+    hd->frame_ms = m->hz > 0 ? (u32)(1000 / m->hz) + 1 : 17;
+    hd->curs_on = 0;                                 /* (the head's methods switched it off) */
+    nvlog(n, "%s: on (%u supervisor rounds so far, %u script opcodes, %u writes refused)%s", dc->name, e->supers, e->script_ops,
+          e->script_refused, hd->flips ? "; page flips through base channel" : "");
     return 0;
+}
+
+/* ---------------- 10d: page flips ---------------- */
+
+static int nvd_flip(display_head_t *dh, display_fb_t *fb) {
+    nvd_t *n = dh->adapter->priv;
+    int head = n->hw_head[dh->index];
+    nvd_head_t *hd = &n->head[head];
+    if (!n->taken || !hd->flips || !hd->on || hd->pend) return E_IO;
+    int r = nv_evo_base_flip(&n->e, head, fb->handle, fb->w, fb->h, fb->pitch);
+    if (r) {
+        char w[64];
+        snprintf(w, sizeof w, "a flip could not be queued (%s)", strerror(r));
+        flips_off(n, dh, head, hd->vis_off, w);       /* (the buffer on screen stays: the core keeps its front) */
+        return r;
+    }
+    hd->pend = fb;
+    hd->flip_ms = time_ms();
+    if (hd->flips_done == 0) nvlog(n, "head %d: first page flip queued (VRAM %llx)", head, (unsigned long long)fb->handle);
+    /* no interrupt: be back for the vertical blank (polled) */
+    idle_wake_at(time_ms() + nv_evo_us_to_vblank(&n->e, head) / 1000 + 1);
+    return 0;
+}
+
+static int nvd_wait_vblank(display_head_t *dh) {
+    nvd_t *n = dh->adapter->priv;
+    int head = n->hw_head[dh->index];
+    nvd_head_t *hd = &n->head[head];
+    if (!n->taken || !hd->on) return E_IO;
+    int r = nv_evo_wait_vblank(&n->e, head, 50000);
+    if (!r) { hd->vbl_fail = 0; return 0; }
+    if (++hd->vbl_fail == 3) {
+        dh->caps &= ~HEAD_CAP_VBLANK;
+        nvlog(n, "head %d: three vertical blank waits failed (%s): no vertical blank any more", head, strerror(r));
+    }
+    return r;
+}
+
+/* ---------------- 10d: the hardware cursor ---------------- */
+
+static int curs_core(nvd_t *n, int head, int on) {
+    nvd_head_t *hd = &n->head[head];
+    nv_evo_stream_t s;
+    memset(&s, 0, sizeof s);
+    nv_evo_curs_methods(n->g, &s, head, on, nv_evo_curs_offset(&n->e, head, hd->curs_slot), EVO_HANDLE_VRAM);
+    int r = core_update(n, &s);
+    if (!r) { hd->curs_on = on; hd->curs_updates++; }
+    return r;
+}
+
+static u32 curs_sum(const u32 *p, int size) {
+    u32 h = 2166136261u ^ (u32)size;
+    for (int i = 0; i < size * size; i++) h = (h ^ p[i]) * 16777619u;
+    return h ? h : 1;
+}
+
+static int nvd_cursor_image(display_head_t *dh, const u32 *argb, int size, int hx, int hy) {
+    nvd_t *n = dh->adapter->priv;
+    int head = n->hw_head[dh->index];
+    nvd_head_t *hd = &n->head[head];
+    if (!n->taken || !hd->curs || !argb || size <= 0 || size > EVO_CURS_SIZE) return E_IO;
+    u32 sum = curs_sum(argb, size);
+    hd->curs_hx = hx;
+    hd->curs_hy = hy;
+    if (hd->curs_sum[hd->curs_slot] != sum) {
+        /* the other slot while the cursor is shown (no tearing), else the current one */
+        int slot = hd->curs_on ? !hd->curs_slot : hd->curs_slot;
+        if (hd->curs_sum[slot] != sum) {
+            int r = nv_evo_curs_upload(&n->e, head, slot, argb, size);
+            if (r) { hd->curs_sum[slot] = 0; curs_off(n, dh, head, "the image does not reach VRAM"); return E_IO; }
+            hd->curs_sum[slot] = sum;
+        }
+        int was = hd->curs_slot;
+        hd->curs_slot = slot;
+        if (hd->curs_on && curs_core(n, head, 1)) {
+            hd->curs_slot = was;
+            curs_off(n, dh, head, "the core channel did not take the new image");
+            return E_IO;
+        }
+    }
+    /* the hot spot may have changed: the image's corner moves */
+    if (hd->curs_on) nv_evo_curs_move(&n->e, head, hd->curs_x - hx, hd->curs_y - hy);
+    return 0;
+}
+
+static void nvd_cursor_move(display_head_t *dh, int x, int y, int visible) {
+    nvd_t *n = dh->adapter->priv;
+    int head = n->hw_head[dh->index];
+    nvd_head_t *hd = &n->head[head];
+    if (!n->taken || !hd->curs || !hd->on) return;
+    hd->curs_x = x;
+    hd->curs_y = y;
+    if (!visible) {
+        if (hd->curs_on && curs_core(n, head, 0)) curs_off(n, dh, head, "the core channel did not hide it");
+        return;
+    }
+    /* the position of the image's top left (the hot spot subtracted; may be
+     * negative: the hardware clips), then shown if it was not */
+    int r = nv_evo_curs_move(&n->e, head, x - hd->curs_hx, y - hd->curs_hy);
+    if (r == E_BUSY) {
+        if (++hd->curs_busy_run >= 100) { curs_off(n, dh, head, "the cursor channel took no position for 100 moves"); return; }
+    } else if (r) {
+        curs_off(n, dh, head, "the cursor channel's registers are unreadable");
+        return;
+    } else {
+        hd->curs_busy_run = 0;
+    }
+    if (!hd->curs_on && curs_core(n, head, 1)) curs_off(n, dh, head, "the core channel did not show it");
 }
 
 /* ---------------- enable: the takeover ---------------- */
@@ -479,6 +722,41 @@ static void layout(nvd_t *n) {
     if (d->vram && d->vram <= n->window + 16 * MiB) nv_evo_vram_hole(&n->vram, d->vram - 16 * MiB, 16 * MiB, "end of VRAM");
 }
 
+/* the simulated card: a monitor on every connector at once (the first
+ * output of each, in connector order), as nv_evo_plan would place them on
+ * a card with the generation's resources (no hardware read) */
+static void dry_plan(nvd_t *n) {
+    static nv_evo_t pe;
+    memset(&pe, 0, sizeof pe);
+    pe.g = n->g;
+    pe.bios = n->d->bios;
+    pe.chipset = n->d->chip.chipset;
+    pe.nheads = n->g->heads;
+    pe.head_mask = (1u << n->g->heads) - 1;
+    pe.nsors = n->g->gf119 ? 8 : n->g->sor_state == EVO_SOR_G94 ? 4 : 2;
+    pe.sor_mask = n->g->gf119 || n->g->sor_state == EVO_SOR_G94 ? 0xF : 3;
+    pe.ndacs = n->g->has_dac ? (n->g->gf119 ? 4 : 3) : 0;
+    pe.dac_mask = n->g->has_dac ? 7 : 0;
+    for (int i = 0; i < EVO_ORS; i++) pe.sor_outp[i] = pe.dac_outp[i] = pe.sor_asy_outp[i] = pe.dac_asy_outp[i] = -1;
+    u32 heads = 0;
+    for (int k = 0; k < n->heads_used; k++) heads |= 1u << n->hw_head[k];
+    nv_evo_plan_t p[DISPLAY_MAX_CONNECTORS];
+    int np = 0;
+    for (int i = 0; i < n->nconn && np < DISPLAY_MAX_CONNECTORS; i++) {
+        memset(&p[np], 0, sizeof p[np]);
+        p[np].dcb = n->conn[i].out[0];
+        p[np].khz = 148500;
+        np++;
+    }
+    int lit = nv_evo_plan(&pe, p, np, heads);
+    for (int i = 0; i < np; i++) {
+        if (p[i].err) nvlog(n, "dry run: a monitor on every connector: %s: %s", n->a->conns[i].name, p[i].why);
+        else nvlog(n, "dry run: a monitor on every connector: %s on head %d, %s%d, VPLL%d", n->a->conns[i].name, p[i].head,
+                   p[i].or_type ? "DAC" : "SOR", p[i].or_id, p[i].head);
+    }
+    nvlog(n, "dry run: %d of %d monitors can be lit at once", lit, np);
+}
+
 /* the simulated card: what a first mode set would send (no hardware) */
 static void dry_run(nvd_t *n) {
     nv_device_t *d = n->d;
@@ -511,9 +789,71 @@ static void dry_run(nvd_t *n) {
         nv_evo_update(n->g, &s, 1);
         nvlog(n, "dry run: %dx%d at %u kHz on head 0, SOR%d %s: %d method words (%08x %08x ... %08x)", m[0].w, m[0].h,
               m[0].t.clock_khz, cfg.or_id, nv_out_type_str(o->type), s.n, s.w[0], s.w[1], s.w[s.n - 1]);
+        /* 10d: what a page flip and the cursor would send */
+        memset(&s, 0, sizeof s);
+        nv_evo_base_image_methods(n->g, &s, nv_evo_base_ntfy(0, 1), EVO_HANDLE_SYNC, EVO_HANDLE_VRAM, cfg.offset + 16 * MiB, cfg.w,
+                                  cfg.h, cfg.pitch);
+        nvlog(n, "dry run: a page flip on head 0 (base channel %04x): %d method words (%08x %08x ... %08x)", nv_evo_base_class(n->g), s.n,
+              s.w[0], s.w[1], s.w[s.n - 1]);
+        memset(&s, 0, sizeof s);
+        nv_evo_curs_methods(n->g, &s, 0, 1, 2 * MiB + CTL_CURS, EVO_HANDLE_VRAM);
+        nv_evo_update(n->g, &s, 1);
+        int cc, cu;
+        nv_evo_chan_ids(n->g, EVO_CHAN_CURS, 0, &cc, &cu);
+        nvlog(n, "dry run: the cursor on head 0: %d core method words (%08x %08x ...), position through channel %d (class %04x) at %06x",
+              s.n, s.w[0], s.w[1], cc, nv_evo_curs_class(n->g), 0x640000 + cu * 0x1000 + 0x84);
+        dry_plan(n);
         return;
     }
     nvlog(n, "dry run: no monitor with a timing on the simulated card");
+}
+
+/* 10d: the base and cursor channels of every head we registered. After one
+ * that does not come up the others of its kind are not tried: the feature
+ * is off (10b behaviour) and BOOT.LOG says why. */
+static void chans_start(nvd_t *n) {
+    display_adapter_t *a = n->a;
+    nv_evo_t *e = &n->e;
+    int flip_bad = !n->want_flip, curs_bad = !n->want_curs;
+    for (int k = 0; k < a->nheads; k++) {
+        display_head_t *dh = &a->heads[k];
+        int head = n->hw_head[k];
+        nvd_head_t *hd = &n->head[head];
+        hd->flips = hd->curs = 0;
+        if (!flip_bad && (dh->caps & HEAD_CAP_FLIP)) {
+            if (!nv_evo_base_start(e, head)) hd->flips = 1;
+            else {
+                flip_bad = 1;
+                snprintf(n->flip_why, sizeof n->flip_why, "%s", e->why);
+                nvlog(n, "page flips off: %s; single-buffered scanout from the core channel (10b)", e->why);
+            }
+        }
+        if (!curs_bad && (dh->caps & HEAD_CAP_CURSOR)) {
+            if (!nv_evo_curs_start(e, head)) hd->curs = 1;
+            else {
+                curs_bad = 1;
+                snprintf(n->curs_why, sizeof n->curs_why, "%s", e->why);
+                nvlog(n, "hardware cursor off: %s; the software cursor is used", e->why);
+            }
+        }
+    }
+    for (int k = 0; k < a->nheads; k++) {
+        display_head_t *dh = &a->heads[k];
+        nvd_head_t *hd = &n->head[n->hw_head[k]];
+        if (!hd->flips) dh->caps &= ~HEAD_CAP_FLIP;
+        if (!hd->curs) dh->caps &= ~HEAD_CAP_CURSOR;
+    }
+    /* one feature failing on one head turns it off on all (a mixed desktop gains nothing) */
+    for (int k = 0; k < a->nheads; k++) {
+        display_head_t *dh = &a->heads[k];
+        int head = n->hw_head[k];
+        if (flip_bad && n->head[head].flips) { nv_evo_base_stop(e, head); n->head[head].flips = 0; dh->caps &= ~HEAD_CAP_FLIP; }
+        if (curs_bad && n->head[head].curs) { nv_evo_curs_stop(e, head); n->head[head].curs = 0; dh->caps &= ~HEAD_CAP_CURSOR; }
+    }
+    int nf = 0, nc = 0;
+    for (int k = 0; k < a->nheads; k++) { nf += n->head[n->hw_head[k]].flips; nc += n->head[n->hw_head[k]].curs; }
+    nvlog(n, "10d: page flips on %d of %d heads%s, hardware cursor on %d%s, vertical blank polled from the scanline counter", nf,
+          a->nheads, n->want_flip ? "" : " (nv.flip=0)", nc, n->want_curs ? "" : " (nv.hwcursor=0)");
 }
 
 static int nvd_enable(display_adapter_t *a) {
@@ -522,6 +862,8 @@ static int nvd_enable(display_adapter_t *a) {
     a->why[0] = 0;
     if (d->fake) {
         dry_run(n);
+        nvlog(n, "10d: no base or cursor channel started, no scanline read, %d head%s not lit: the simulated card has no registers",
+              n->heads_used, n->heads_used == 1 ? "" : "s");
         return fail(n, E_NODEV, "simulated card (QEMU test hook): no registers, native modesetting not attempted");
     }
     if (!d->mmio || !d->bios) return fail(n, E_NODEV, "no registers or no video BIOS");
@@ -582,15 +924,21 @@ static int nvd_enable(display_adapter_t *a) {
     e->vram_total = d->vram ? d->vram : n->window;
     e->scripts = settings_get_int("nv.scripts", 1);
     e->inst = ctrl;
-    e->push = ctrl + EVO_INST_BYTES;
-    e->sync = ctrl + EVO_INST_BYTES + EVO_PUSH_BYTES;
+    e->push = ctrl + CTL_PUSH;
+    e->sync = ctrl + CTL_SYNC;
+    e->basepush = ctrl + CTL_BASE;
+    e->cursimg = ctrl + CTL_CURS;
+    e->chan_us = 200000;
     r = nv_evo_takeover(e);
     if (r) {
         snprintf(a->why, sizeof a->why, "takeover: %s", e->why);
         return E_IO;
     }
     n->taken = 1;
-    for (int h = 0; h < EVO_HEADS; h++) n->head[h].on = 0;
+    for (int h = 0; h < EVO_HEADS; h++) memset(&n->head[h], 0, sizeof n->head[h]);
+    /* 10d: page flips and the hardware cursor; a channel that does not come
+     * up only turns its feature off (the 10b behaviour), never the driver */
+    chans_start(n);
     if (e->fw.valid && !n->fw_ok) nvlog(n, "the firmware's surface is not in BAR1: restore can only switch the heads off");
     if (e->fw.valid && n->fw_ok && ((u64)e->fw.hs.offset << 8) != n->fw_off)
         nvlog(n, "note: the firmware head scans out %llx, its frame buffer is at %llx", (unsigned long long)e->fw.hs.offset << 8,
@@ -606,6 +954,12 @@ static void nvd_restore(display_adapter_t *a) {
     nv_evo_t *e = &n->e;
     if (!n->armed) return;
     nvlog(n, "giving the display back to the firmware frame buffer");
+    /* 10d first: the base layers off (they would cover the firmware's
+     * surface), the base and cursor channels stopped (bounded) */
+    if (n->taken) {
+        nv_evo_chans_stop(e);
+        for (int h = 0; h < EVO_HEADS; h++) { n->head[h].flips = n->head[h].curs = 0; n->head[h].pend = NULL; }
+    }
     if (n->taken && e->chan_up) {
         nv_evo_stream_t s;
         memset(&s, 0, sizeof s);
@@ -655,7 +1009,38 @@ static void nvd_restore(display_adapter_t *a) {
 
 static void nvd_poll(display_adapter_t *a) {
     nvd_t *n = a->priv;
-    if (!n->taken || time_ms() < n->next_hpd) return;
+    if (!n->taken) return;
+    /* 10d: flips that completed at a vertical blank (polled: the notifier and GET) */
+    for (int k = 0; k < a->nheads; k++) {
+        display_head_t *dh = &a->heads[k];
+        int head = n->hw_head[k];
+        nvd_head_t *hd = &n->head[head];
+        if (!hd->pend) continue;
+        int r = nv_evo_base_poll(&n->e, head);
+        if (r == 1) {
+            hd->vis_off = hd->pend->handle;
+            hd->pend = NULL;
+            if (++hd->flips_done == 1) nvlog(n, "head %d: first page flip completed after %llu ms", head, (unsigned long long)(time_ms() - hd->flip_ms));
+            display_flip_done(dh);
+            continue;
+        }
+        /* a flip that does not complete within four frames (at least 100 ms, before
+         * the display core's 250 ms): flips end on this head, the core layer shows
+         * the buffer the display core will take as the front one */
+        u32 lim = MIN(200u, MAX(100u, 4 * hd->frame_ms));
+        u64 waited = time_ms() - hd->flip_ms;
+        if (r < 0 || waited > lim) {
+            display_fb_t *fb = hd->pend;
+            char w[64];
+            if (r < 0) snprintf(w, sizeof w, "the base channel reported an error");
+            else snprintf(w, sizeof w, "a flip did not complete in %llu ms", (unsigned long long)waited);
+            flips_off(n, dh, head, fb->handle, w);
+            display_flip_done(dh);
+            continue;
+        }
+        idle_wake_at(time_ms() + 1);
+    }
+    if (time_ms() < n->next_hpd) return;
     n->next_hpd = time_ms() + 1000;
     for (int k = 0; k < n->nconn; k++) {
         int h = nv_hotplug(n->d, n->d->conn[n->conn[k].nvc].index);
@@ -675,6 +1060,10 @@ static const display_ops_t nvd_ops = {
     .fb_alloc = nvd_fb_alloc,
     .fb_free = nvd_fb_free,
     .set_mode = nvd_set_mode,
+    .flip = nvd_flip,
+    .wait_vblank = nvd_wait_vblank,
+    .cursor_image = nvd_cursor_image,
+    .cursor_move = nvd_cursor_move,
     .poll = nvd_poll,
 };
 
@@ -726,12 +1115,30 @@ static void probe_one(nv_device_t *d) {
     a->guarded = !d->fake;
     u64 win = d->bar1_size && d->vram ? MIN(d->bar1_size, d->vram) : d->bar1_size ? d->bar1_size : 256 * MiB;
     a->vram = win > 64 * MiB ? (win - 32 * MiB) / 2 : 0;
+    /* 10d: the hardware cursor, page flips (base channel), the vertical blank
+     * (polled), several heads; nv.hwcursor=0, nv.flip=0, nv.heads=N turn them
+     * off or down for diagnosis */
+    n->want_curs = settings_get_int("nv.hwcursor", 1) != 0;
+    n->want_flip = settings_get_int("nv.flip", 1) != 0;
+    int max_heads = settings_get_int("nv.heads", EVO_HEADS);
+    if (max_heads < 1) max_heads = 1;
+    u32 caps = HEAD_CAP_VBLANK | (n->want_curs ? HEAD_CAP_CURSOR : 0) | (n->want_flip ? HEAD_CAP_FLIP : 0);
+    nv_pll_limits_t pl;
+    int pll_table = d->bios && !nv_pll_limits(d->bios, d->chip.chipset, NV_PLL_VPLL0, 27000, &pl);
     int nheads = 0;
     for (u32 h = 0; h < nh && h < EVO_HEADS && nheads < DISPLAY_MAX_HEADS; h++) {
         if (!(hmask & (1u << h))) continue;
-        if (!display_add_head(a, 0, 0)) break;
+        n->heads_avail++;
+        if (nheads >= max_heads) continue;
+        /* a head whose video PLL the VBIOS table lacks (the table has VPLL0) is not used */
+        if (h > 0 && pll_table && nv_pll_limits(d->bios, d->chip.chipset, (u8)(NV_PLL_VPLL0 + h), 27000, &pl)) {
+            kprintf("nv%d: head %u not used: the video BIOS has no limits for VPLL%u\n", d->index, h, h);
+            continue;
+        }
+        if (!display_add_head(a, caps, n->want_curs ? EVO_CURS_SIZE : 0)) break;
         n->hw_head[nheads++] = (int)h;
     }
+    n->heads_used = nheads;
     int count[16] = { 0 };
     for (int i = 0; i < d->nconn && n->nconn < DISPLAY_MAX_CONNECTORS; i++) {
         const char *nm;
@@ -760,6 +1167,10 @@ static void probe_one(nv_device_t *d) {
              g->name);
     nvlog(n, "native modesetting: %s display engine (core class %04x), %d head%s, %d connector%s, %s", g->name, g->core_class, nheads,
           nheads == 1 ? "" : "s", n->nconn, n->nconn == 1 ? "" : "s", d->fake ? "simulated card" : "starts with the desktop");
+    nvlog(n, "10d: hardware cursor %s (cursor channel %04x, %dx%d), page flips %s (base channel %04x), vertical blank polled; %d of %d heads%s; "
+          "a head drives up to %u kHz", n->want_curs ? "on" : "off (nv.hwcursor=0)", nv_evo_curs_class(g), EVO_CURS_SIZE, EVO_CURS_SIZE,
+          n->want_flip ? "on" : "off (nv.flip=0)", nv_evo_base_class(g), nheads, n->heads_avail,
+          nheads < n->heads_avail && max_heads < n->heads_avail ? " (nv.heads)" : "", nv_evo_head_max_khz(g));
     for (int k = 0; k < n->nconn; k++) {
         char outs[48] = "";
         for (int i = 0; i < n->conn[k].nout; i++) {
@@ -808,4 +1219,31 @@ const char *nv_display_state(nv_device_t *d, char *buf, int n) {
 const char *nv_display_log(nv_device_t *d) {
     nvd_t *x = nvd_of(d);
     return x && x->log ? x->log : NULL;
+}
+
+/* 10d: one line per head the driver registered (NVREPORT) */
+int nv_display_heads(nv_device_t *d, char *buf, int size) {
+    nvd_t *x = nvd_of(d);
+    int o = 0;
+    if (size < 1) return 0;
+    buf[0] = 0;
+    if (!x) return 0;
+    o += snprintf(buf + o, (size_t)(size - o), "  settings: nv.flip=%d, nv.hwcursor=%d, nv.heads=%d (%d of %d heads registered)\n",
+                  x->want_flip, x->want_curs, settings_get_int("nv.heads", EVO_HEADS), x->heads_used, x->heads_avail);
+    for (int k = 0; k < x->a->nheads && o < size - 1; k++) {
+        display_head_t *dh = &x->a->heads[k];
+        int h = x->hw_head[k];
+        nvd_head_t *hd = &x->head[h];
+        nv_evo_chan_t *b = &x->e.base[h], *c = &x->e.curs[h];
+        o += snprintf(buf + o, (size_t)(size - o),
+                      "  head %d: %s%s, %u kHz; caps%s%s%s; base channel %s (%u images, %u errors, %u flips completed); "
+                      "cursor channel %s (%s, %u core updates, %u moves dropped); vertical blank waits failed %d\n",
+                      h, hd->on ? "on " : "off", hd->on && dh->conn ? dh->conn->name : "", hd->khz,
+                      dh->caps & HEAD_CAP_FLIP ? " flip" : "", dh->caps & HEAD_CAP_CURSOR ? " cursor" : "",
+                      dh->caps & HEAD_CAP_VBLANK ? " vblank" : "", b->up ? "running" : "off", b->flips, b->errors, hd->flips_done,
+                      c->up ? "running" : "off", hd->curs_on ? "shown" : "hidden", hd->curs_updates, c->busy, hd->vbl_fail);
+    }
+    if (x->flip_why[0] && o < size - 1) o += snprintf(buf + o, (size_t)(size - o), "  page flips off: %s\n", x->flip_why);
+    if (x->curs_why[0] && o < size - 1) o += snprintf(buf + o, (size_t)(size - o), "  hardware cursor off: %s\n", x->curs_why);
+    return MIN(o, size - 1);
 }

@@ -144,6 +144,26 @@ static const char *sor_proto(int p, int dp) {
     return "?";
 }
 
+/* 10d: each head's base (page flips) and cursor channel, and its scanline
+ * counter. A channel's PUT / GET or FREE are read only while its control
+ * register says it runs. */
+static void chans(sb_t *s, nv_device_t *d, int gf, u32 heads) {
+    u32 c0 = gf ? 0x610490 : 0x610200;
+    int gp102 = d->chip.chipset >= 0x132;
+    sp(s, "    base and cursor channels, scanline (10d):\n");
+    for (int h = 0; h < 4; h++) {
+        if (!(heads & (1u << h))) continue;
+        u32 bc = R(d, c0 + (u32)(1 + h) * 0x10), bp = R(d, (gp102 ? 0x611494 : gf ? 0x610494 : 0x610204) + (u32)(1 + h) * 0x10);
+        int cctl = gf ? 13 + h : 7 + h, cuser = gf ? (gp102 ? 17 : 13) + h : 7 + h;
+        u32 cc = R(d, c0 + (u32)cctl * 0x10);
+        sp(s, "    head %d: base channel %08x push %08x", h, bc, bp);
+        if (!nv_bad_read(bc) && (bc & 3)) sp(s, " PUT %x GET %x", R(d, 0x640000 + (u32)(1 + h) * 0x1000), R(d, 0x640004 + (u32)(1 + h) * 0x1000));
+        sp(s, "; cursor channel %08x", cc);
+        if (!nv_bad_read(cc) && (cc & 1)) sp(s, " FREE %08x", R(d, 0x640008 + (u32)cuser * 0x1000));
+        sp(s, "; scanline %u\n", R(d, 0x616340 + (u32)h * 0x800) & 0xFFFF);
+    }
+}
+
 static void regs_gf119(sb_t *s, nv_device_t *d) {
     u32 caps = R(d, 0x612004), nheads = R(d, 0x022448);
     sp(s, "  Display engine (GF119 / Kepler / Maxwell / Pascal layout), armed state of the core channel:\n");
@@ -181,6 +201,7 @@ static void regs_gf119(sb_t *s, nv_device_t *d) {
     dump(s, d, 0x640000, 0x640100);
     sp(s, "    PDISP 0x610000:\n");
     dump(s, d, 0x610000, 0x610100);
+    chans(s, d, 1, caps & 0xF);
 }
 
 static void regs_nv50(sb_t *s, nv_device_t *d) {
@@ -210,6 +231,7 @@ static void regs_nv50(sb_t *s, nv_device_t *d) {
     sp(s, "    PDISP 0x610000 and 0x610a80:\n");
     dump(s, d, 0x610000, 0x610100);
     dump(s, d, 0x610A80, 0x610C00);
+    chans(s, d, 0, 3);
 }
 
 static void regs_nv04(sb_t *s, nv_device_t *d) {
@@ -463,8 +485,10 @@ int nv_report_text(nv_device_t *d, char *buf, int size) {
             for (int i = 0; i < n; i++) tmp[i] = nv_rom_rd8(&b->rom, b->dcb_offset + (u32)i, NULL);
             hexdump(&s, tmp, n);
         }
+        char hb[1536];
+        if (nv_display_heads(d, hb, sizeof hb) > 0) sp(&s, "\nHeads: page flips, hardware cursor, vertical blank (M10d)\n%s", hb);
         const char *lg = nv_display_log(d);
-        if (lg) sp(&s, "\nNative modesetting (M10b): the driver's log of this start\n%s", lg);
+        if (lg) sp(&s, "\nNative modesetting (M10b, M10d): the driver's log of this start\n%s", lg);
     }
     return s.n;
 }
