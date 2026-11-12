@@ -186,9 +186,12 @@ the logo's old and new place, the text's, the lines' bounding box), a
 full-screen window is drawn straight from the program's canvas (no copy into
 a client surface, no background fill), and nothing under a full-screen
 window that covers a dirty rectangle is composed (desktop, taskbar, other
-windows). Host CPU used by QEMU (TCG, 1280 x 800): Scrolling Text 9%, the
-logo 19%, the lines 50%, Starfield (the whole screen every frame) 78%; at
-the idle desktop 0-6%.
+windows; their clients are still painted if they asked, so the GUI loop
+can rest). Host CPU used by QEMU (TCG, no acceleration, 1280 x 800):
+Scrolling Text 10%, the logo 22%, Starfield (the whole screen every frame,
+25 per second) 54%, the lines (their bounding box, often most of the
+screen) 58%; Blank and the idle desktop 0%. On real hardware a full frame
+is a few 4 MB copies.
 
 ### Previews
 
