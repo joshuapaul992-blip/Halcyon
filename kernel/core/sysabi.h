@@ -169,6 +169,7 @@ typedef struct hal_event {
 /* EVT_COMMAND notifications (button field) */
 #define CMD_CLICK    0           /* button / tool button clicked, check box or list selection changed */
 #define CMD_ACTIVATE 1           /* CTL_NOTIFY: Enter in a text box, double click or Enter in a list box */
+#define CMD_CHANGE   2           /* CTL_CHANGES: the text of a text box changed (typing, cut, paste) */
 
 /* EVT_SCROLL parts (button field) */
 enum { SCROLL_LINE_UP = 1, SCROLL_LINE_DOWN, SCROLL_PAGE_UP, SCROLL_PAGE_DOWN, SCROLL_THUMB_TRACK,
@@ -197,6 +198,7 @@ enum { CTL_BUTTON = 1, CTL_LABEL, CTL_TEXTBOX, CTL_CHECKBOX, CTL_LISTBOX, CTL_GR
 #define CTL_READONLY 0x40
 #define CTL_WRAP     0x80
 #define CTL_NOTIFY   0x100       /* text box / list box: send EVT_COMMAND with CMD_ACTIVATE */
+#define CTL_CHANGES  0x200       /* text box: send EVT_COMMAND with CMD_CHANGE on every change by the user */
 
 /* menus (SYS_MENU_SET, SYS_MENU_POPUP): a flat array. For a menu bar each
  * MENU_TITLE entry starts a menu ("&File") and the entries after it are its

@@ -99,6 +99,7 @@ int main(int argc, char **argv) {
         if (!win_get_event(&ev, -1)) continue;
         if (ev.type == EVT_CLOSE) break;
         if (ev.type == EVT_TIMER) tick();
+        if (ev.type == EVT_KEY && ev.pressed && ev.id == KEY_F1) help_open("taskmgr");
         if (ev.type == EVT_COMMAND && ev.id == ID_REFRESH) tick();
         if (ev.type == EVT_COMMAND && ev.id == ID_END) {
             int sel = ctl_get_value(win, ID_LIST);

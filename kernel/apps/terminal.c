@@ -1058,6 +1058,7 @@ void app_terminal(void) { app_terminal_in(NULL); }
 void app_terminal_in(const char *dir) {
     int c = cw(), h = chh();
     window_t *w = wm_create("Command Prompt", ICON_TERMINAL, -1, -1, 80 * c + SB_W + 8, 25 * h + 6, WF_RESIZABLE);
+    if (w) w->help = "cmd";              /* F1 */
     term_t *t = kzalloc(sizeof *t);
     t->win = w;
     t->fg = 7; t->bg = 0;

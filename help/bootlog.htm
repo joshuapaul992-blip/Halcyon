@@ -1,0 +1,38 @@
+<html><head><title>The boot log</title>
+<meta name="keywords" content="boot log; BOOT.LOG; BOOTPREV.LOG; kernel log; system messages; DMESG; reporting a problem#report; bug reports#report">
+</head><body>
+<h2 style="color:#1f4e9a">The boot log</h2>
+<p>While Halcyon runs, it writes down what it is doing: which devices it found,
+which drivers started, which drives it mounted, and any problems along the way.
+This record is the <b>boot log</b>. It is the most useful thing to send along
+when you report a problem.</p>
+
+<h3>Where to find it</h3>
+<ul>
+<li><code>C:\HALCYON\BOOT.LOG</code> holds the log of the current (or last)
+session. Halcyon saves it when the desktop appears, when you turn the computer
+off or restart, and after a crash.</li>
+<li><code>C:\HALCYON\BOOTPREV.LOG</code> is the log of the session before.
+Handy when the last start went wrong and you started again.</li>
+</ul>
+<p>Both are plain text: open them with <a href="notepad.htm">Notepad</a>. Because
+they are on the USB stick, you can also read them on another computer.</p>
+
+<h3>Looking at the log while Halcyon runs</h3>
+<ul>
+<li>In <a href="sysinfo.htm">System Information</a>, click <b>Kernel Log...</b>.</li>
+<li>In the <a href="cmd.htm">Command Prompt</a>, <code>DMESG</code> shows the
+latest messages (<code>DMESG 50</code>: the last 50), and <code>BOOTLOG</code>
+saves the log to the stick right now.</li>
+<li>To watch the messages during start-up, choose <b>Verbose boot</b> in the
+<a href="troubleshoot.htm#f8">F8 menu</a>.</li>
+</ul>
+
+<h3 id="report">Reporting a problem</h3>
+<p>Say what you did, what you expected and what happened instead, and attach
+<code>BOOT.LOG</code> (and <code>BOOTPREV.LOG</code> if the problem was in the
+session before). The log contains no personal files, only what Halcyon found on
+the computer and what it did.</p>
+
+<p><b>Related topics:</b> <a href="troubleshoot.htm">Solving startup problems</a></p>
+</body></html>

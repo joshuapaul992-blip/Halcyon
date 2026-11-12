@@ -221,6 +221,12 @@ static void l_control(void) { app_control(); }
 static void l_mines(void) { run_or("C:/PROGRAMS/SONAR.EXE", app_mines); }
 static void l_about(void) { app_about(); }
 static void l_taskmgr(void) { shell_run("C:/PROGRAMS/TASKMGR.EXE", NULL); }
+/* Help and Support (HELP.EXE): a page of C:\HALCYON\HELP, or the home page */
+void shell_help(const char *page) {
+    if (proc_spawn("C:/PROGRAMS/HELP.EXE", page, NULL, NULL) < 0)
+        msgbox(NULL, "Help and Support", "Help and Support (C:\\PROGRAMS\\HELP.EXE) cannot be started.", ICON_ERROR, MB_OK);
+}
+static void l_help(void) { shell_help(NULL); }
 
 static const dicon_t dicons[] = {
     { "My Computer", ICON_COMPUTER, l_computer },
@@ -594,13 +600,14 @@ static const sitem_t right_items[] = {
     { "Network Connections", NULL, ICON_NETWORK, l_network },
     { "System Information", NULL, ICON_SYSINFO, l_sysinfo },
     { "Task Manager", NULL, ICON_DISPLAY, l_taskmgr },
-    { "About Halcyon", NULL, ICON_HELP, l_about },
+    { "Help and Support", NULL, ICON_HELP, l_help },
+    { "About Halcyon", NULL, ICON_LOGO, l_about },
 };
 #define SM_W 400
 #define SM_H 528                   /* 8 programs on the left */
 #define SM_HEAD 62
 #define SM_FOOT 44
-static int sm_hover = -1;   /* 0..7 left, 10..16 right, 20 restart?, 21 shutdown */
+static int sm_hover = -1;   /* 0..7 left, 10..17 right, 20 restart?, 21 shutdown */
 
 static rect_t sm_item_rect(int id) {
     if (id < 10) return mkrect(6, SM_HEAD + 8 + id * 44, 196, 42);
@@ -685,7 +692,7 @@ static void sm_event(window_t *w, gui_event_t *e) {
     } else if (e->type == GE_KEY && e->key.pressed) {
         if (e->key.key == KEY_ESC) menu_close_all();
         else if (e->key.key == KEY_DOWN || e->key.key == KEY_UP) {
-            int order[] = { 0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 20, 21 };
+            int order[] = { 0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21 };
             int n = ARRAY_SIZE(order), cur = -1;
             for (int i = 0; i < n; i++) if (order[i] == sm_hover) cur = i;
             cur = cur < 0 ? 0 : (cur + (e->key.key == KEY_DOWN ? 1 : n - 1)) % n;

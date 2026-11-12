@@ -62,6 +62,12 @@ $(BUILD)/media/stamp: tools/mksounds.py
 	$(PY) tools/mksounds.py $(BUILD)/media
 	@touch $@
 
+# help pages (C:\HALCYON\HELP): help/ checked and indexed by tools/mkhelp.py
+$(BUILD)/help/stamp: tools/mkhelp.py $(wildcard help/*)
+	@mkdir -p $(BUILD)/help
+	$(PY) tools/mkhelp.py help $(BUILD)/help
+	@touch $@
+
 # the version (1.0.<number of commits>), checked on every build
 $(BUILD)/gen/version.h: FORCE
 	@mkdir -p $(BUILD)/gen
@@ -86,7 +92,7 @@ $(BUILD)/KERNEL.BIN: $(BUILD)/kernel.elf
 
 # ---- disk images ----
 IMG_DEPS := $(BUILD)/boot/mbr.bin $(BUILD)/boot/stage2.bin $(BUILD)/KERNEL.BIN \
-            $(BUILD)/rootfs.stamp $(BUILD)/media/stamp tools/mkimage.sh
+            $(BUILD)/rootfs.stamp $(BUILD)/media/stamp $(BUILD)/help/stamp tools/mkimage.sh
 ifneq ($(EFI_SRC),)
 IMG_DEPS += $(BUILD)/efi/BOOTX64.EFI
 endif
@@ -174,6 +180,13 @@ $(BUILD)/user/browser.exe: userland/programs/browser.c $(BROWSER_SRC) $(wildcard
                            userland/lib/web/web.h $(ULIB) $(WEBLIBS) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -Iuserland/lib/web $(ULDFLAGS) -o $@ $(ULIB) $< $(BROWSER_SRC) $(WEBLIBS)
+	strip $@
+# Help and Support: the browser's HTML parser and layout draw the help pages
+HELP_ENGINE := userland/programs/browser/html.c userland/programs/browser/layout.c
+$(BUILD)/user/help.exe: userland/programs/help.c $(HELP_ENGINE) userland/programs/browser/browser.h \
+                        userland/lib/web/web.h $(ULIB) $(WEBLIBS) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) -Iuserland/lib/web $(ULDFLAGS) -o $@ $(ULIB) $< $(HELP_ENGINE) $(WEBLIBS)
 	strip $@
 $(BUILD)/user/wget.exe $(BUILD)/user/webtest.exe: $(BUILD)/user/%.exe: userland/programs/%.c userland/lib/web/web.h $(ULIB) $(WEBLIBS) \
                            userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h $(wildcard userland/programs/webtest_certs.h)

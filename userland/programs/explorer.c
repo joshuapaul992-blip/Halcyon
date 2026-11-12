@@ -1694,6 +1694,7 @@ static void key(const hal_event_t *ev) {
     case KEY_ENTER: case KEY_KP_ENTER: open_item(sel); return;
     case KEY_BACKSPACE: go_up(); return;
     case KEY_DELETE: cmd_delete(); return;
+    case KEY_F1: help_open("files"); return;
     case KEY_F2: cmd_rename(); return;
     case KEY_F5: command(CMD_REFRESH); return;
     case KEY_MENU: menu_key: {

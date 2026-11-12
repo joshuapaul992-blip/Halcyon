@@ -701,7 +701,7 @@ static int handle(hal_event_t *e) {
         else if (e->id == KEY_DELETE) a = A_CE;
         else if (e->id == KEY_BACKSPACE) a = A_BACK;
         else if (e->id == KEY_F9) a = A_NEG;
-        else if (e->id == KEY_F1) { calc_help(); return 0; }
+        else if (e->id == KEY_F1) { help_open("calc"); return 0; }    /* (the Help button: calc_help) */
         else a = char_action(e->ch);
         if (!a) return 0;
         flash_action(a);

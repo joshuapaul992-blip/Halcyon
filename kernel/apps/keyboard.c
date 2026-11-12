@@ -227,6 +227,7 @@ void app_keyboard(void) {
     k->n = input_layouts(k->list, INPUT_MAX_LAYOUTS);
     k->deflt = input_layout_default();
     window_t *w = wm_create("Text Services and Input Languages", ICON_CONTROL, -1, -1, KB_W, KB_H, WF_NO_MAXIMIZE | WF_NO_MINIMIZE);
+    if (w) w->help = "keyboard";              /* F1 */
     if (!w) { kfree(k); return; }
     w->data = k;
     w->on_tick = kb_tick;

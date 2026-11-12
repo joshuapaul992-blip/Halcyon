@@ -1,0 +1,36 @@
+<html><head><title>When a program stops responding</title>
+<meta name="keywords" content="program not responding; hung program; frozen program; crash; has encountered a problem#crashed; ending a program#hang; blue screen#system; system crash#system">
+</head><body>
+<h2 style="color:#1f4e9a">When a program stops responding</h2>
+<p>Every program in Halcyon runs in its own protected space. If one gets stuck
+or crashes, the rest of the system keeps going: the desktop, the other programs
+and your files are safe.</p>
+
+<h3 id="hang">A program is stuck</h3>
+<p>A program that is busy may stop redrawing its window or answering clicks.
+Give it a moment first; it may be working on something big. If it stays stuck:</p>
+<ul>
+<li>Click its close button. If the program does not answer, click it again after
+a few seconds: Halcyon then says the program is not responding and offers to
+end it.</li>
+<li>Or press <kbd>Ctrl+Alt+Del</kbd> to open <a href="taskmgr.htm">Task
+Manager</a>, select the program and click <b>End Process</b>.</li>
+</ul>
+<p>Anything you had not saved in that program is lost.</p>
+
+<h3 id="crashed">"... has encountered a problem and needs to close"</h3>
+<p>This message means the program did something it was not allowed to do, and
+Halcyon stopped it before it could cause harm. Click to close the message and
+start the program again. If it happens again and again with the same file or
+the same steps, please report it, with your <a href="bootlog.htm">boot log</a>.</p>
+
+<h3 id="system">If the whole system stops</h3>
+<p>Very rarely, Halcyon itself runs into a problem it cannot handle and shows
+a screen with technical details. Note what you were doing, restart the computer
+and send the <a href="bootlog.htm">boot log</a> with your report: Halcyon saves
+it after a crash. If it happens every time you start, see
+<a href="troubleshoot.htm">Solving startup problems</a>.</p>
+
+<p><b>Related topics:</b> <a href="taskmgr.htm">Task Manager</a> &middot;
+<a href="bootlog.htm">The boot log</a></p>
+</body></html>

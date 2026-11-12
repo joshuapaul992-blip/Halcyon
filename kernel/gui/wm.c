@@ -813,12 +813,20 @@ static void key_event(input_event_t *k) {
     }
     window_t *pop = top_popup();
     window_t *w = pop ? pop : wm_active();
+    int f1 = k->pressed && k->key == KEY_F1 && !(k->mods & (MOD_CTRL | MOD_ALT | MOD_SHIFT));
     if (!w) {
+        if (f1) { shell_help(NULL); return; }
         gui_event_t e = { .type = GE_KEY, .key = *k };
         desktop_event(&e);
         return;
     }
     if (w->modal && wm_alive(w->modal)) w = w->modal;
+    /* F1: the help page of a built-in window (or of the window a dialog belongs to) */
+    if (f1 && !pop) {
+        window_t *h = w;
+        while (h && !h->help && h->owner && wm_alive(h->owner)) h = h->owner;
+        if (h && h->help) { shell_help(h->help); return; }
+    }
     gui_event_t e = { .type = GE_KEY, .key = *k };
     deliver(w, &e);
 }

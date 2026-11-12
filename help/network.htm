@@ -1,0 +1,49 @@
+<html><head><title>Connecting to a network</title>
+<meta name="keywords" content="network; Internet; connecting; Network Connections; network cable; DHCP#settings; IP address#settings; static address#settings; DNS servers#settings; no Internet#problems; Wi-Fi#problems; wireless#problems; network icon">
+</head><body>
+<h2 style="color:#1f4e9a">Connecting to a network</h2>
+<p>Halcyon connects to your home or office network, and through it to the
+Internet, with a network cable. Plug the cable into the computer and into your
+router, and in most homes that is all: Halcyon gets an address from the router
+by itself (this is called <b>DHCP</b>) and you can start the
+<a href="browser.htm">Web Browser</a>.</p>
+<p>The network icon next to the clock shows whether you are connected. Point at
+it to see the address you got; click it to open <b>Network Connections</b>.</p>
+
+<h3>Network Connections</h3>
+<p>Open it from the network icon, the <b>Start</b> menu or the <b>Control
+Panel</b> (<b>Network...</b>). For each network adapter it shows:</p>
+<ul>
+<li>whether the cable is connected and how fast the link is,</li>
+<li>the computer's address, the router (gateway) and the DNS servers that turn
+names like <code>example.com</code> into addresses,</li>
+<li>how long the address from DHCP lasts, and how much data has gone in and out.</li>
+</ul>
+
+<h3 id="settings">Setting an address by hand</h3>
+<p>Some networks have no DHCP server, or need a fixed address. Untick
+<b>Obtain an IP address automatically (DHCP)</b>, type the address, the subnet mask and the
+gateway, and click <b>OK</b>. In the same way you can type your own DNS servers
+instead of using those from DHCP: untick <b>Obtain DNS server addresses
+automatically</b> and fill in the preferred and alternate server. Changes take effect at once and are kept for
+next time. Ask whoever runs the network which numbers to use.</p>
+
+<h3 id="problems">Not connected?</h3>
+<ol>
+<li>Check the cable at both ends. The lights next to the socket should be on.</li>
+<li>Open Network Connections. If it says the cable is unplugged, try another
+cable or another socket on the router.</li>
+<li>If you have a link but no address, click <b>Renew</b> (or type
+<code>ipconfig /renew</code> in the Command Prompt) to ask the router again.</li>
+<li>If names do not work but addresses do (see <a href="nettools.htm">PING</a>),
+check the DNS servers.</li>
+<li>If your adapter is not listed at all, Halcyon has no driver for it yet. Halcyon
+knows the usual Intel and Realtek wired adapters and those of virtual machines.</li>
+</ol>
+<table width="100%" cellpadding="6" cellspacing="0" bgcolor="#fff8dc"><tr><td>
+<b>Wi-Fi</b> Halcyon does not support wireless networks yet, so please use a network cable.
+</td></tr></table>
+
+<p><b>Related topics:</b> <a href="nettools.htm">Network tools for the Command Prompt</a> &middot;
+<a href="browser.htm">Web Browser</a></p>
+</body></html>

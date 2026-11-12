@@ -125,6 +125,7 @@ struct window {
     int min_w, min_h;
     int result;               /* dialog result */
     int closed;               /* set when destroyed (for nested loops) */
+    const char *help;         /* F1 opens this Help and Support page (shell_help), or NULL */
     window_t *next;           /* z-order, bottom to top */
 };
 
@@ -265,5 +266,6 @@ void format_test_hook(void);                       /* apps/format.c: QEMU fw_cfg
 struct proc;
 int  gui_ask_permission(struct proc *asker, const char *title, const char *text);   /* permit.c */
 int  shell_run(const char *path, const char *args);   /* start a user program; pid or error (reported) */
+void shell_help(const char *page);     /* Help and Support (HELP.EXE) on a page ("notepad"), NULL: the home page */
 
 #endif

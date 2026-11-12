@@ -1015,6 +1015,7 @@ void app_paint(const char *path) {
     int cw = MIN(TOOL_W + DEF_W + 2 * PAD + SB + 4, screen_w() - 40);
     int ch = MIN(MENUBAR_H + DEF_H + 2 * PAD + SB + PAL_H + STATUS_H + 4, screen_h() - TASKBAR_H - 60);
     window_t *w = wm_create("Untitled - Paint", ICON_PAINT, -1, -1, cw, ch, WF_RESIZABLE);
+    if (w) w->help = "paint";              /* F1 */
     w->data = p;
     w->min_w = 380;
     w->min_h = 320;

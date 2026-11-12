@@ -809,7 +809,7 @@ static void handle(sonar_t *s, hal_event_t *e) {
     }
     case EVT_KEY:
         if (e->pressed && e->id == KEY_F2) new_game(s);
-        else if (e->pressed && e->id == KEY_F1) show_help();
+        else if (e->pressed && e->id == KEY_F1) help_open("sonar");      /* ("?": show_help) */
         break;
     case EVT_TIMER: {
         if (s->state != ST_PLAYING) { win_set_timer(win, 0); break; }

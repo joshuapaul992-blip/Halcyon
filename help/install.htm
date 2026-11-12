@@ -1,0 +1,57 @@
+<html><head><title>Installing Halcyon on a computer</title>
+<meta name="keywords" content="installing Halcyon; installer; Install Halcyon; hard disk, installing on; dual boot#windows; Windows, installing next to#windows; partitions#choices; whole disk#choices; free space#choices; UEFI#boot; BIOS#boot; boot menu#boot">
+</head><body>
+<h2 style="color:#1f4e9a">Installing Halcyon on a computer</h2>
+<!-- CHECK: the installer is part of the M8 installer work: compare every step and button name once merged -->
+<p>Halcyon runs straight from a USB stick or a CD, so you can try it without
+changing anything on your computer. When you are ready, you can install it on
+the computer's own disk: it then starts faster and you no longer need the stick.</p>
+
+<h3>Starting the installer</h3>
+<p>Choose <b>Start &gt; Install Halcyon</b>. When Halcyon starts from a USB
+stick or a CD, it also offers to install itself. The installer works with the
+SATA and NVMe disks inside your computer.</p>
+
+<h3 id="choices">Where to install</h3>
+<p>The installer lists the disks it found, with their size and what is on them.
+You choose one of two ways:</p>
+<ul>
+<li><b>Use the whole disk.</b> Everything on the disk is erased. Because this
+cannot be undone, the installer asks you to confirm and names the disk, its size
+and what is on it, so you can be sure it is the right one.</li>
+<li><b>Use the free space.</b> Halcyon goes into the unused space next to the
+partitions that are already there. Existing partitions are never made smaller
+and nothing on them is touched.</li>
+</ul>
+<table width="100%" cellpadding="6" cellspacing="0" bgcolor="#fde8e4"><tr><td>
+<b>Before you start</b> Back up anything important. Installing an operating
+system always carries some risk, and Halcyon is still young.
+</td></tr></table>
+
+<h3 id="boot">What the installer does</h3>
+<ol>
+<li>It prepares the disk the way your computer starts: with a GPT partition
+table and an EFI system partition on newer (UEFI) computers, or with an MBR
+partition table and an active FAT32 partition on older (BIOS) computers. Where
+the layout allows, the disk can start both ways.</li>
+<li>It copies Halcyon's start-up code, the system, the programs, the system
+sounds and the sample documents, and then checks that every file arrived intact.</li>
+<li>It brings your settings from the stick along, so the installed Halcyon
+looks and works the way you set it up.</li>
+</ol>
+<p>When it has finished, remove the stick and restart.</p>
+
+<h3 id="windows">Installing next to Windows</h3>
+<p>Windows keeps working. Its start-up files are left in place, and you choose
+between Windows and Halcyon in your computer's boot menu when it starts (the
+key for the boot menu is often <kbd>F12</kbd>, <kbd>F11</kbd>, <kbd>F8</kbd> or
+<kbd>Esc</kbd>; your computer usually shows it briefly when it starts). From
+Halcyon you can open the Windows drive: see <a href="ntfs.htm">NTFS drives
+and Windows</a>, and turn Windows' Fast Startup off if you want to change files
+on it.</p>
+<p>If there is no free space next to Windows, you can make some in Windows with
+<b>Disk Management</b> ("Shrink Volume") before you install Halcyon.</p>
+
+<p><b>Related topics:</b> <a href="troubleshoot.htm">Solving startup problems</a> &middot;
+<a href="drives.htm">Drives, USB sticks and CDs</a></p>
+</body></html>

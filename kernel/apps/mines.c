@@ -549,6 +549,7 @@ void app_mines(void) {
     int cw, ch;
     client_size(s, &cw, &ch);
     window_t *w = wm_create("Sonar", ICON_GAME, -1, -1, cw, ch, WF_NO_MAXIMIZE);
+    if (w) w->help = "sonar";              /* F1 */
     w->data = s;
     w->on_paint = sonar_paint;
     w->on_event = sonar_event;
