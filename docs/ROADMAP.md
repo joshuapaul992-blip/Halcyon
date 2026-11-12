@@ -80,6 +80,16 @@ supports (EDID), switching resolution without a reboot (GOP cannot after boot),
 several monitors, a hardware cursor, tear-free page flips, and later 2D
 acceleration. 3D acceleration is out of scope.
 
+Done first, as the base the NVIDIA driver plugs into: the **display core**
+(docs/DESIGN-M10-DISPLAY.md): a driver interface for adapters with several
+heads and connectors (modes with full timings from EDID / DMT / CVT, scanout
+buffers, hardware cursors, page flips completing at vertical blank,
+hotplug), the firmware frame buffer as the fallback whenever a driver fails,
+an extended desktop across monitors with Display Properties' arrangement,
+and two drivers that exercise all of it in QEMU: Bochs (moved behind the
+interface) and virtio GPU (several outputs, cursor, flips, hotplug). Its
+"Writing a native display driver" section is the checklist for 10b and 10d.
+
 Two display engines cover all eight generations, so the work splits by engine:
 
 - **10a, identification:** PCI ID and the chip ID register, the video BIOS

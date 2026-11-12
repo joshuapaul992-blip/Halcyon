@@ -35,9 +35,9 @@ when there is no sound card) behind a mixer that plays any number of streams at 
 | Keyboard | 20 layouts that follow Windows': US, US-International, UK, German, Swiss German, French, Belgian (AZERTY), Spanish, Italian, Portuguese, Brazilian (ABNT2), Swedish/Finnish, Norwegian, Danish, Dutch, Polish (Programmers), Czech, Turkish Q, Russian and Greek. AltGr (Right Alt, or Ctrl+Alt), dead keys (a dead key followed by a key it does not compose with gives the accent, then the key), Caps Lock per key, the ISO key next to left Shift and the ABNT2 keys. Ctrl shortcuts go by the letter on the key (Ctrl+A is the AZERTY "A"; US letters on Russian and Greek). Several layouts can be installed: Left Alt+Shift or the indicator on the taskbar switches; Keyboard settings in the Control Panel or the `KEYBOARD` command. Characters reach programs as Unicode code points. |
 | Unicode | File names and text are UTF-8 throughout; FAT long names are stored as UTF-16 (including characters outside the BMP), with Unicode case-insensitive lookup. The fonts cover Latin, Greek, Cyrillic and common symbols; other characters are kept and drawn as a replacement box. |
 | GUI | Compositing window manager (move, resize, minimize, maximize), drag and drop between windows of any program and the desktop (a drag image, copy / move / no-entry feedback, a right-drag menu), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Screen savers (Blank, Starfield, Drifting Lines, Halcyon Logo, Scrolling Text: `C:\PROGRAMS\*.SCR` programs started after a wait, ended by any key, click or real mouse movement, which never reaches the window underneath; kept away by full-screen programs and while Media Player plays). Every choice survives a restart in `C:\HALCYON\SETTINGS.INI`, written atomically (a temporary copy, a backup, recovery at boot, so a power cut cannot lose it) and coalesced: theme, wallpaper, the places, sizes and maximized state of windows, dragged desktop icons, the mouse, Paint's colours and tools, the last folder of Open / Save dialogs, Sonar's level and best times. See [docs/DESIGN-M8-SCREENSAVER-SETTINGS.md](docs/DESIGN-M8-SCREENSAVER-SETTINGS.md). |
-| Display | The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; the QEMU/Bochs/VirtualBox adapter switches at once, with Windows' "keep these settings?" 15-second revert. The frame buffer is write-combining (PAT). |
+| Display | A display core for native drivers: adapters with several heads (each with its own mode, scanout buffers, hardware cursor and vertical blank), connectors with EDID monitors and hotplug, mode lists with full timings (EDID, DMT, CVT), page flips paced by the vertical blank, and the firmware frame buffer as the fallback whenever a driver fails (see [docs/DESIGN-M10-DISPLAY.md](docs/DESIGN-M10-DISPLAY.md)). Drivers: QEMU/Bochs/VirtualBox VGA and virtio GPU (up to 16 outputs, hardware cursor, page flips, hotplug). Several monitors make one extended desktop, arranged in Display Properties: the taskbar and icons on the primary one, windows on any of them, maximized to their own, the pointer crossing where they touch, the screen saver on all. The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; native adapters switch at once, with Windows' "keep these settings?" 15-second revert. Frame buffers in VRAM are write-combining (PAT). |
 | Web | A web browser (Web Browser, `BROWSER.EXE`): HTTP/1.1 and HTTPS, pages with headings, lists, tables, forms and PNG / GIF / BMP images, history, error pages, local files; `WGET.EXE` on the command line. HTTPS through BearSSL (TLS 1.2) with certificates checked against Mozilla's root list. Both are user programs on libweb, a library for URLs, HTTP, TLS and gzip. They reach the network through the internet stack (see Network). See [docs/DESIGN-M6-WEB.md](docs/DESIGN-M6-WEB.md). |
-| Apps | Explorer (My Computer with drive properties and a padlock on read-only drives, file management; copies and deletes in a worker thread; multiple selection with Ctrl and Shift clicks, a rubber band and the keyboard; drag and drop between Explorer windows, the desktop, Notepad, Paint and Media Player; the Recycle Bin: per-drive, restore, empty, a size limit; view and sort order kept; see [docs/DESIGN-M8-EXPLORER.md](docs/DESIGN-M8-EXPLORER.md)), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB, multi-level undo and redo, word wrap, Replace, Go To, a choice of fonts), Help and Support (contents, index and full-text search of Halcyon's own help pages; F1 in every program), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Media Player (WAV files), Sonar (a mine-hunting puzzle), Control Panel (with Time Zone and Mouse), Display Properties (Screen Saver with a live preview, and resolution), Keyboard settings, Network Connections, Sounds and Audio Devices, About. |
+| Apps | Explorer (My Computer with drive properties and a padlock on read-only drives, file management; copies and deletes in a worker thread; multiple selection with Ctrl and Shift clicks, a rubber band and the keyboard; drag and drop between Explorer windows, the desktop, Notepad, Paint and Media Player; the Recycle Bin: per-drive, restore, empty, a size limit; view and sort order kept; see [docs/DESIGN-M8-EXPLORER.md](docs/DESIGN-M8-EXPLORER.md)), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB, multi-level undo and redo, word wrap, Replace, Go To, a choice of fonts), Help and Support (contents, index and full-text search of Halcyon's own help pages; F1 in every program), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Media Player (WAV files), Sonar (a mine-hunting puzzle), Control Panel (with Time Zone and Mouse), Display Properties (Screen Saver with a live preview; resolution and the monitors' arrangement, Identify), Keyboard settings, Network Connections, Sounds and Audio Devices, About. |
 
 ## Building
 
@@ -218,7 +218,16 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   dropouts (`ac97+dusk`, `hda+tide`: the Halcyon Dusk or Tide scheme chosen in
   SETTINGS.INI, so the recording must start with its startup sound instead); and
   the display: a saved resolution chosen by both loaders, the firmware frame
-  buffer alone, and a live mode switch; and the screen saver (`saver`): it
+  buffer alone, and a live mode switch; the virtio GPU (`virtio`: hardware
+  cursor, page flips at the emulated vertical blank), two monitors on one
+  (`dual`: each head's screendump, the taskbar on the primary only, a window
+  dragged onto monitor 2 and maximized there, hotplug through a VNC client's
+  SetDesktopSize (`tools/vnc_ctl.py`): resized, unplugged, plugged in again;
+  the screen saver on both), an arrangement restored from SETTINGS.INI with a
+  window saved on a monitor that is gone (`arrange`), two adapters at once
+  (`multi`: Bochs and virtio, software cursor), a driver that fails after
+  programming the device (`gpufail`: the firmware frame buffer comes back)
+  and one disabled in SETTINGS.INI (`gpuoff`); and the screen saver (`saver`): it
   starts after the test hook's wait, a screendump shows the stars, the click
   that ends it never reaches the window under it (`GUIDEMO.EXE` logs its
   input), the next click does, a key and a mouse movement end it too
@@ -230,7 +239,12 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   every order, RST cases, windows, retransmission timing, transfers under
   loss), each ending with a memory check; and a libFuzzer target for the
   receive path (`tests/host/fuzz_net.c`)
-- the EDID parser and the loaders' resolution choice (`tests/host/displaytest.c`)
+- the EDID parser and the loaders' resolution choice (`tests/host/displaytest.c`),
+  display timings and mode lists (`tests/host/modetest.c`: CVT reduced
+  blanking against published timings, every kind of EDID timing, the
+  drivers' limits, 200,000 random EDIDs) and the monitor arrangement math
+  (`tests/host/layouttest.c`: the pointer between monitors, window places
+  when a monitor is gone, snapping, 20,000 random arrangements)
 - the installer's partition tables (`tests/host/parttest.c`): new MBRs and
   GPTs (512 and 4096-byte sectors, up to 3 TiB) and partitions added next to
   Windows-like layouts, checked with sfdisk, sgdisk and an independent
@@ -444,7 +458,8 @@ sample pages); the shell opens `.htm` / `.html` files with it. See
 boot/        MBR, BIOS stage 2, bootinfo contract shared with the kernel
 efi/         UEFI loader
 kernel/core  entry, CPU and timing, interrupts and idle, memory, library, panic screen
-kernel/drivers  PCI, PS/2, input, AHCI (disks and CD/DVD), NVMe, ACPI
+kernel/drivers  PCI, PS/2, input, AHCI (disks and CD/DVD), NVMe, ACPI, the display core
+             (display.c, modes.c) and display adapters (Bochs, virtio GPU)
 kernel/usb   USB core, hub/HID/MSC class drivers, UHCI/OHCI/EHCI/xHCI
 kernel/fs    block layer and partitions, VFS, FAT, exFAT, ISO 9660, NTFS (driver and formatter)
 kernel/gui   graphics, window manager, widgets, menus, dialogs, desktop, splash
@@ -480,10 +495,15 @@ tests/sound  host tests of the WAV library
   that shares its line with a device that has no driver may stay polled.
 - x2APIC mode is written to spec but QEMU 8.2's emulator cannot run it.
 - Real graphics cards have no driver yet (NVIDIA, Intel and AMD come in later
-  milestones): resolution changes need a restart there, refresh rates are
-  whatever the firmware chose, and there is one monitor. OVMF (QEMU's UEFI)
-  reports no EDID, so the UEFI loader's choice was only tested with a saved
-  setting; real UEFI firmware usually provides it.
+  milestones; the display core is ready for them): resolution changes need a
+  restart there, refresh rates are whatever the firmware chose, and there is
+  one monitor. Several monitors, hardware cursors and page flips work with
+  QEMU's virtio GPU. OVMF (QEMU's UEFI) reports no EDID, so the UEFI loader's
+  choice was only tested with a saved setting; real UEFI firmware usually
+  provides it. Under UEFI, a virtio GPU without VGA (`virtio-gpu-pci`) cannot
+  start Halcyon (OVMF gives it no linear frame buffer); `virtio-vga` can.
+  An absolute pointer (USB tablet) maps over the whole desktop, which lines
+  up with QEMU's window only for one monitor.
 - The internet stack is IPv4 only (no IPv6, multicast or raw sockets). TCP has
   no SACK or timestamps, so heavy loss costs throughput; DNS has no TCP
   fallback and asks for A records only; DHCP and static configuration cover

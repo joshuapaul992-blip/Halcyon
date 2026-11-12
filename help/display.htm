@@ -1,25 +1,29 @@
 <html><head><title>Display Properties</title>
-<meta name="keywords" content="Display Properties; screen resolution#res; resolution; monitor; keep these settings#res; screen saver#saver; graphics card#res; black screen after changing resolution#res">
+<meta name="keywords" content="Display Properties; screen resolution#res; resolution; monitor; keep these settings#res; screen saver#saver; graphics card#res; black screen after changing resolution#res; several monitors#monitors; second monitor#monitors; multiple monitors#monitors; extend the desktop#monitors; primary monitor#monitors; Identify#monitors; arrange monitors#monitors; display driver#driver; safe mode, display driver#driver">
 </head><body>
 <h2 style="color:#1f4e9a">Display Properties</h2>
-<p>Display Properties sets the screen resolution and the screen saver. Open it
-from the <b>Control Panel</b> (<b>Display...</b>), by right-clicking the desktop
-and choosing <b>Properties</b>, or by typing <code>DISPLAY</code> in the
-Command Prompt.</p>
+<p>Display Properties sets the screen resolution, arranges your monitors and
+chooses the screen saver. Open it from the <b>Control Panel</b>
+(<b>Display...</b>), by right-clicking the desktop and choosing
+<b>Properties</b>, or by typing <code>DISPLAY</code> in the Command Prompt.</p>
 
 <h3 id="res">Screen resolution</h3>
 <p>The resolution is how many dots (pixels) the screen shows: more dots fit more
 on the screen, but make everything smaller. When Halcyon starts for the first
 time it asks the monitor which resolution suits it best and uses that. To pick
-another one, choose it in the <b>Screen resolution</b> list and click
-<b>Apply</b>.</p>
+another one, click the monitor in the picture on the <b>Settings</b> tab (or
+choose it in the <b>Display</b> list), choose a resolution in the <b>Screen
+resolution</b> list and click <b>Apply</b>. The list shows what that monitor
+reports it can show and your display adapter can drive; the monitor's own
+resolution is marked <i>(recommended)</i>.</p>
 <ul>
-<li>On computers where Halcyon can switch straight away (such as virtual
-machines), the screen changes at once and Halcyon asks <b>"Do you want to
+<li>With a display adapter Halcyon has a driver for (such as virtual machines'
+adapters), the screen changes at once and Halcyon asks <b>"Do you want to
 keep these settings?"</b>. If you do not answer within 15 seconds (perhaps
-because the screen went black), it goes back to the old resolution by itself.</li>
-<li>On most real PCs Halcyon cannot change the resolution while it is running
-yet. It saves your choice and uses it the next time Halcyon starts.</li>
+because the screen went black), it goes back to the old settings by itself.</li>
+<li>Other graphics cards are run through the computer's start-up firmware:
+Halcyon saves your choice and uses it the next time it starts, and offers to
+restart now.</li>
 </ul>
 <table width="100%" cellpadding="6" cellspacing="0" bgcolor="#eef3fb"><tr><td>
 <b>Screen stays black after a restart?</b> Restart, press <kbd>F8</kbd> when the
@@ -28,14 +32,54 @@ yet. It saves your choice and uses it the next time Halcyon starts.</li>
 <a href="troubleshoot.htm">Solving startup problems</a>.
 </td></tr></table>
 
+<h3 id="monitors">Several monitors</h3>
+<p>When more than one monitor is connected, the <b>Settings</b> tab shows them
+as numbered pictures, arranged as Halcyon uses them: the desktop stretches
+across all of them, and the mouse pointer moves from one to the next where
+their edges meet.</p>
+<ul>
+<li><b>Arrange them</b> by dragging the pictures so they match where the
+monitors stand on your desk. A monitor always snaps to an edge of another
+one. Click <b>Identify</b> to see each monitor's number on the monitor
+itself.</li>
+<li><b>The primary monitor</b> has the taskbar, the Start menu and the desktop
+icons, and new windows open on it. To change it, click another monitor and
+check <b>Use this device as the primary monitor</b>.</li>
+<li><b>Extend my desktop onto this monitor</b> switches a monitor on or off
+for Halcyon. A monitor that is connected but not used is drawn grey next to
+the others; dragging it next to them extends the desktop onto it too.</li>
+<li>Each monitor has its own resolution: choose a monitor first, then its
+resolution.</li>
+</ul>
+<p>Click <b>Apply</b> to use the new arrangement (Halcyon asks whether to keep
+it, as for a new resolution). It is remembered for the next start.
+Windows can be dragged by their title bar to any monitor; maximizing a window
+fills the monitor it is on. When a monitor is unplugged (or a virtual
+machine's window for it is closed), the windows on it move to the primary
+monitor; when one is plugged in, the desktop extends onto it.</p>
+
 <h3 id="saver">Screen saver</h3>
 <p>The <b>Screen Saver</b> tab chooses a moving picture that appears when you
 have not used the computer for a while: pick one in the drop-down list (the
 little monitor shows it running), set <b>Wait</b>, and click <b>OK</b> or
 <b>Apply</b>. <b>Settings</b> opens the screen saver's own options and
-<b>Preview</b> shows it full screen. See <a href="screensaver.htm">Screen savers</a>.
+<b>Preview</b> shows it full screen. The screen saver covers every monitor.
+See <a href="screensaver.htm">Screen savers</a>.
 Click the tab names at the top (or press <kbd>Ctrl</kbd>+<kbd>Tab</kbd>) to
 switch between the two tabs.</p>
 
-<p><b>Related topics:</b> <a href="control.htm">Changing the theme and wallpaper</a></p>
+<h3 id="driver">If the picture is wrong</h3>
+<p>Halcyon's display drivers (the QEMU and VirtualBox adapters and virtio GPUs
+today) are used whenever such an adapter is found. If one of them cannot
+start, Halcyon keeps showing the picture the computer's firmware set up and
+writes the reason to <code>\HALCYON\BOOT.LOG</code>. To start without the
+display drivers, press <kbd>F8</kbd> at start-up and choose <b>Safe video mode</b>
+(or <b>Safe Mode</b>); to turn one driver off for good, add a line such as
+<code>display.disable=virtio-gpu</code> (or <code>bochs</code>) to
+<code>\HALCYON\SETTINGS.INI</code>. <a href="sysinfo.htm">System
+Information</a> lists the display adapters, their connectors and the monitors
+on them.</p>
+
+<p><b>Related topics:</b> <a href="control.htm">Changing the theme and wallpaper</a> &middot;
+<a href="windows.htm">Working with windows</a></p>
 </body></html>
