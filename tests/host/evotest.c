@@ -298,6 +298,21 @@ typedef struct sim {
     u32 wr_r[16384], wr_v[16384];
     int resolve_fail;
     int updates;
+    /* 10d: base channels (ctrl / user 1 + head) */
+    struct {
+        int state;              /* 0 off, 1 starting, 2 running */
+        int polls;
+        u32 put, get;
+        u32 asy[0x400], arm[0x400];     /* base methods / 4 */
+        u64 due;                /* an UPDATE waits for this time (the head's next vertical blank) */
+        u32 ntfy_ctl, ntfy_handle;
+        int images;             /* updates armed */
+    } base[4];
+    /* cursor channels */
+    struct { int state, polls; u32 point, armed; int updates; } curs[4];
+    /* faults (10d) */
+    int f_base_nostart, f_base_noget, f_base_nonotify, f_base_errmthd, f_scan_stuck, f_curs_nostart, f_curs_full, f_base_active;
+    u32 scan_stuck_at;
 } sim_t;
 
 static sim_t S;
@@ -333,17 +348,21 @@ static u32 dac_mthd(sim_t *s, int id) { return gf(s) ? 0x180 + (u32)id * 0x20 : 
 static u32 vr32(u64 a) { return a + 4 <= VRAM_SIZE ? (u32)S.vram[a] | (u32)S.vram[a + 1] << 8 | (u32)S.vram[a + 2] << 16 | (u32)S.vram[a + 3] << 24 : 0; }
 static void vw32(u64 a, u32 v) { if (a + 4 <= VRAM_SIZE) { S.vram[a] = (u8)v; S.vram[a + 1] = (u8)(v >> 8); S.vram[a + 2] = (u8)(v >> 16); S.vram[a + 3] = (u8)(v >> 24); } }
 
-static int resolve(sim_t *s, u32 handle, u64 *start, u64 *limit) {
+static int resolve_ch(sim_t *s, u32 handle, int chid, u64 *start, u64 *limit) {
     u32 i10 = get_reg(s, 0x610010);
     if ((i10 & 0xFF) != 9) return 0;
     u64 inst = (u64)(i10 & ~0xFFu) << 8;
-    /* nvkm_ramht_hash, 9 bits, channel 0 */
+    /* nvkm_ramht_hash, 9 bits, the channel's id in the top bits */
     u32 h = 0, x = handle;
     while (x) { h ^= x & 511; x >>= 9; }
+    h ^= (u32)chid << 5;
+    h &= 511;
     for (u32 n = 0; n < 512; n++) {
         u32 co = (h + n) % 512;
         u32 hd = vr32(inst + co * 8), ctx = vr32(inst + co * 8 + 4);
         if (hd != handle) continue;
+        /* the entry's channel (gf119: 31:27, nv50: 31:28 and 3:0) */
+        if (gf(s) ? (int)(ctx >> 27) != chid : ((int)(ctx >> 28) != chid || (int)(ctx & 0xF) != chid)) continue;
         u32 obj = gf(s) ? (ctx >> 9) & 0xFFFF : (ctx >> 10) & 0xFFFF;
         if (gf(s) && !(ctx & 1)) return 0;
         u64 o = inst + obj;
@@ -360,6 +379,7 @@ static int resolve(sim_t *s, u32 handle, u64 *start, u64 *limit) {
     }
     return 0;
 }
+static int resolve(sim_t *s, u32 handle, u64 *start, u64 *limit) { return resolve_ch(s, handle, 0, start, limit); }
 
 static void sim_error(sim_t *s, u32 m, u32 d) {
     if (gf(s)) {
@@ -413,7 +433,10 @@ static void apply(sim_t *s, u32 m, u32 d) {
     u32 old = s->asy[m / 4];
     s->asy[m / 4] = d;
     int h = head_of(s, m);
-    if (h >= 0 && old != d) {
+    u32 hb = h < 0 ? 0 : gf(s) ? 0x400 + (u32)h * 0x300 : 0x800 + (u32)h * 0x400, rel = h < 0 ? 0 : m - hb;
+    /* the core surface and the cursor change at the vertical blank, without the supervisor */
+    int latch = h >= 0 && ((rel >= 0x60 && rel <= 0x74) || (rel >= 0x80 && rel <= 0x9C));
+    if (h >= 0 && old != d && !latch) {
         s->changed |= 1u << h;
         u32 clk = gf(s) ? 0x450 : 0x804, base = gf(s) ? 0x400 + (u32)h * 0x300 : 0x800 + (u32)h * 0x400;
         if (m == base + (clk - (gf(s) ? 0x400 : 0x800))) s->pclk |= 1u << h;
@@ -421,12 +444,19 @@ static void apply(sim_t *s, u32 m, u32 d) {
     for (int i = 0; i < 8; i++)
         if (m == sor_mthd(s, i) || m == dac_mthd(s, i)) s->changed |= (old | d) & (gf(s) ? 0xF : 3);
     u32 iso = gf(s) ? 0x474 : 0x874, stride = gf(s) ? 0x300 : 0x400;
-    if (m == 0x88 || (h >= 0 && m == iso + (u32)h * stride && d)) {
+    u32 cdma = gf(s) ? 0x48C : 0x89C;
+    if (m == 0x88 || (h >= 0 && (m == iso + (u32)h * stride || m == cdma + (u32)h * stride) && d)) {
         u64 st, lim;
         if (!resolve(s, d, &st, &lim)) { s->resolve_fail++; sim_error(s, m, d); }
     }
     if (m == 0x84) s->ntfy = (int)(d >> 31);
     if (m == 0x80) { s->ntfy_upd = s->ntfy; s->ntfy_ctl = s->asy[0x84 / 4]; s->ntfy_handle = s->asy[0x88 / 4]; }
+    if (m == 0x80 && !s->changed && !s->pclk && !s->f_nosuper) {
+        /* nothing for the supervisor: armed (and notified) at once */
+        s->stage = 3;
+        super_next(s);
+        return;
+    }
     if (m == 0x80 && !s->f_nosuper) {
         s->stage = 1;
         s->status |= gf(s) ? 1u : 0x10u;
@@ -436,7 +466,7 @@ static void apply(sim_t *s, u32 m, u32 d) {
 
 static void process(sim_t *s) {
     if (s->chan != 2 || s->f_noget) return;
-    u32 push = (get_reg(s, s->g->push_gp102 ? 0x611494 : gf(s) ? 0x610494 : 0x610204) & ~0xFFu) << 8;
+    u32 push = (get_reg(s, s->g->push_gp102 ? 0x611494 : gf(s) ? 0x610494 : 0x610204) & ~0x3u) << 8;          /* (bits 1:0: the target) */
     for (int guard = 0; s->get != s->put && guard < 4096; guard++) {
         u32 w = vr32(push + s->get);
         if ((w & 0xE0000000u) == 0x20000000u) { s->get = w & 0xFFC; continue; }
@@ -449,10 +479,129 @@ static void process(sim_t *s) {
     }
 }
 
+/* ---------------- 10d: the scanout, base and cursor channels ---------------- */
+
+/* head h's armed raster: htotal, vtotal, vblanks, pixel clock (kHz) */
+static int sim_raster(sim_t *s, int h, u32 *ht, u32 *vt, u32 *vbs, u32 *khz) {
+    if (gf(s)) {
+        u32 o = 0x400 + (u32)h * 0x300;
+        *ht = s->arm[(o + 0x14) / 4] & 0xFFFF; *vt = s->arm[(o + 0x14) / 4] >> 16;
+        *vbs = s->arm[(o + 0x20) / 4] >> 16; *khz = s->arm[(o + 0x50) / 4] / 1000;
+    } else {
+        u32 o = 0x800 + (u32)h * 0x400;
+        *ht = s->arm[(o + 0x14) / 4] & 0xFFFF; *vt = s->arm[(o + 0x14) / 4] >> 16;
+        *vbs = s->arm[(o + 0x20) / 4] >> 16; *khz = s->arm[(o + 0x04) / 4] & 0x3FFFFF;
+    }
+    return *ht && *vt && *khz;
+}
+static u32 sim_line(sim_t *s, int h) {
+    u32 ht, vt, vbs, khz;
+    if (s->f_scan_stuck) return s->scan_stuck_at;
+    if (!sim_raster(s, h, &ht, &vt, &vbs, &khz)) return 0;
+    return (u32)((s->t * khz / 1000 / ht) % vt);
+}
+/* the next start of head h's vertical blank after now (in us) */
+static u64 sim_next_vblank(sim_t *s, int h) {
+    u32 ht, vt, vbs, khz;
+    if (!sim_raster(s, h, &ht, &vt, &vbs, &khz)) return s->t + 16000;
+    u64 frame = (u64)ht * vt, pix = s->t * khz / 1000, at = pix / frame * frame + (u64)vbs * ht;
+    if (at <= pix) at += frame;
+    return at * 1000 / khz + 1;
+}
+
+static int base_ctrl_of(sim_t *s, u32 r) {
+    for (int h = 0; h < 4; h++) if (r == ctrl_reg(s) + (u32)(1 + h) * 0x10) return h;
+    return -1;
+}
+static int curs_ctrl_of(sim_t *s, u32 r) {
+    for (int h = 0; h < 4; h++) if (r == ctrl_reg(s) + (u32)((gf(s) ? 13 : 7) + h) * 0x10) return h;
+    return -1;
+}
+static int curs_user(sim_t *s, int h) { return (gf(s) ? (s->g->push_gp102 ? 17 : 13) : 7) + h; }
+
+static void base_error(sim_t *s, int c, u32 m, u32 d) {
+    if (gf(s)) {
+        u32 b = (s->g->push_gp102 ? 0x6111f0 : 0x6101f0) + (u32)c * 12;
+        set_reg(s, 0x61009c, get_reg(s, 0x61009c) | (1u << c));
+        set_reg(s, b, 0x80000000u | (5u << 12) | m);
+        set_reg(s, b + 4, d);
+    } else {
+        set_reg(s, 0x610020, get_reg(s, 0x610020) | (0x00010000u << c));
+        set_reg(s, 0x610080 + (u32)c * 8, (5u << 12) | m);
+        set_reg(s, 0x610084 + (u32)c * 8, d);
+    }
+}
+
+static void base_apply(sim_t *s, int h, u32 m, u32 d) {
+    int c = 1 + h;
+    if (m >= 0x1000 || (int)m == s->f_base_errmthd) { base_error(s, c, m, d); return; }
+    s->base[h].asy[m / 4] = d;
+    u64 st, lim;
+    if ((m == 0xC0 || m == 0xA4) && d && !resolve_ch(s, d, c, &st, &lim)) { s->resolve_fail++; base_error(s, c, m, d); }
+    if (m == 0x80) {
+        s->base[h].ntfy_ctl = s->base[h].asy[0xA0 / 4];
+        s->base[h].ntfy_handle = s->base[h].asy[0xA4 / 4];
+        s->base[h].due = sim_next_vblank(s, h);
+    }
+}
+
+static void base_process(sim_t *s, int h) {
+    if (s->base[h].state != 2 || s->f_base_noget) return;
+    u32 pr = (s->g->push_gp102 ? 0x611494 : gf(s) ? 0x610494 : 0x610204) + (u32)(1 + h) * 0x10;
+    u32 push = (get_reg(s, pr) & ~0x3u) << 8;
+    for (int guard = 0; s->base[h].get != s->base[h].put && guard < 4096; guard++) {
+        u32 w = vr32(push + s->base[h].get);
+        if ((w & 0xE0000000u) == 0x20000000u) { s->base[h].get = w & 0xFFC; continue; }
+        u32 cnt = (w >> 18) & 0x7FF, m = w & 0xFFC;
+        s->base[h].get = (s->base[h].get + 4) & 0xFFF;
+        for (u32 i = 0; i < cnt; i++) {
+            base_apply(s, h, m + i * 4, vr32(push + s->base[h].get));
+            s->base[h].get = (s->base[h].get + 4) & 0xFFF;
+        }
+    }
+}
+
+/* the vertical blanks that came: queued base images are armed, their notifiers written */
+static void sim_tick(sim_t *s) {
+    for (int h = 0; h < 4; h++) {
+        if (!s->base[h].due || s->t < s->base[h].due) continue;
+        s->base[h].due = 0;
+        memcpy(s->base[h].arm, s->base[h].asy, sizeof s->base[h].arm);
+        s->base[h].images++;
+        if (s->f_base_nonotify) continue;
+        u64 st, lim;
+        if (resolve_ch(s, s->base[h].ntfy_handle, 1 + h, &st, &lim))
+            vw32(st + (s->base[h].ntfy_ctl & 0xFFC), 0x40000000u | ((u32)s->base[h].images & 0xFFFF));   /* STATUS BEGUN */
+        else s->resolve_fail++;
+    }
+}
+
 static u32 s_rd(void *c, u32 r) {
     sim_t *s = c;
     s->t += 1;
     if (s->f_dead) return 0xFFFFFFFF;
+    sim_tick(s);
+    int bh = base_ctrl_of(s, r), ch = curs_ctrl_of(s, r);
+    if (bh >= 0) {
+        u32 v = get_reg(s, r);
+        if (s->base[bh].state == 1) {
+            if (!s->f_base_nostart && ++s->base[bh].polls > 3) s->base[bh].state = 2;
+            else return v | 0x80000000u;
+        }
+        return s->base[bh].state == 2 ? v | 0x00010000u : v & ~0x001e0000u;
+    }
+    if (ch >= 0) {
+        u32 v = get_reg(s, r) & ~0x00030000u;
+        if (s->curs[ch].state == 1 && !s->f_curs_nostart && ++s->curs[ch].polls > 2) s->curs[ch].state = 2;
+        return v | (s->curs[ch].state == 2 ? 0x00010000u : s->curs[ch].state == 1 ? 0x00020000u : 0);
+    }
+    for (int h = 0; h < 4; h++) {
+        if (r == 0x640004 + (u32)(1 + h) * 0x1000) return s->base[h].get;
+        if (r == 0x640000 + (u32)(1 + h) * 0x1000) return s->base[h].put;
+        if (r == 0x640008 + (u32)curs_user(s, h) * 0x1000) return s->curs[h].state == 2 && !s->f_curs_full ? 32 : 0;
+        if (r == 0x616340 + (u32)h * 0x800) return sim_line(s, h);
+        if (r == 0x616344 + (u32)h * 0x800) return 0;
+    }
     if (r == ctrl_reg(s)) {
         u32 v = get_reg(s, r);
         if (s->chan == 1) {
@@ -492,6 +641,26 @@ static void s_wr(void *c, u32 r, u32 v) {
     s->t += 1;
     if (s->nw < 16384) { s->wr_r[s->nw] = r; s->wr_v[s->nw] = v; s->nw++; }
     if (s->f_dead) return;
+    sim_tick(s);
+    int bh = base_ctrl_of(s, r), ch = curs_ctrl_of(s, r);
+    if (bh >= 0) {
+        set_reg(s, r, v);
+        if (v == 0x00000013) { s->base[bh].state = 1; s->base[bh].polls = 0; s->base[bh].get = s->base[bh].put; }
+        else if (!(v & 3)) s->base[bh].state = 0;
+        return;
+    }
+    if (ch >= 0) {
+        set_reg(s, r, v);
+        if (v == 0x00000001) { if (s->curs[ch].state != 2) { s->curs[ch].state = 1; s->curs[ch].polls = 0; } }
+        else if (!(v & 1)) s->curs[ch].state = 0;
+        return;
+    }
+    for (int h = 0; h < 4; h++) {
+        if (r == 0x640000 + (u32)(1 + h) * 0x1000) { s->base[h].put = v & 0xFFC; base_process(s, h); return; }
+        u32 cu = 0x640000 + (u32)curs_user(s, h) * 0x1000;
+        if (r == cu + 0x84) { if (s->curs[h].state == 2) s->curs[h].point = v; return; }
+        if (r == cu + 0x80) { if (s->curs[h].state == 2) { s->curs[h].armed = s->curs[h].point; s->curs[h].updates++; } return; }
+    }
     if (r == ctrl_reg(s)) {
         set_reg(s, r, v);
         if (v == 0x01000013) { s->chan = 1; s->polls = 0; }
@@ -947,6 +1116,7 @@ static void fw_state(void) {
     set_reg(s, 0x610010, 0x00ABCD09);
 }
 
+static int g_base, g_keep_fw;          /* (10d) the base usage bounds; a second head: the first stays on */
 static int set_1080(int head, int k, int or_id, u32 proto, nv_evo_dp_t *dp) {
     nv_evo_timing_t t;
     timing_1080(&t);
@@ -956,15 +1126,16 @@ static int set_1080(int head, int k, int or_id, u32 proto, nv_evo_dp_t *dp) {
     c.head = head; c.on = 1; c.w = 1920; c.h = 1080; c.offset = 8u << 20; c.pitch = 7680; c.vram_handle = EVO_HANDLE_VRAM;
     c.or_type = proto == EVO_PROTO_CRT; c.or_id = or_id; c.proto = proto; c.or_heads = 1u << head;
     c.depth = proto == EVO_PROTO_DP_A ? EVO_DEPTH_24 : 0;
+    c.base = (u8)g_base;
     nv_evo_stream_t s;
     memset(&s, 0, sizeof s);
-    if (head != E.fw.head && E.fw.valid) {
+    if (head != E.fw.head && E.fw.valid && !g_keep_fw) {
         nv_evo_head_cfg_t off;
         memset(&off, 0, sizeof off);
         off.head = E.fw.head; off.or_id = -1;
         nv_evo_head_methods(E.g, &s, &off);
     }
-    if (E.fw.valid && (E.fw.or_id != or_id || E.fw.or_type != c.or_type)) nv_evo_or_off(E.g, &s, E.fw.or_type, E.fw.or_id);
+    if (E.fw.valid && !g_keep_fw && (E.fw.or_id != or_id || E.fw.or_type != c.or_type)) nv_evo_or_off(E.g, &s, E.fw.or_type, E.fw.or_id);
     nv_evo_head_methods(E.g, &s, &c);
     nv_evo_update(E.g, &s, 1);
     if (c.or_type) E.dac_asy_outp[or_id] = k; else E.sor_asy_outp[or_id] = k;
@@ -1253,6 +1424,538 @@ static void test_scripts(void) {
     CHECK(1, "random CEA blocks");
 }
 
+/* ======================================================================
+ * 10d: page flips, the hardware cursor, the vertical blank, several heads
+ * ====================================================================== */
+
+static void test_streams_10d(void) {
+    /* classes and channel ids (nvkm nv50 / gf119 / gp102 *_disp_base, *_disp_curs; dispnv50 base.c, curs.c) */
+    static const struct { u16 cs; u16 bcls, ccls; int cctl0, cuser0; } ids[] = {
+        { 0x50, 0x507c, 0x507a, 7, 7 },    { 0x84, 0x827c, 0x827a, 7, 7 },    { 0x94, 0x837c, 0x827a, 7, 7 },
+        { 0xa3, 0x857c, 0x857a, 7, 7 },    { 0xc4, 0x857c, 0x857a, 7, 7 },    { 0xd9, 0x907c, 0x907a, 13, 13 },
+        { 0xe4, 0x917c, 0x917a, 13, 13 },  { 0x117, 0x927c, 0x917a, 13, 13 }, { 0x124, 0x927c, 0x917a, 13, 13 },
+        { 0x130, 0x927c, 0x917a, 13, 13 }, { 0x134, 0x927c, 0x917a, 13, 17 },
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(ids); i++) {
+        const nv_evo_gen_t *g = nv_evo_gen_for(ids[i].cs);
+        int c, u, c1, u1;
+        nv_evo_chan_ids(g, EVO_CHAN_CURS, 0, &c, &u);
+        nv_evo_chan_ids(g, EVO_CHAN_CURS, 1, &c1, &u1);
+        CHECK(nv_evo_base_class(g) == ids[i].bcls && nv_evo_curs_class(g) == ids[i].ccls && c == ids[i].cctl0 && u == ids[i].cuser0 &&
+              c1 == c + 1 && u1 == u + 1, "chipset %x: classes %04x %04x, cursor %d/%d", ids[i].cs, nv_evo_base_class(g),
+              nv_evo_curs_class(g), c, u);
+        nv_evo_chan_ids(g, EVO_CHAN_BASE, 2, &c, &u);
+        CHECK(c == 3 && u == 3, "chipset %x: base channel of head 2", ids[i].cs);
+    }
+    CHECK(nv_evo_base_ntfy(0, 0) == 0x60 && nv_evo_base_ntfy(0, 1) == 0x70 && nv_evo_base_ntfy(3, 0) == 0x120, "notifier slots");
+    CHECK(nv_evo_curs_point(-5, -12) == 0xFFF4FFFBu && nv_evo_curs_point(100, 7) == 0x00070064u, "cursor position word");
+
+    /* base images: 2560x1440, pitch 10240 at VRAM 16 MiB, notifier slot 0 of head 0 (base*_ntfy_set, base*_image_set, base507c_update) */
+    nv_evo_stream_t s;
+    const nv_evo_gen_t *gp = nv_evo_gen_for(0x134), *gf = nv_evo_gen_for(0xd9), *g94 = nv_evo_gen_for(0x94), *g50 = nv_evo_gen_for(0x50);
+    memset(&s, 0, sizeof s);
+    nv_evo_base_image_methods(gp, &s, 0x60, EVO_HANDLE_SYNC, EVO_HANDLE_VRAM, 16u << 20, 2560, 1440, 10240);
+    static const u32 b907[] = { H(0x0a0, 2), 0x60, 0xF0000000, H(0x084, 1), 0x10, H(0x0c0, 1), 0xF0000001,
+                                H(0x400, 5), 0x10000, 0, 0x05A00A00, 0x01002800, 0x0000CF00, H(0x080, 1), 0 };
+    CHECK(same(&s, b907, (int)ARRAY_SIZE(b907), "927c image"), "927c (GP102) image");
+    memset(&s, 0, sizeof s);
+    nv_evo_base_image_methods(gf, &s, 0x60, EVO_HANDLE_SYNC, EVO_HANDLE_VRAM, 16u << 20, 2560, 1440, 10240);
+    CHECK(same(&s, b907, (int)ARRAY_SIZE(b907), "907c image"), "907c (GF119) image: the same layout");
+    memset(&s, 0, sizeof s);
+    nv_evo_base_image_methods(g94, &s, 0x60, EVO_HANDLE_SYNC, EVO_HANDLE_VRAM, 16u << 20, 2560, 1440, 10240);
+    static const u32 b827[] = { H(0x0a0, 2), 0x60, 0xF0000000, H(0x084, 1), 0x10, H(0x0c0, 1), 0xF0000001, H(0x110, 2), 0, 0,
+                                H(0x800, 5), 0x10000, 0, 0x05A00A00, 0x00102800, 0x0000CF00, H(0x080, 1), 0 };
+    CHECK(same(&s, b827, (int)ARRAY_SIZE(b827), "837c image"), "837c (G94) image");
+    memset(&s, 0, sizeof s);
+    nv_evo_base_image_methods(g50, &s, 0x60, EVO_HANDLE_SYNC, EVO_HANDLE_VRAM, 16u << 20, 2560, 1440, 10240);
+    static const u32 b507[] = { H(0x0a0, 2), 0x60, 0xF0000000, H(0x084, 1), 0x10, H(0x0c0, 1), 0xF0000001, H(0x110, 2), 0, 0,
+                                H(0x800, 1), 0x10000, H(0x808, 3), 0x05A00A00, 0x00102800, 0x0000CF00, H(0x080, 1), 0 };
+    CHECK(same(&s, b507, (int)ARRAY_SIZE(b507), "507c image"), "507c (G80) image");
+    /* the base layer off (base507c_image_clr) */
+    memset(&s, 0, sizeof s);
+    nv_evo_base_image_methods(gp, &s, 0x70, EVO_HANDLE_SYNC, 0, 0, 0, 0, 0);
+    static const u32 bclr[] = { H(0x0a0, 2), 0x70, 0xF0000000, H(0x084, 1), 0, H(0x0c0, 1), 0, H(0x080, 1), 0 };
+    CHECK(same(&s, bclr, (int)ARRAY_SIZE(bclr), "image clear"), "base layer off");
+    memset(&s, 0, sizeof s);
+    nv_evo_base_image_methods(g50, &s, 0x70, EVO_HANDLE_SYNC, 0, 0, 0, 0, 0);
+    CHECK(same(&s, bclr, (int)ARRAY_SIZE(bclr), "image clear 507c"), "base layer off (507c)");
+    /* LUT / CSC off (base907c_xlut_clr, base907c_csc_clr, base507c_xlut_clr) */
+    memset(&s, 0, sizeof s);
+    nv_evo_base_init_methods(gp, &s);
+    static const u32 binit9[] = { H(0x0e0, 1), 0, H(0x0e8, 1), 0, H(0x0fc, 1), 0, H(0x140, 1), 0 };
+    CHECK(same(&s, binit9, (int)ARRAY_SIZE(binit9), "907c init"), "907c LUT and CSC off");
+    memset(&s, 0, sizeof s);
+    nv_evo_base_init_methods(g94, &s);
+    static const u32 binit5[] = { H(0x0e0, 1), 0 };
+    CHECK(same(&s, binit5, (int)ARRAY_SIZE(binit5), "827c init"), "827c LUT off");
+
+    /* the cursor in the core channel (head907d / head917d / head827d / head507d curs_set and curs_clr) */
+    memset(&s, 0, sizeof s);
+    nv_evo_curs_methods(gp, &s, 1, 1, 0x220000, EVO_HANDLE_VRAM);
+    static const u32 c917on[] = { H(0x780, 2), 0x85000000, 0x2200, H(0x78c, 1), 0xF0000001 };
+    CHECK(same(&s, c917on, (int)ARRAY_SIZE(c917on), "917d cursor on"), "917d cursor on head 1");
+    memset(&s, 0, sizeof s);
+    nv_evo_curs_methods(gp, &s, 1, 0, 0, 0);
+    static const u32 c917off[] = { H(0x780, 1), 0x05000000, H(0x78c, 1), 0 };
+    CHECK(same(&s, c917off, (int)ARRAY_SIZE(c917off), "917d cursor off"), "917d cursor off");
+    memset(&s, 0, sizeof s);
+    nv_evo_curs_methods(g94, &s, 0, 1, 0x220000, EVO_HANDLE_VRAM);
+    static const u32 c827on[] = { H(0x880, 2), 0x85000000, 0x2200, H(0x89c, 1), 0xF0000001 };
+    CHECK(same(&s, c827on, (int)ARRAY_SIZE(c827on), "827d cursor on"), "827d cursor on head 0");
+    memset(&s, 0, sizeof s);
+    nv_evo_curs_methods(g50, &s, 1, 1, 0x220000, EVO_HANDLE_VRAM);
+    static const u32 c507on[] = { H(0xc80, 2), 0x85000000, 0x2200 };
+    CHECK(same(&s, c507on, (int)ARRAY_SIZE(c507on), "507d cursor on"), "507d cursor on head 1 (no context DMA method)");
+    memset(&s, 0, sizeof s);
+    nv_evo_curs_methods(g50, &s, 1, 0, 0, 0);
+    static const u32 c507off[] = { H(0xc80, 1), 0x05000000 };
+    CHECK(same(&s, c507off, (int)ARRAY_SIZE(c507off), "507d cursor off"), "507d cursor off");
+
+    /* base usage bounds in a mode set: 32 bpp usable (917d also BASE_LUT USAGE_1025) */
+    CHECK(nv_evo_base_bounds(gp, 1) == 0x00020301 && nv_evo_base_bounds(gf, 1) == 0x301 && nv_evo_base_bounds(g50, 1) == 0x301 &&
+          nv_evo_base_bounds(gp, 0) == 0, "base usage bounds");
+    nv_evo_timing_t t;
+    timing_1080(&t);
+    nv_evo_head_cfg_t c;
+    memset(&c, 0, sizeof c);
+    nv_evo_raster(&t, &c.r);
+    c.on = 1; c.w = 1920; c.h = 1080; c.offset = 0x400000; c.pitch = 7680; c.vram_handle = EVO_HANDLE_VRAM; c.or_id = -1; c.base = 1;
+    static const struct { u16 cs; u32 m, want; } bb[] = { { 0x134, 0x4d0, 0x20301 }, { 0xd9, 0x4d0, 0x301 }, { 0x50, 0x900, 0x301 } };
+    for (size_t i = 0; i < ARRAY_SIZE(bb); i++) {
+        memset(&s, 0, sizeof s);
+        nv_evo_head_methods(nv_evo_gen_for(bb[i].cs), &s, &c);
+        int found = 0;
+        for (int k = 0; k + 1 < s.n; k++) if (s.w[k] == H(bb[i].m, 1) && s.w[k + 1] == bb[i].want) found = 1;
+        CHECK(found, "chipset %x: base usage bounds %08x in the mode set", bb[i].cs, bb[i].want);
+    }
+    /* the 10b mode set's cursor clear is the cursor-off stream */
+    c.base = 0; c.head = 1;
+    memset(&s, 0, sizeof s);
+    nv_evo_head_methods(gp, &s, &c);
+    CHECK(s.n > 8 && !memcmp(&s.w[4], c917off, sizeof c917off), "917d mode set clears the cursor as curs_clr does");
+    /* the core layer again with the cursor re-specified (head507d_core_set: INVALID_STATE otherwise) */
+    memset(&s, 0, sizeof s);
+    nv_evo_core_layer_methods(gp, &s, 0, 0x2000000, 2560, 1440, 10240, EVO_HANDLE_VRAM, 1, 1, 0x220000);
+    static const u32 cl917[] = { H(0x460, 1), 0x20000, H(0x468, 4), 0x05A00A00, 0x01002800, 0x0000CF00, 0xF0000001, H(0x4d0, 1), 0x20301,
+                                 H(0x480, 2), 0x85000000, 0x2200, H(0x48c, 1), 0xF0000001 };
+    CHECK(same(&s, cl917, (int)ARRAY_SIZE(cl917), "core layer"), "917d core layer with the cursor");
+    memset(&s, 0, sizeof s);
+    nv_evo_core_layer_methods(g50, &s, 1, 0x2000000, 1920, 1080, 7680, EVO_HANDLE_VRAM, 1, 0, 0);
+    static const u32 cl507[] = { H(0xc60, 1), 0x20000, H(0xc68, 4), 0x04380780, 0x00101E00, 0x0000CF00, 0xF0000001, H(0xd00, 1), 0x301 };
+    CHECK(same(&s, cl507, (int)ARRAY_SIZE(cl507), "core layer 507d"), "507d core layer, cursor off");
+}
+
+/* the takeover with the 10d layout: base push buffers after the notifiers, cursor images at +128 KiB */
+static int takeover_10d(u16 chipset) {
+    build_rom(chipset >= 0xa3 ? 0x40 : 0x30);
+    evo_setup(chipset);
+    fw_state();
+    E.basepush = E.sync + 0x1000;
+    E.cursimg = E.inst + 0x20000;
+    E.chan_us = 200000;
+    return nv_evo_takeover(&E);
+}
+
+static int poll_flip(int head, u32 limit_us, u64 *took) {
+    u64 t0 = S.t;
+    int r;
+    while ((r = nv_evo_base_poll(&E, head)) == 0 && S.t - t0 < limit_us) S.t += 50;
+    if (took) *took = S.t - t0;
+    return r;
+}
+
+static void test_chans(u16 chipset) {
+    char name[32];
+    snprintf(name, sizeof name, "10d chipset %x", chipset);
+    int r = takeover_10d(chipset);
+    CHECK(!r, "%s: takeover: %s", name, E.why);
+    if (r) return;
+    int nh = gf(&S) ? 4 : 2, cbase = gf(&S) ? 13 : 7;
+    u32 pr0 = S.g->push_gp102 ? 0x611494 : gf(&S) ? 0x610494 : 0x610204;
+    /* every head's base and cursor channel */
+    for (int h = 0; h < nh; h++) {
+        u64 t0 = S.t;
+        r = nv_evo_base_start(&E, h);
+        CHECK(!r && E.base[h].up && S.base[h].state == 2 && S.t - t0 < 20000, "%s: base channel %d: %s", name, h, E.why);
+        CHECK(get_reg(&S, pr0 + (u32)(1 + h) * 0x10) == (u32)(1 | (E.basepush + (u64)h * 0x1000) >> 8), "%s: base %d push buffer register", name, h);
+        CHECK(gf(&S) ? (get_reg(&S, 0x6100a0) & (1u << (1 + h))) != 0 : (get_reg(&S, 0x610028) & (0x10000u << (1 + h))) != 0,
+              "%s: base %d error reporting", name, h);
+        u64 st, lim;
+        CHECK(resolve_ch(&S, EVO_HANDLE_SYNC, 1 + h, &st, &lim) && st == E.sync && resolve_ch(&S, EVO_HANDLE_VRAM, 1 + h, &st, &lim) && st == 0,
+              "%s: base %d context DMAs bound to its channel", name, h);
+        CHECK(S.base[h].get == S.base[h].put && S.base[h].put > 0 && S.base[h].asy[0xE0 / 4] == 0, "%s: base %d LUT methods fetched", name, h);
+        r = nv_evo_curs_start(&E, h);
+        CHECK(!r && E.curs[h].up && S.curs[h].state == 2, "%s: cursor channel %d: %s", name, h, E.why);
+        CHECK(get_reg(&S, ctrl_reg(&S) + (u32)(cbase + h) * 0x10) == 1, "%s: cursor %d control", name, h);
+    }
+    CHECK(nv_evo_base_start(&E, nh) == E_INVAL, "%s: no head %d", name, nh);
+    CHECK(!S.resolve_fail, "%s: every handle resolves", name);
+
+    /* a 1080p mode on head 0 with the base usage bounds; flips at the vertical blank */
+    g_base = 1;
+    int isdp = gf(&S) || S.g->dp != EVO_DP_NONE;
+    nv_evo_dp_t dp;
+    memset(&dp, 0, sizeof dp);
+    if (isdp) nv_dp_detect(&E, &dp);
+    int or0 = isdp ? 0 : 1;
+    r = isdp ? set_1080(0, 0, or0, EVO_PROTO_DP_A, &dp) : set_1080(0, 1, or0, EVO_PROTO_TMDS_A, NULL);
+    CHECK(!r, "%s: mode set: %s", name, E.why);
+    u32 bnd = gf(&S) ? 0x4d0 : 0x900;
+    CHECK(S.arm[bnd / 4] == nv_evo_base_bounds(S.g, 1), "%s: base usage bounds armed %08x", name, S.arm[bnd / 4]);
+    u32 frame_us = 2200u * 1125u * 1000u / 148500u;     /* 16667 us */
+    u64 took;
+    S.t += 3000;
+    u32 to_vbl = nv_evo_us_to_vblank(&E, 0);
+    CHECK(!nv_evo_base_flip(&E, 0, 24u << 20, 1920, 1080, 7680), "%s: flip queued: %s", name, E.why);
+    CHECK(nv_evo_base_flip(&E, 0, 26u << 20, 1920, 1080, 7680) == E_BUSY, "%s: one flip at a time", name);
+    if (to_vbl > 500) CHECK(nv_evo_base_poll(&E, 0) == 0, "%s: not done before the vertical blank", name);
+    r = poll_flip(0, 100000, &took);
+    u32 off_m = gf(&S) ? 0x400 : 0x800;
+    CHECK(r == 1 && E.base[0].shown && !E.base[0].pending && S.base[0].arm[0xC0 / 4] == EVO_HANDLE_VRAM &&
+          S.base[0].arm[off_m / 4] == (24u << 20) >> 8, "%s: flip done %d, armed %08x", name, r, S.base[0].arm[off_m / 4]);
+    CHECK(took + 200 >= to_vbl && took <= to_vbl + 2000, "%s: done at the vertical blank (%llu us, blank due in %u)", name,
+          (unsigned long long)took, to_vbl);
+    u32 n0 = E.base[0].ntfy;
+    CHECK(!nv_evo_base_flip(&E, 0, 8u << 20, 1920, 1080, 7680) && E.base[0].ntfy != n0, "%s: second flip, the other notifier", name);
+    r = poll_flip(0, 100000, &took);
+    CHECK(r == 1 && S.base[0].arm[off_m / 4] == (8u << 20) >> 8 && took <= frame_us + 2000, "%s: second flip done in %llu us", name,
+          (unsigned long long)took);
+    /* 30 flips in a row: one per frame, the push buffer wraps */
+    int ok = 1;
+    u64 t0 = S.t;
+    for (int i = 0; i < 30 && ok; i++) {
+        ok = !nv_evo_base_flip(&E, 0, (i & 1 ? 24u : 8u) << 20, 1920, 1080, 7680) && poll_flip(0, 100000, NULL) == 1;
+    }
+    CHECK(ok && S.t - t0 <= 31u * frame_us + 5000 && S.t - t0 >= 29u * frame_us, "%s: 30 flips, one per frame (%llu us)", name,
+          (unsigned long long)(S.t - t0));
+    CHECK(E.base[0].flips == 32 && !S.resolve_fail && !E.base[0].errors, "%s: %u images, no error", name, E.base[0].flips);
+
+    /* the vertical blank from the scanline counter */
+    u32 line, vbs = 1120, vbe = 40;
+    t0 = S.t;
+    r = nv_evo_wait_vblank(&E, 0, 50000);
+    CHECK(!r && nv_evo_in_vblank(&E, 0, &line) == 1 && line >= vbs && line < vbs + 3 && S.t - t0 <= frame_us + 200,
+          "%s: wait_vblank %d: line %u after %llu us", name, r, line, (unsigned long long)(S.t - t0));
+    t0 = S.t;
+    r = nv_evo_wait_vblank(&E, 0, 50000);         /* in the blank already: the next one */
+    CHECK(!r && S.t - t0 >= frame_us - 300 && S.t - t0 <= frame_us + 300, "%s: the next vertical blank, %llu us later", name,
+          (unsigned long long)(S.t - t0));
+    CHECK(nv_evo_us_to_vblank(&E, 0) == 0, "%s: in the blank", name);
+    S.t += 5000;
+    u32 est = nv_evo_us_to_vblank(&E, 0);
+    nv_evo_in_vblank(&E, 0, &line);
+    CHECK(line > vbe && line < vbs && est > 0 && est <= frame_us, "%s: %u us to the blank from line %u", name, est, line);
+    CHECK(nv_evo_wait_vblank(&E, 2 % nh == 0 ? 1 : 1, 50000) == E_NOTSUP, "%s: no raster on head 1 yet", name);
+
+    /* the cursor: images in VRAM, on in the core channel (no supervisor), positions through its channel */
+    static u32 img[64 * 64], img32[32 * 32];
+    for (int i = 0; i < 64 * 64; i++) img[i] = 0xFF000000u | (u32)i;
+    for (int i = 0; i < 32 * 32; i++) img32[i] = 0x80FFFFFFu - (u32)i;
+    CHECK(!nv_evo_curs_upload(&E, 0, 0, img, 64) && vr32(nv_evo_curs_offset(&E, 0, 0) + 4 * 65) == img[65], "%s: 64x64 image", name);
+    CHECK(!nv_evo_curs_upload(&E, 0, 1, img32, 32) && vr32(nv_evo_curs_offset(&E, 0, 1) + 4 * (5 * 64 + 5)) == img32[5 * 32 + 5] &&
+          vr32(nv_evo_curs_offset(&E, 0, 1) + 4 * (40 * 64 + 40)) == 0, "%s: 32x32 image padded", name);
+    CHECK(nv_evo_curs_upload(&E, 0, 0, img, 65) == E_INVAL, "%s: 65x65 refused", name);
+    nv_evo_stream_t s;
+    memset(&s, 0, sizeof s);
+    nv_evo_curs_methods(E.g, &s, 0, 1, nv_evo_curs_offset(&E, 0, 0), EVO_HANDLE_VRAM);
+    nv_evo_update(E.g, &s, 1);
+    u32 sup = E.supers;
+    r = nv_evo_submit(&E, &s, 1);
+    u32 cc = gf(&S) ? 0x480 : 0x880;
+    CHECK(!r && S.arm[cc / 4] == 0x85000000u && S.arm[cc / 4 + 1] == (u32)(nv_evo_curs_offset(&E, 0, 0) >> 8) && E.supers == sup &&
+          !S.resolve_fail, "%s: cursor on: %s", name, E.why);
+    CHECK(!nv_evo_curs_move(&E, 0, -10, -20) && S.curs[0].armed == nv_evo_curs_point(-10, -20) && S.curs[0].updates == 1,
+          "%s: cursor partly off the top left", name);
+    CHECK(!nv_evo_curs_move(&E, 0, 1900, 1070) && S.curs[0].armed == nv_evo_curs_point(1900, 1070), "%s: cursor at the bottom right", name);
+
+    /* a second monitor on head 1 with its own output resource, PLL and flips */
+    nv_evo_use_t use[EVO_HEADS];
+    memset(use, 0, sizeof use);
+    use[0].on = 1; use[0].dcb = isdp ? 0 : 1; use[0].or_type = 0; use[0].or_id = or0; use[0].khz = 148500;
+    char why[80];
+    int k2 = S.g->has_dac ? 2 : 3, t2 = 0;
+    int or2 = nv_evo_pick_or(&E, use, k2, 1, &t2, why, sizeof why);
+    CHECK(or2 >= 0 && (t2 != 0 || or2 != or0), "%s: second output resource %d (%s)", name, or2, why);
+    if (or2 >= 0) {
+        g_keep_fw = 1;
+        r = set_1080(1, k2, or2, t2 ? EVO_PROTO_CRT : EVO_PROTO_TMDS_A, NULL);
+        g_keep_fw = 0;
+        CHECK(!r, "%s: head 1 mode set: %s", name, E.why);
+        u32 o1 = gf(&S) ? 0x400 + 0x300 : 0x800 + 0x400;
+        CHECK(S.arm[(o1 + 0x14) / 4] == (1125u << 16 | 2200) && S.arm[(gf(&S) ? 0x400 : 0x800) / 4 + 0x14 / 4] == (1125u << 16 | 2200),
+              "%s: both heads lit", name);
+        CHECK(!nv_evo_base_flip(&E, 0, 24u << 20, 1920, 1080, 7680) && !nv_evo_base_flip(&E, 1, 26u << 20, 1920, 1080, 7680),
+              "%s: flips on both heads", name);
+        int d0 = poll_flip(0, 100000, NULL), d1 = poll_flip(1, 100000, NULL);
+        CHECK(d0 == 1 && d1 == 1 && S.base[1].arm[off_m / 4] == (26u << 20) >> 8 && S.base[0].arm[off_m / 4] == (24u << 20) >> 8,
+              "%s: each head shows its own surface", name);
+        CHECK(!nv_evo_wait_vblank(&E, 1, 50000), "%s: head 1 vertical blank", name);
+    }
+
+    /* the base layer off, then every channel stopped */
+    CHECK(!nv_evo_base_off(&E, 0, 100000) && !E.base[0].shown && S.base[0].arm[0xC0 / 4] == 0, "%s: base layer off: %s", name, E.why);
+    nv_evo_chans_stop(&E);
+    int all = 1;
+    for (int h = 0; h < nh; h++) all &= !E.base[h].up && !E.curs[h].up && S.base[h].state == 0 && S.curs[h].state == 0;
+    CHECK(all, "%s: every channel stopped", name);
+    CHECK(gf(&S) ? !(get_reg(&S, 0x6100a0) & 0x1E) : !(get_reg(&S, 0x610028) & 0x00060006), "%s: error reporting off", name);
+    nv_evo_release(&E);
+    CHECK(gf(&S) ? get_reg(&S, 0x6100a0) == 0 : get_reg(&S, 0x610028) == 0, "%s: release puts the enables back", name);
+    g_base = 0;
+}
+
+static void test_chan_hangs(void) {
+    u64 t0;
+    int r;
+    /* a base channel that never starts: given up after the 200 ms limit */
+    takeover_10d(0x134);
+    S.f_base_nostart = 1;
+    t0 = S.t;
+    r = nv_evo_base_start(&E, 0);
+    CHECK(r == E_TIMEOUT && !E.base[0].up && strstr(E.why, "did not start") && S.t - t0 < 450000, "base never starts: %s (%llu us)", E.why,
+          (unsigned long long)(S.t - t0));
+    CHECK(!(get_reg(&S, 0x6100a0) & 2), "its error reporting off again");
+    /* one that never fetches */
+    takeover_10d(0x124);
+    S.f_base_noget = 1;
+    t0 = S.t;
+    r = nv_evo_base_start(&E, 1);
+    CHECK(r == E_TIMEOUT && !E.base[1].up && strstr(E.why, "fetch") && S.t - t0 < 700000, "base never fetches: %s", E.why);
+    /* the firmware's base channel runs: stopped first, then ours */
+    takeover_10d(0x117);
+    S.base[0].state = 2;
+    set_reg(&S, 0x6104a0, 0x13);
+    r = nv_evo_base_start(&E, 0);
+    CHECK(!r && logged("is active") && S.base[0].state == 2, "the firmware's base channel stopped first: %s", E.why);
+    /* a notifier never written: the flip never completes, its removal times out (bounded) */
+    takeover_10d(0x134);
+    S.f_base_nonotify = 1;
+    CHECK(!nv_evo_base_start(&E, 0), "start");
+    g_base = 1;
+    CHECK(!set_1080(0, 0, 1, EVO_PROTO_TMDS_A, NULL), "mode set: %s", E.why);
+    CHECK(!nv_evo_base_flip(&E, 0, 24u << 20, 1920, 1080, 7680), "flip");
+    r = poll_flip(0, 300000, NULL);
+    CHECK(r == 0 && E.base[0].pending, "a notifier never written: still pending after 300 ms");
+    t0 = S.t;
+    r = nv_evo_base_off(&E, 0, 50000);
+    CHECK(r == E_TIMEOUT && S.t - t0 < 60000 && strstr(E.why, "never completed"), "base off with a stuck flip: %s", E.why);
+    nv_evo_chans_stop(&E);
+    CHECK(!E.base[0].up && S.base[0].state == 0 && logged("could not be switched off"), "stopped anyway");
+    /* a channel error on a base method (GF119 and NV50 layouts) */
+    static const u16 errchips[] = { 0xd9, 0x50 };
+    for (size_t i = 0; i < ARRAY_SIZE(errchips); i++) {
+        takeover_10d(errchips[i]);
+        CHECK(!nv_evo_base_start(&E, 0), "start %x", errchips[i]);
+        CHECK(!set_1080(0, 1, 1, EVO_PROTO_TMDS_A, NULL), "mode set %x: %s", errchips[i], E.why);
+        S.f_base_errmthd = 0x0C0;
+        CHECK(!nv_evo_base_flip(&E, 0, 24u << 20, 1920, 1080, 7680), "flip %x", errchips[i]);
+        r = poll_flip(0, 100000, NULL);
+        CHECK(r == E_IO && logged("base channel error") && E.base[0].errors == 1 &&
+              (gf(&S) ? !(get_reg(&S, 0x61009c) & 2) : !(get_reg(&S, 0x610020) & 0x20000)), "chipset %x: base channel error: %d", errchips[i], r);
+    }
+    g_base = 0;
+    /* a cursor channel that never starts; one that never has room */
+    takeover_10d(0x94);
+    S.f_curs_nostart = 1;
+    t0 = S.t;
+    r = nv_evo_curs_start(&E, 1);
+    CHECK(r == E_TIMEOUT && !E.curs[1].up && S.t - t0 < 450000 && strstr(E.why, "did not start"), "cursor never starts: %s", E.why);
+    takeover_10d(0xe4);
+    CHECK(!nv_evo_curs_start(&E, 0), "cursor start");
+    S.f_curs_full = 1;
+    t0 = S.t;
+    r = nv_evo_curs_move(&E, 0, 10, 10);
+    CHECK(r == E_BUSY && S.t - t0 < 1500 && E.curs[0].busy == 1 && !S.curs[0].updates, "cursor channel full: dropped in %llu us",
+          (unsigned long long)(S.t - t0));
+    /* a scanline counter that does not move */
+    takeover_10d(0x134);
+    CHECK(!set_1080(0, 0, 1, EVO_PROTO_TMDS_A, NULL), "mode set");
+    S.f_scan_stuck = 1;
+    S.scan_stuck_at = 500;
+    t0 = S.t;
+    r = nv_evo_wait_vblank(&E, 0, 50000);
+    CHECK(r == E_TIMEOUT && S.t - t0 < 1200 && logged("stays at 500"), "scanline stuck: %d after %llu us", r, (unsigned long long)(S.t - t0));
+    S.scan_stuck_at = 1122;                        /* stuck inside the blank */
+    t0 = S.t;
+    r = nv_evo_wait_vblank(&E, 0, 50000);
+    CHECK(r == E_TIMEOUT && S.t - t0 < 1200, "scanline stuck in the blank");
+    S.f_scan_stuck = 0;
+    CHECK(nv_evo_wait_vblank(&E, 3, 50000) == E_NOTSUP && nv_evo_us_to_vblank(&E, 3) == 0 && nv_evo_wait_vblank(&E, 7, 1) == E_INVAL,
+          "no raster, no head");
+    /* the limit is the caller's when shorter than a frame */
+    t0 = S.t;
+    r = nv_evo_wait_vblank(&E, 0, 300);
+    CHECK((r == 0 || r == E_TIMEOUT) && S.t - t0 < 400, "short limit %llu us", (unsigned long long)(S.t - t0));
+    /* without a started channel, bad arguments */
+    CHECK(nv_evo_base_flip(&E, 0, 0, 1920, 1080, 7680) == E_IO && nv_evo_base_poll(&E, 0) == E_IO && nv_evo_curs_move(&E, 0, 0, 0) == E_IO,
+          "channels not started");
+    CHECK(!nv_evo_base_start(&E, 0) && nv_evo_base_flip(&E, 0, 0x100010, 1920, 1080, 7680) == E_INVAL &&
+          nv_evo_base_flip(&E, 0, 0x100000, 1920, 1080, 7000) == E_INVAL, "unaligned surfaces refused");
+    /* a dead card: no flip ever completes, the scanline is unreadable, nothing hangs */
+    CHECK(!nv_evo_base_flip(&E, 0, 24u << 20, 1920, 1080, 7680), "flip before the card dies");
+    S.f_dead = 1;
+    r = poll_flip(0, 100000, NULL);
+    CHECK(r == 0 && nv_evo_wait_vblank(&E, 0, 50000) == E_IO, "dead card: flip pending (%d), vblank unreadable", r);
+    t0 = S.t;
+    nv_evo_chans_stop(&E);
+    CHECK(!E.base[0].up && S.t - t0 < 600000, "dead card: channels stopped within %llu us", (unsigned long long)(S.t - t0));
+    S.f_dead = 0;
+    /* no layout for the channels */
+    takeover_10d(0x134);
+    E.basepush = 0;
+    E.cursimg = VRAM_SIZE - 0x1000;
+    CHECK(nv_evo_base_start(&E, 0) == E_INVAL && nv_evo_curs_start(&E, 0) == E_INVAL, "no VRAM for the channels");
+}
+
+/* several monitors: heads, output resources, pad macros, PLLs, pixel clocks */
+static nv_bios_t AB;
+static void ab_out(int k, u8 type, u8 conn, u8 or_mask, u8 link) {
+    nv_dcb_output_t *o = &AB.out[k];
+    memset(o, 0, sizeof *o);
+    o->index = (u8)k; o->type = type; o->connector = conn; o->or_mask = or_mask; o->link = link; o->heads = 0xF; o->i2c = (u8)k;
+    if (k + 1 > AB.noutputs) AB.noutputs = k + 1;
+}
+static void alloc_setup(u16 chipset, const nv_bios_t *b) {
+    memset(&E, 0, sizeof E);
+    E.g = nv_evo_gen_for(chipset);
+    E.chipset = chipset;
+    E.bios = b;
+    if (E.g->gf119) {
+        E.head_mask = 0xF; E.nheads = 4; E.nsors = 8; E.sor_mask = 0xF;
+        E.ndacs = E.g->has_dac ? 4 : 0; E.dac_mask = E.g->has_dac ? 0x7 : 0;
+    } else {
+        E.head_mask = 3; E.nheads = 2; E.ndacs = 3; E.dac_mask = 7;
+        E.nsors = E.g->sor_state == EVO_SOR_G94 ? 4 : 2; E.sor_mask = E.g->sor_state == EVO_SOR_G94 ? 0xF : 3;
+    }
+    for (int i = 0; i < EVO_ORS; i++) E.sor_outp[i] = E.dac_outp[i] = E.sor_asy_outp[i] = E.dac_asy_outp[i] = -1;
+}
+static int plan(int n, const int *dcbs, u32 khz, u32 heads, nv_evo_plan_t *p) {
+    for (int i = 0; i < n; i++) { memset(&p[i], 0, sizeof p[i]); p[i].dcb = dcbs[i]; p[i].khz = khz; }
+    return nv_evo_plan(&E, p, n, heads);
+}
+static int distinct_ors(const nv_evo_plan_t *p, int n) {
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++)
+            if (!p[i].err && !p[j].err && (p[i].head == p[j].head || (p[i].or_type == p[j].or_type && p[i].or_id == p[j].or_id))) return 0;
+    return 1;
+}
+
+static void test_alloc(void) {
+    nv_evo_plan_t p[8];
+    /* the GTX 1070's DCB (GM200+ routing): DVI-D on macro 0 (links A+B), DP-1 / HDMI-of-DP-1 on macro 2 link B, DP-2 on macro 2
+     * link A, HDMI on macro 1 link A, DP-3 on macro 1 link B */
+    memset(&AB, 0, sizeof AB);
+    ab_out(0, NV_OUT_TMDS, 0, 1, 3);
+    ab_out(1, NV_OUT_DP, 1, 4, 2); ab_out(2, NV_OUT_TMDS, 1, 4, 2);
+    ab_out(3, NV_OUT_DP, 2, 4, 1); ab_out(4, NV_OUT_TMDS, 2, 4, 1);
+    ab_out(5, NV_OUT_TMDS, 3, 2, 1);
+    ab_out(6, NV_OUT_DP, 4, 2, 2); ab_out(7, NV_OUT_TMDS, 4, 2, 2);
+    alloc_setup(0x134, &AB);
+    E.sor_outp[2] = 1; E.sor_arm[2].heads = 1;     /* the firmware: SOR2 routed to DP-1 */
+    int lit = plan(2, (int[]){ 1, 3 }, 497750, 0xF, p);
+    CHECK(lit == 2 && p[0].head == 0 && p[0].or_id == 2 && p[1].head == 1 && p[1].or_id == 0, "GP104: DP-1 and DP-2: SOR%d, SOR%d",
+          p[0].or_id, p[1].or_id);
+    lit = plan(2, (int[]){ 1, 2 }, 148500, 0xF, p);
+    CHECK(lit == 1 && p[1].err == E_NOSPC && strstr(p[1].why, "pad macro 2 link 2"), "GP104: DP and HDMI of one connector: %s", p[1].why);
+    lit = plan(4, (int[]){ 0, 1, 3, 5 }, 241500, 0xF, p);
+    CHECK(lit == 4 && distinct_ors(p, 4), "GP104: four monitors");
+    lit = plan(5, (int[]){ 0, 1, 3, 5, 6 }, 241500, 0xF, p);
+    CHECK(lit == 4 && p[4].err == E_NOSPC && strstr(p[4].why, "no free head"), "GP104: a fifth monitor: %s", p[4].why);
+    lit = plan(2, (int[]){ 1, 3 }, 148500, 0x1, p);
+    CHECK(lit == 1 && p[1].err, "nv.heads=1: one monitor (%s)", p[1].why);
+    lit = plan(1, (int[]){ 1 }, 1200000, 0xF, p);
+    CHECK(lit == 0 && p[0].err == E_NOSPC && strstr(p[0].why, "more than"), "GP104: 1.2 GHz is too much for a head: %s", p[0].why);
+    lit = plan(4, (int[]){ 0, 1, 3, 5 }, 1000000, 0xF, p);
+    CHECK(lit == 4, "GP104: four heads at 1 GHz each");
+    CHECK(nv_evo_head_max_khz(E.g) == 1080000 && nv_evo_head_max_khz(nv_evo_gen_for(0xe4)) == 720000 &&
+          nv_evo_head_max_khz(nv_evo_gen_for(0x50)) == 400000 && nv_evo_head_max_khz(nv_evo_gen_for(0x94)) == 400000,
+          "per-head pixel clock limits");
+    nv_evo_use_t use[EVO_HEADS];
+    memset(use, 0, sizeof use);
+    char why[80];
+    for (int h = 1; h < 4; h++) { use[h].on = 1; use[h].khz = 1080000; }
+    CHECK(!nv_evo_bw_check(&E, use, 0, 1080000, why, sizeof why), "four heads at the limit");
+    E.head_mask = 0x3;
+    CHECK(nv_evo_bw_check(&E, use, 0, 1080000, why, sizeof why) == E_NOSPC && strstr(why, "together"), "the total: %s", why);
+    E.head_mask = 0xF;
+    int t;
+    CHECK(nv_evo_pick_or(&E, use, 1, 5, &t, why, sizeof why) == E_INVAL && nv_evo_pick_or(&E, use, 9, 0, &t, why, sizeof why) == E_INVAL,
+          "bad head / output");
+    /* heads are given in order, as the display core does (the primary first) */
+    AB.out[5].heads = 0x1;
+    lit = plan(2, (int[]){ 5, 1 }, 148500, 0xF, p);
+    CHECK(lit == 2 && p[0].head == 0 && p[1].head == 1, "an output limited to head 0 first: it gets head 0");
+    lit = plan(2, (int[]){ 1, 5 }, 148500, 0xF, p);
+    CHECK(lit == 1 && p[1].err == E_NOSPC, "an output limited to head 0 after head 0 was taken: %s", p[1].why);
+    lit = plan(2, (int[]){ 5, 1 }, 148500, 0xE, p);
+    CHECK(lit == 1 && p[0].err, "an output limited to head 0 without head 0: %s", p[0].why);
+    AB.out[5].heads = 0xF;
+    /* every SOR used: no free SOR for a fifth output even with a head */
+    alloc_setup(0x124, &AB);
+    E.sor_mask = 0x3;
+    lit = plan(3, (int[]){ 0, 1, 3 }, 148500, 0xF, p);
+    CHECK(lit == 2 && p[2].err == E_NOSPC && strstr(p[2].why, "no free SOR"), "GM204 with two SORs: %s", p[2].why);
+
+    /* pre-GM200 (each output has its SOR): two outputs of one SOR exclude each other */
+    memset(&AB, 0, sizeof AB);
+    ab_out(0, NV_OUT_DP, 0, 1, 1); ab_out(1, NV_OUT_TMDS, 0, 1, 2);      /* DP and DVI on SOR0, links A and B */
+    ab_out(2, NV_OUT_TMDS, 1, 2, 1); ab_out(3, NV_OUT_CRT, 1, 1, 0);     /* DVI-I: SOR1 + DAC0 */
+    ab_out(4, NV_OUT_TMDS, 2, 4, 1); ab_out(5, NV_OUT_DP, 3, 8, 1); ab_out(6, NV_OUT_CRT, 4, 1, 0);
+    static const u16 gfs[] = { 0xd9, 0xe4, 0x117 };
+    for (size_t i = 0; i < ARRAY_SIZE(gfs); i++) {
+        alloc_setup(gfs[i], &AB);
+        lit = plan(2, (int[]){ 0, 1 }, 148500, 0xF, p);
+        CHECK(lit == 1 && p[1].err == E_NOSPC && strstr(p[1].why, "SOR0 already drives"), "chipset %x: shared SOR: %s", gfs[i], p[1].why);
+        lit = plan(5, (int[]){ 0, 2, 3, 4, 5 }, 148500, 0xF, p);
+        CHECK(lit == 4 && distinct_ors(p, 5) && p[4].err == E_NOSPC, "chipset %x: four of five monitors", gfs[i]);
+        lit = plan(2, (int[]){ 3, 6 }, 148500, 0xF, p);
+        CHECK(lit == 1 && p[1].err == E_NOSPC && strstr(p[1].why, "DAC0 already"), "chipset %x: one DAC, two VGA: %s", gfs[i], p[1].why);
+    }
+    alloc_setup(0x130, &AB);
+    lit = plan(1, (int[]){ 3 }, 148500, 0xF, p);
+    CHECK(lit == 0 && p[0].err == E_NODEV, "GP100: no DACs: %s", p[0].why);
+
+    /* NV50 family: two heads, SORs 0-1 (G94+: 0-3), DACs 0-2 */
+    memset(&AB, 0, sizeof AB);
+    ab_out(0, NV_OUT_TMDS, 0, 1, 1); ab_out(1, NV_OUT_CRT, 0, 1, 0);
+    ab_out(2, NV_OUT_TMDS, 1, 2, 1); ab_out(3, NV_OUT_CRT, 1, 2, 0); ab_out(4, NV_OUT_TV, 2, 4, 0);
+    static const u16 nvs[] = { 0x50, 0x84, 0x94, 0xa3, 0xc4 };
+    for (size_t i = 0; i < ARRAY_SIZE(nvs); i++) {
+        alloc_setup(nvs[i], &AB);
+        lit = plan(3, (int[]){ 0, 2, 3 }, 162000, 0xF, p);
+        CHECK(lit == 2 && p[2].err == E_NOSPC && strstr(p[2].why, "no free head"), "chipset %x: two heads for three monitors", nvs[i]);
+        lit = plan(2, (int[]){ 1, 3 }, 162000, 0xF, p);
+        CHECK(lit == 2 && p[0].or_type == 1 && p[1].or_type == 1 && p[0].or_id == 0 && p[1].or_id == 1, "chipset %x: two VGA monitors", nvs[i]);
+        lit = plan(1, (int[]){ 0 }, 450000, 0xF, p);
+        CHECK(lit == 0 && p[0].err == E_NOSPC, "chipset %x: 450 MHz is too much", nvs[i]);
+    }
+
+    /* the video BIOS lacks VPLL1: head 1 is not used (table 5.0 has VPLL0 only) */
+    build_rom(0x50);
+    alloc_setup(0xe4, &BIOS);
+    lit = plan(2, (int[]){ 0, 1 }, 148500, 0xF, p);
+    CHECK(lit == 1 && p[1].err == E_NOENT && strstr(p[1].why, "VPLL"), "VPLL1 missing: %s", p[1].why);
+    build_rom(0x40);
+    alloc_setup(0xe4, &BIOS);
+    lit = plan(2, (int[]){ 0, 1 }, 148500, 0x3, p);
+    CHECK(lit == 2 && p[1].head == 1, "VPLL0 and VPLL1 in the table: two heads");
+
+    /* random wishes on every chip: never two heads or ORs alike, never more than the heads */
+    memset(&AB, 0, sizeof AB);
+    for (int k = 0; k < 10; k++) ab_out(k, (u8[]){ NV_OUT_TMDS, NV_OUT_DP, NV_OUT_CRT }[k % 3], (u8)k, (u8)(1u << (k % 4)), (u8)(1 + k % 3));
+    static const u16 chips[] = { 0x134, 0x130, 0x124, 0x117, 0xe4, 0xd9, 0xc4, 0xa3, 0x94, 0x84, 0x50 };
+    for (int round = 0; round < 3000; round++) {
+        u16 cs = chips[rnd() % ARRAY_SIZE(chips)];
+        alloc_setup(cs, &AB);
+        int n = 1 + (int)(rnd() % 6), d[8];
+        for (int i = 0; i < n; i++) d[i] = (int)(rnd() % 10);
+        lit = plan(n, d, 25000 + rnd() % 600000, (rnd() % 15) + 1, p);
+        int heads = __builtin_popcount(E.head_mask), ok = distinct_ors(p, n) && lit <= heads;
+        for (int i = 0; i < n; i++) ok &= p[i].err ? p[i].head < 0 && p[i].why[0] : p[i].head >= 0 && (AB.out[d[i]].heads & (1u << p[i].head));
+        CHECK(ok, "random plan on %x (%d wishes, %d lit)", cs, n, lit);
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "-v")) verbose = 1;
     build_rom(0x40);
@@ -1268,9 +1971,14 @@ int main(int argc, char **argv) {
     test_hangs();
     test_dp_training();
     test_scripts();
+    test_streams_10d();
+    for (size_t i = 0; i < ARRAY_SIZE(chips); i++) test_chans(chips[i]);
+    test_chan_hangs();
+    test_alloc();
     if (failed) printf("evotest: %d of %d checks FAILED\n", failed, checks);
-    else printf("evotest: all %d checks passed (generations, method streams of 507d / 827d / 907d / 917d, rasters, object table, VRAM, "
-                "PLLs, DisplayPort, VBIOS tables and scripts, takeover / mode set / restore on %u simulated chips, hangs)\n", checks,
-                (unsigned)ARRAY_SIZE(chips));
+    else printf("evotest: all %d checks passed (generations, method streams of 507d / 827d / 907d / 917d and 507c / 827c / 907c / "
+                "507a, rasters, object table, VRAM, PLLs, DisplayPort, VBIOS tables and scripts, takeover / mode set / restore, base and "
+                "cursor channels, flips, vertical blank on %u simulated chips, hangs, heads and output resources for several monitors)\n",
+                checks, (unsigned)ARRAY_SIZE(chips));
     return failed != 0;
 }

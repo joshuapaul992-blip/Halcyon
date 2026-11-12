@@ -136,8 +136,12 @@ interrupts on, get a working interrupt:
           speed test), README.TXT, VBIOS_PROM.ROM and EDID0.BIN equal to
           what was passed in (mtools on the host); the modesetting driver
           (M10b) registers the card and must not touch it (BOOT.LOG says
-          why); with nvoff, nv.modeset=0 in SETTINGS.INI keeps it from
-          registering at all
+          why), after dry runs of a mode set, a page flip, the hardware
+          cursor and a monitor on every connector (M10d: four heads lit,
+          the fifth monitor without a head); REPORT.TXT has the heads'
+          section; with nvoff, nv.modeset=0 in SETTINGS.INI keeps it from
+          registering at all; with nvset, nv.flip=0, nv.hwcursor=0 and
+          nv.heads=1 must be logged as such (one head registered)
   recycle the Recycle Bin and drag and drop (QEMU fw_cfg recycletest, a kernel
           thread: kernel/apps/recycletest.c): on the FAT32 test disk a file
           goes to the bin and stays, another goes to the bin, its folder is
@@ -234,11 +238,11 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:vgpu", "xhci:uefi:dual", "xhci:bios:arrange", "xhci:bios:multi", "xhci:bios:gpufail", "xhci:uefi:gpuoff",
           "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:bios:ac97+dusk", "xhci:uefi:hda+tide", "xhci:uefi:virtiosnd", "xhci:bios:audio",
           "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:bios:recycle", "xhci:bios:saver", "xhci:uefi:nvfake",
-          "xhci:bios:nvfake+nvoff", "xhci:bios:guard", "xhci:uefi:guardblock",
+          "xhci:bios:nvfake+nvoff", "xhci:bios:nvfake+nvset", "xhci:bios:guard", "xhci:uefi:guardblock",
           "xhci:uefi:install", "xhci:bios:install"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "help": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "vgpu": 0, "dual": 0, "arrange": 0, "multi": 0, "gpufail": 0, "gpuoff": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0,
-            "recycle": 0, "saver": 0, "nvfake": 0, "nvoff": 0, "guard": 0, "guardblock": 0}
+            "recycle": 0, "saver": 0, "nvfake": 0, "nvoff": 0, "nvset": 0, "guard": 0, "guardblock": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -1394,7 +1398,7 @@ def guard_failures(img, want):
     return []
 
 
-def nvfake_failures(text, img, rom, edid):
+def nvfake_failures(text, img, rom, edid, nvset=False, nvoff=False):
     fails = []
     out = os.path.join(BUILD, "ci_nvreport")
     subprocess.run(["rm", "-rf", out], check=True)
@@ -1412,7 +1416,13 @@ def nvfake_failures(text, img, rom, edid):
     if os.path.exists(p):
         rep = open(p, errors="replace").read()
         for want in ("Card 0: NVIDIA GeForce GTX 1070", "DCB 4.1", "HALCYON TEST", "1920x1200 at 60 Hz", "Display driver: firmware frame buffer",
-                     "RAM to screen copy", "MB/s"):
+                     "RAM to screen copy", "MB/s") + \
+                (() if nvoff else
+                 ("Heads: page flips, hardware cursor, vertical blank (M10d)",
+                  "settings: nv.flip=0, nv.hwcursor=0, nv.heads=1 (1 of 4 heads registered)", "head 0: off, 0 kHz; caps vblank;")
+                 if nvset else
+                 ("Heads: page flips, hardware cursor, vertical blank (M10d)", "head 3: off, 0 kHz; caps flip cursor vblank",
+                  "dry run: 4 of 5 monitors can be lit at once")):
             if want not in rep:
                 fails.append("REPORT.TXT lacks '%s'" % want)
     return fails
@@ -1604,10 +1614,20 @@ def run(cfg):
         checks.append(("firmware frame buffer kept", "changes apply at the next start"))
     if "nvoff" in opts:
         checks.append(("nv.modeset=0", "nv0: native modesetting off (nv.modeset=0 in SETTINGS.INI)"))
+    elif "nvset" in opts:
+        checks.append(("modesetting registered with one head", "nv0: native modesetting: GP102 display engine (core class 987d), 1 head, 5 connectors, simulated card"))
+        checks.append(("nv.hwcursor=0, nv.flip=0, nv.heads=1", "nv0: 10d: hardware cursor off (nv.hwcursor=0) (cursor channel 917a, 64x64), page flips off (nv.flip=0) (base channel 927c), vertical blank polled; 1 of 4 heads (nv.heads)"))
+        checks.append(("one monitor at a time", "nv0: dry run: 1 of 5 monitors can be lit at once"))
     elif "nvfake" in opts:
         checks.append(("modesetting registered", "nv0: native modesetting: GP102 display engine (core class 987d), 4 heads, 5 connectors, simulated card"))
         checks.append(("simulated card not touched", "display: NVIDIA GeForce GTX 1070 (nv) failed: simulated card (QEMU test hook): no registers, native modesetting not attempted"))
         checks.append(("dry run of a mode set", "nv0: dry run: 1920x1200 at 153500 kHz on head 0, SOR0 DisplayPort: 56 method words (00040448 00000000 ... 00000000)"))
+        checks.append(("10d registered", "nv0: 10d: hardware cursor on (cursor channel 917a, 64x64), page flips on (base channel 927c), vertical blank polled; 4 of 4 heads; a head drives up to 1080000 kHz"))
+        checks.append(("dry run of a page flip", "nv0: dry run: a page flip on head 0 (base channel 927c): 15 method words (000800a0 00000070 ... 00000000)"))
+        checks.append(("dry run of the cursor", "nv0: dry run: the cursor on head 0: 10 core method words (00080480 85000000 ...), position through channel 13 (class 917a) at 651084"))
+        checks.append(("dry run of four monitors", "nv0: dry run: a monitor on every connector: HDMI-1 on head 3, SOR3, VPLL3"))
+        checks.append(("a fifth monitor has no head", "nv0: dry run: a monitor on every connector: DVI-D-1: no free head for DCB output 6"))
+        checks.append(("10d not attempted", "nv0: 10d: no base or cursor channel started, no scanline read, 4 heads not lit: the simulated card has no registers"))
     if "vgpu" in opts:
         checks.append(("virtio GPU in use", "monitor 1: Virtual-1"))
         checks.append(("firmware frame buffer retired", "display: Default: off"))
@@ -1683,6 +1703,8 @@ def run(cfg):
         ini_lines += ["display.virtio-gpu.guard=start"]
     if "nvoff" in opts:
         ini_lines += ["nv.modeset=0"]
+    if "nvset" in opts:
+        ini_lines += ["nv.flip=0", "nv.hwcursor=0", "nv.heads=1"]
     if "arrange" in opts:
         ini_lines += ["display.primary=Virtual-2", "display.virtual-2.width=800", "display.virtual-2.height=600",
                       "display.virtual-2.x=0", "display.virtual-2.y=0", "display.virtual-2.attach=1",
@@ -1859,7 +1881,7 @@ def run(cfg):
     if "recycle" in opts and not nvme:
         failures += recycle_failures(text, sata, sata_x)
     if nvfake:
-        failures += nvfake_failures(text, img, *nvfake)
+        failures += nvfake_failures(text, img, *nvfake, nvset="nvset" in opts, nvoff="nvoff" in opts)
     if "guard" in opts or "guardblock" in opts:
         failures += guard_failures(img, "start" if "guard" in opts else "blocked")
     if nic:
