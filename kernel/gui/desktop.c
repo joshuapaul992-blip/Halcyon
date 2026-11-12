@@ -816,7 +816,7 @@ static void restart_now(void) {
     sound_shutdown_begin();             /* plays while the log is saved; heard in full before the reset */
     bootlog_save("restart");
     vfs_sync_all();
-    sound_shutdown_wait(4000);
+    sound_shutdown_wait(8000);
     mdelay(400);
     reboot();
 }
@@ -872,7 +872,7 @@ void shutdown_dialog(void) {
         sound_shutdown_begin();
         bootlog_save("shutdown");
         vfs_sync_all();
-        sound_shutdown_wait(4000);
+        sound_shutdown_wait(8000);
         mdelay(500);
         shutdown();
         final_screen("It is now safe to turn off your computer.");

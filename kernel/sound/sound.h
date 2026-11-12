@@ -38,6 +38,13 @@ void sound_event_set_file(int ev, const char *path);
 int  sound_event_loaded(int ev);                /* 1 loaded, 0 not yet, < 0 the file cannot be used (E_*) */
 int  sound_event_ms(int ev);                    /* its length */
 void sound_scheme_save(void);
+/* sound schemes ("Halcyon", "Halcyon Dusk"): they pick the default files;
+ * set applies at once (the changed sounds reload in the background) and is
+ * saved with sound_scheme_save */
+int  sound_scheme_count(void);
+const char *sound_scheme_name(int i);
+int  sound_scheme(void);
+void sound_scheme_set(int i);
 
 /* the master volume from the GUI: applied at once, written to SETTINGS.INI
  * by the background thread about a second after the last change */

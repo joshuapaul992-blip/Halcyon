@@ -1,7 +1,8 @@
 /* Halcyon OS - Sounds and Audio Devices: the master volume and mute, the
  * volume icon in the taskbar, the sound cards (driver, output, rate, state)
- * and the sound scheme: system sounds on or off, each event on or off, a
- * test button and another WAV file per event. Volume and mute apply at once
+ * and the sound scheme: system sounds on or off, the scheme (Halcyon or
+ * Halcyon Dusk; applied at once so Play previews it, Cancel puts it back),
+ * each event on or off, a test button and another WAV file per event. Volume and mute apply at once
  * (Cancel puts them back); the rest applies with Apply / OK and is saved in
  * SETTINGS.INI in the background (sound/sndevent.c). Opened from Control
  * Panel and by a double click on the tray's speaker. */
@@ -16,15 +17,16 @@
 #include "sound/sound.h"
 
 #define SW_W 440
-#define SW_H 566
+#define SW_H 612
 
-enum { ID_MUTE = 10, ID_TRAY, ID_DEVS, ID_SOUNDS_ON, ID_EVENTS, ID_EV_ON, ID_PLAY, ID_BROWSE, ID_DEFAULT, ID_APPLY };
+enum { ID_MUTE = 10, ID_TRAY, ID_DEVS, ID_SOUNDS_ON, ID_EVENTS, ID_EV_ON, ID_PLAY, ID_BROWSE, ID_DEFAULT, ID_APPLY, ID_SCHEME };
 
 typedef struct sndwin {
     int vol0, mute0;                   /* at open: Cancel restores them */
     int scheme_on, tray;               /* pending */
     int enabled[SNDEV_COUNT];
     char *file0[SNDEV_COUNT];          /* the file before a Browse (Cancel restores it), or NULL */
+    int scheme0;                       /* the scheme at open / the last Apply (Cancel restores it) */
     int dirty;
     int ev;                            /* the selected event */
     int drag, hot;
@@ -71,16 +73,17 @@ static void sw_paint(window_t *w, gc_t *g) {
         }
     }
 
-    draw_group(g, mkrect(12, 278, SW_W - 24, 238), "Sounds");
-    gfx_text(g, &font_ui, 26, 324, "Program events:", HEX(0x1C2230));
+    draw_group(g, mkrect(12, 278, SW_W - 24, 284), "Sounds");
+    gfx_text(g, &font_ui, 26, 326, "Sound scheme:", HEX(0x1C2230));
+    gfx_text(g, &font_ui, 26, 370, "Program events:", HEX(0x1C2230));
     char path[VFS_MAX_PATH], line[VFS_MAX_PATH + 64];
     sound_event_file(c->ev, path, sizeof path);
     int st = sound_event_loaded(c->ev);
     if (st == 1) snprintf(line, sizeof line, "%s (%d.%d s)", path, sound_event_ms(c->ev) / 1000, sound_event_ms(c->ev) / 100 % 10);
     else if (st == 0) snprintf(line, sizeof line, "%s (loading)", path);
     else snprintf(line, sizeof line, "%s: cannot be used (%s)", path, st == E_NOTSUP ? "not 8 or 16-bit PCM WAV" : strerror(st));
-    gfx_text(g, &font_ui, 26, 488, "Sound:", HEX(0x4A5060));
-    gfx_text_box(g, &font_ui, mkrect(72, 488, SW_W - 72 - 26, font_ui.height), line, st < 0 ? HEX(0xB02010) : HEX(0x1C2230), 0);
+    gfx_text(g, &font_ui, 26, 534, "Sound:", HEX(0x4A5060));
+    gfx_text_box(g, &font_ui, mkrect(72, 534, SW_W - 72 - 26, font_ui.height), line, st < 0 ? HEX(0xB02010) : HEX(0x1C2230), 0);
 }
 
 /* ---------------- state ---------------- */
@@ -116,6 +119,8 @@ static void update(window_t *w) {
     enable(w, ID_SOUNDS_ON, have);
     int ev = have && c->scheme_on;
     enable(w, ID_EVENTS, ev);
+    enable(w, ID_SCHEME, ev);
+    widget_find(w, ID_SCHEME)->value = sound_scheme();
     enable(w, ID_EV_ON, ev);
     enable(w, ID_PLAY, have && sound_event_loaded(c->ev) == 1);
     enable(w, ID_BROWSE, have);
@@ -157,6 +162,7 @@ static void apply(window_t *w) {
         kfree(c->file0[i]);                /* the Browse choices stay */
         c->file0[i] = NULL;
     }
+    c->scheme0 = sound_scheme();
     sound_scheme_save();
     c->vol0 = snd_volume();                /* (Cancel after Apply keeps them) */
     c->mute0 = snd_muted();
@@ -194,6 +200,23 @@ static void choose_file(window_t *w, const char *path) {
         c->file0[c->ev] = strdup(f ? f : "");
     }
     sound_event_set_file(c->ev, path);
+    set_dirty(w);
+}
+/* a scheme replaces the files of the events it has sounds for (as on
+ * Windows); applied at once, so Play previews it */
+static void on_scheme(window_t *w, widget_t *lb) {
+    sndwin_t *c = w->data;
+    if (lb->value < 0 || lb->value >= sound_scheme_count() || lb->value == sound_scheme()) return;
+    int ev0 = c->ev;
+    sound_scheme_set(lb->value);
+    const int evs[] = { SNDEV_STARTUP, SNDEV_SHUTDOWN };
+    for (int i = 0; i < 2; i++) {
+        char key[48];
+        snprintf(key, sizeof key, "sound.file.%s", sound_event_key(evs[i]));
+        const char *f = settings_get(key, NULL);
+        if (f && *f) { c->ev = evs[i]; choose_file(w, NULL); }
+    }
+    c->ev = ev0;
     set_dirty(w);
 }
 static void on_browse(window_t *w, widget_t *b) {
@@ -259,6 +282,7 @@ static int sw_close(window_t *w) {
     if (!c) return 1;
     /* Cancel / close: the volume and the files chosen with Browse go back */
     if (snd_volume() != c->vol0 || snd_muted() != c->mute0) sound_volume_set(c->vol0, c->mute0);
+    if (sound_scheme() != c->scheme0) sound_scheme_set(c->scheme0);
     for (int i = 0; i < SNDEV_COUNT; i++)
         if (c->file0[i]) { sound_event_set_file(i, c->file0[i][0] ? c->file0[i] : NULL); kfree(c->file0[i]); c->file0[i] = NULL; }
     return 1;
@@ -279,6 +303,7 @@ void app_sound(void) {
     c->vol0 = snd_volume();
     c->mute0 = snd_muted();
     c->scheme_on = sound_scheme_on();
+    c->scheme0 = sound_scheme();
     c->tray = sound_tray_enabled();
     for (int i = 0; i < SNDEV_COUNT; i++) c->enabled[i] = sound_event_enabled(i);
     window_t *w = wm_create("Sounds and Audio Devices", ICON_SPEAKER, -1, -1, SW_W, SW_H, WF_NO_MAXIMIZE);
@@ -301,18 +326,27 @@ void app_sound(void) {
     widget_t *so = widget_add(w, W_CHECKBOX, mkrect(26, 298, 300, 18), "Play system sounds", ID_SOUNDS_ON);
     so->value = c->scheme_on;
     so->on_change = on_sounds_on;
-    widget_t *el = widget_add(w, W_LISTBOX, mkrect(26, 342, SW_W - 52, 5 * 18 + 2), "", ID_EVENTS);
+    widget_t *sl = widget_add(w, W_LISTBOX, mkrect(120, 322, SW_W - 26 - 120, 2 * 18 + 2), "", ID_SCHEME);
+    {
+        char *items[8];
+        int n = MIN(sound_scheme_count(), 8);
+        for (int i = 0; i < n; i++) items[i] = (char *)sound_scheme_name(i);
+        widget_list_set(w, sl, items, n);
+        sl->value = sound_scheme();
+    }
+    sl->on_change = on_scheme;
+    widget_t *el = widget_add(w, W_LISTBOX, mkrect(26, 388, SW_W - 52, 5 * 18 + 2), "", ID_EVENTS);
     el->on_change = on_event_sel;
     el->on_activate = on_event_activate;
-    widget_t *eo = widget_add(w, W_CHECKBOX, mkrect(26, 448, 110, 22), "Enabled", ID_EV_ON);
+    widget_t *eo = widget_add(w, W_CHECKBOX, mkrect(26, 494, 110, 22), "Enabled", ID_EV_ON);
     eo->on_change = on_ev_on;
-    widget_t *pl = widget_add(w, W_BUTTON, mkrect(SW_W - 26 - 3 * 75 - 2 * 6, 448, 75, 23), "Play", ID_PLAY);
+    widget_t *pl = widget_add(w, W_BUTTON, mkrect(SW_W - 26 - 3 * 75 - 2 * 6, 494, 75, 23), "Play", ID_PLAY);
     pl->on_click = on_play;
     strlcpy(pl->tip, "Play this sound (also when it is off)", sizeof pl->tip);
-    widget_t *br = widget_add(w, W_BUTTON, mkrect(SW_W - 26 - 2 * 75 - 6, 448, 75, 23), "Browse...", ID_BROWSE);
+    widget_t *br = widget_add(w, W_BUTTON, mkrect(SW_W - 26 - 2 * 75 - 6, 494, 75, 23), "Browse...", ID_BROWSE);
     br->on_click = on_browse;
     strlcpy(br->tip, "Choose another WAV file for this event", sizeof br->tip);
-    widget_t *df = widget_add(w, W_BUTTON, mkrect(SW_W - 26 - 75, 448, 75, 23), "Default", ID_DEFAULT);
+    widget_t *df = widget_add(w, W_BUTTON, mkrect(SW_W - 26 - 75, 494, 75, 23), "Default", ID_DEFAULT);
     df->on_click = on_default;
     strlcpy(df->tip, "Use Halcyon's own sound for this event", sizeof df->tip);
 

@@ -211,6 +211,11 @@ Halcyon's negative `E_*` codes.
   `warning`, `info`, `question`, `notify`, `devadd`, `devremove`, `default`),
   `sound.file.<key>` names another WAV file (8 or 16-bit PCM, mono or stereo,
   any rate the mixer takes, up to 8 MB). `sound.tray=0` hides the volume icon.
+  `sound.scheme=dusk` chooses the Halcyon Dusk scheme (below), which only
+  changes the default startup and shutdown files; Sounds and Audio Devices
+  lists the schemes, applies a choice at once so Play previews it (Cancel
+  puts it back), and replaces a startup or shutdown file chosen with
+  Browse, as Windows does. Shutdown waits up to 8 s for its sound.
 
 ### The sounds themselves
 
@@ -228,6 +233,16 @@ longer for width). The script is deterministic.
   settling on an A-C-F bell chord.
 - Shutdown (2.7 s, stereo), in D minor (F major's relative minor): bells
   falling F, D, A to a low D over a D-minor pad.
+- Halcyon Dusk, the optional scheme (A-flat major and its relative minor,
+  F minor; built with a filtered-noise sweep, a sine sub bass and a
+  ping-pong echo before the reverb):
+  - Startup (`DUSKSTRT.WAV`, 8 s, stereo): IV (D-flat major 9) and V
+    (E-flat sus4 resolving to E-flat) under bells rising left to right and
+    right to left and a noise swell, landing at 3 s on a wide A-flat add9
+    chord with sub bass, a bell chord and an echoing high shimmer.
+  - Shutdown (`DUSKSHUT.WAV`, 6 s, stereo): F-minor-7 bells falling C, A-flat,
+    F, E-flat, C over a closing noise sweep, then iv (D-flat major 7), V7
+    (C7, its E natural pulling to F) and a low F-minor chord with sub bass.
 - Error: two low inharmonic knocks, the second lower. Warning: one bell with
   a small downward bend. Information: two light mallet notes rising.
   Question: three soft notes rising like a voice asking. Notification: a
@@ -235,7 +250,7 @@ longer for width). The script is deterministic.
   down. Default: one short soft ding.
 
 They are 16-bit PCM at 22.05 kHz (startup and shutdown stereo, the rest mono),
-under 1 MB together. They are Halcyon's own and do not imitate any other
+about 2 MB together with the Dusk pair. They are Halcyon's own and do not imitate any other
 system's sounds. The script also writes a 13-second piece for Media Player,
 `C:\Documents\Music\Halcyon Dawn.wav`, encoded with its own IMA ADPCM
 encoder (so the image carries a compressed file to play).

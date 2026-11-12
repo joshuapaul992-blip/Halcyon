@@ -13,11 +13,14 @@ right for width). Deterministic: the same script makes the same files.
 The sounds are Halcyon's own: a rising F-major-9 arpeggio of glassy bells
 over a slow pad for startup, a falling D-minor figure (the relative minor)
 for shutdown, and
-short motifs for the message box icons, balloons and USB devices. They do
+short motifs for the message box icons, balloons and USB devices. The
+"Halcyon Dusk" scheme adds a longer startup (A-flat major: IV, V, then a
+wide I-add9 with a noise swell and echoing shimmer) and shutdown (F minor:
+falling bells, iv, V7, i) as DUSKSTRT.WAV and DUSKSHUT.WAV. They do
 not copy or imitate any other system's sounds.
 
 All files are 22050 Hz (startup and shutdown stereo, the rest mono), so the
-set stays under 1 MB on the boot disk. C:\\HALCYON\\MEDIA\\ gets them
+set, Dusk included, stays near 2 MB on the boot disk. C:\\HALCYON\\MEDIA\\ gets them
 (tools/mkimage.sh); kernel/sound/sndevent.c names them. A 13-second demo
 piece for Media Player, "Halcyon Dawn", goes to OUTDIR/music as 4-bit IMA
 ADPCM (encoded here) and from there to C:\\Documents\\Music.
@@ -177,6 +180,57 @@ def reverb(track, wet=0.25, size=1.0, damp=0.35, feedback=0.78):
             c[k] = dry[k] + acc[k] * wet * 0.25
 
 
+def noise_sweep(dur, f0, f1, rise=True, seed=1):
+    """white noise through a low-pass whose cutoff glides f0 -> f1; swells in
+    (rise) or dies away; deterministic"""
+    out = []
+    n = int(dur * RATE)
+    x = seed
+    y1 = y2 = 0.0
+    for k in range(n):
+        p = k / n
+        x = (x * 1103515245 + 12345) & 0x7FFFFFFF
+        v = x / 0x3FFFFFFF - 1.0
+        fc = f0 * (f1 / f0) ** p
+        a = math.exp(-TAU * fc / RATE)
+        y1 = (1 - a) * v + a * y1             # two poles: a softer hiss
+        y2 = (1 - a) * y1 + a * y2
+        e = p * p * p if rise else (1 - p) ** 2
+        out.append(y2 * e * 2.5)
+    fade(out, 0.05)
+    return out
+
+
+def sub(freq, dur, attack=0.02, decay=1.2, drop=0.0):
+    """a sine sub bass with a little drop in pitch at the start"""
+    out = []
+    ph = 0.0
+    n = int(dur * RATE)
+    for k in range(n):
+        t = k / RATE
+        f = freq * (1 + drop * math.exp(-t / 0.08))
+        ph += TAU * f / RATE
+        a = min(1.0, t / attack) * math.exp(-t / decay)
+        out.append(a * (math.sin(ph) + 0.15 * math.sin(2 * ph)))
+    fade(out, 0.05)
+    return out
+
+
+def pingpong(track, delay, feedback=0.35, wet=0.3):
+    """an echo that bounces between left and right (stereo tracks)"""
+    if len(track.ch) != 2:
+        return
+    d = int(delay * RATE)
+    L, R = track.ch
+    el, er = [0.0] * track.n, [0.0] * track.n
+    for k in range(d, track.n):
+        el[k] = R[k - d] * 0.5 + L[k - d] * 0.2 + er[k - d] * feedback
+        er[k] = L[k - d] * 0.5 + R[k - d] * 0.2 + el[k - d] * feedback
+    for k in range(track.n):
+        L[k] += el[k] * wet
+        R[k] += er[k] * wet
+
+
 def write_wav(path, track, peak=0.72):
     """normalise to peak (of full scale) and write 16-bit PCM"""
     m = max(max(abs(v) for v in c) for c in track.ch) or 1.0
@@ -224,6 +278,89 @@ def s_shutdown():
     b = fm_bell(note("D4"), 1.9, ratio=2.0, index=1.0, decay=0.7, idecay=0.3)
     t.add(0.6, b, 0.3, 0.0)
     reverb(t, wet=0.35, size=1.1)
+    return t
+
+
+def dusk_bell(name, dur=1.8, bright=1.8):
+    b = fm_bell(note(name), dur, ratio=3.5, index=bright, decay=0.6, idecay=0.2)
+    lowpass(b, 5500)
+    return b
+
+
+def s_dusk_startup():
+    """Halcyon Dusk, A-flat major (8 s): IV (D-flat maj9) and V (E-flat
+    sus4 -> E-flat) under rising bells and a noise swell, landing on a wide
+    A-flat add9 with sub bass, a bell chord and an echoing shimmer"""
+    t = Track(8.0, stereo=True)
+    # IV: D-flat major 9
+    t.add(0.0, pad([note(n) for n in ("C#3", "G#3", "C4", "F4", "D#5")], 1.9, attack=0.9, release=0.6,
+                   harmonics=5, detune=0.006), 0.5)
+    t.add(0.0, sub(note("C#2"), 1.6, attack=0.3, decay=1.0), 0.35)
+    for name, at, pan in (("C#5", 0.15, -0.6), ("F5", 0.40, -0.3), ("G#5", 0.65, 0.0), ("C6", 0.90, 0.3)):
+        t.add(at, dusk_bell(name), 0.26, pan)
+    # V: E-flat sus4 resolving to E-flat
+    t.add(1.5, pad([note(n) for n in ("D#3", "A#3", "G#4", "D#5")], 0.85, attack=0.15, release=0.3,
+                   harmonics=5, detune=0.006), 0.5)
+    t.add(2.25, pad([note(n) for n in ("D#3", "A#3", "G4", "D#5")], 0.85, attack=0.1, release=0.25,
+                    harmonics=5, detune=0.006), 0.5)
+    t.add(1.5, sub(note("D#2"), 1.5, attack=0.05, decay=1.0), 0.35)
+    for name, at, pan in (("D#5", 1.60, 0.6), ("G5", 1.85, 0.3), ("A#5", 2.10, 0.0), ("D#6", 2.35, -0.3),
+                          ("G6", 2.60, -0.6)):
+        t.add(at, dusk_bell(name, 1.4), 0.22, pan)
+    sw = noise_sweep(2.2, 200, 7000, rise=True, seed=7)
+    t.add(0.8, sw, 0.05, -0.2)
+    t.add(0.8, noise_sweep(2.2, 220, 7600, rise=True, seed=11), 0.05, 0.2)
+    # I: A-flat add9, wide
+    t.add(3.0, sub(note("G#1"), 4.2, attack=0.01, decay=1.6, drop=0.25), 0.6)
+    t.add(3.0, pad([note(n) for n in ("G#2", "D#3", "G#3", "C4", "A#4", "C5")], 5.0, attack=0.04, release=3.2,
+                   harmonics=6, detune=0.007, bright=1.3), 0.55)
+    for name, pan in (("C5", -0.7), ("D#5", 0.7), ("G#5", -0.35), ("C6", 0.35), ("G#6", 0.0)):
+        b = fm_bell(note(name), 3.4, ratio=2.0, index=1.3, decay=1.2, idecay=0.5)
+        lowpass(b, 6500)
+        t.add(3.0, b, 0.2, pan)
+    for k, (name, at) in enumerate((("G#6", 3.45), ("C7", 3.75), ("A#6", 4.05), ("G6", 4.35), ("D#6", 4.8),
+                                    ("G#6", 5.3))):
+        b = fm_bell(note(name), 1.2, ratio=3.5, index=1.0, decay=0.35, idecay=0.1)
+        lowpass(b, 7000)
+        t.add(at, b, 0.09 - k * 0.008, -0.5 if k % 2 else 0.5)
+    pingpong(t, 0.27, feedback=0.4, wet=0.35)
+    reverb(t, wet=0.45, size=1.35, feedback=0.82)
+    return t
+
+
+def s_dusk_shutdown():
+    """Halcyon Dusk, F minor (6 s): F-minor-7 bells falling over a closing
+    noise sweep, then iv (D-flat maj7), V7 (C7) and a low F-minor chord"""
+    t = Track(6.0, stereo=True)
+    t.add(0.0, noise_sweep(1.4, 6000, 250, rise=False, seed=3), 0.06, 0.3)
+    t.add(0.0, noise_sweep(1.4, 6400, 260, rise=False, seed=5), 0.06, -0.3)
+    t.add(0.0, pad([note(n) for n in ("F3", "C4", "G#4", "D#5")], 1.6, attack=0.15, release=0.5,
+                   harmonics=5, detune=0.006), 0.5)
+    for name, at, pan in (("C6", 0.0, 0.6), ("G#5", 0.17, 0.3), ("F5", 0.34, 0.0), ("D#5", 0.51, -0.3),
+                          ("C5", 0.68, -0.6)):
+        t.add(at, dusk_bell(name, 1.5), 0.25, pan)
+    # iv: D-flat major 7
+    t.add(1.4, pad([note(n) for n in ("C#3", "G#3", "C4", "F4")], 1.25, attack=0.2, release=0.4,
+                   harmonics=5, detune=0.006), 0.5)
+    t.add(1.4, sub(note("C#2"), 1.2, attack=0.05, decay=0.9), 0.35)
+    t.add(1.45, dusk_bell("C5", 1.5), 0.24, 0.3)
+    t.add(1.75, dusk_bell("G#4", 1.5), 0.24, -0.3)
+    # V7: C7 (the E natural pulls back to F)
+    t.add(2.5, pad([note(n) for n in ("C3", "G3", "E4", "A#4")], 0.9, attack=0.1, release=0.35,
+                   harmonics=5, detune=0.006), 0.5)
+    t.add(2.5, sub(note("C2"), 0.9, attack=0.03, decay=0.8), 0.35)
+    t.add(2.55, dusk_bell("E5", 1.3), 0.24, 0.4)
+    t.add(2.85, dusk_bell("G4", 1.3), 0.22, -0.4)
+    # i: F minor, low and long
+    t.add(3.3, sub(note("F1"), 2.7, attack=0.01, decay=1.3, drop=0.2), 0.6)
+    t.add(3.3, pad([note(n) for n in ("F2", "C3", "F3", "G#3", "C4")], 2.7, attack=0.04, release=2.3,
+                   harmonics=6, detune=0.007, bright=1.4), 0.55)
+    for name, pan, g in (("F4", -0.3, 0.24), ("C5", 0.3, 0.18), ("G#5", 0.0, 0.12)):
+        b = fm_bell(note(name), 2.6, ratio=2.0, index=1.1, decay=1.0, idecay=0.45)
+        lowpass(b, 5000)
+        t.add(3.3, b, g, pan)
+    pingpong(t, 0.31, feedback=0.35, wet=0.3)
+    reverb(t, wet=0.42, size=1.3, feedback=0.8)
     return t
 
 
@@ -380,14 +517,14 @@ def write_ima_wav(path, track, peak=0.7, block=1024):
 SOUNDS = [("STARTUP.WAV", s_startup), ("SHUTDOWN.WAV", s_shutdown), ("ERROR.WAV", s_error),
           ("WARNING.WAV", s_warning), ("INFO.WAV", s_info), ("QUESTION.WAV", s_question),
           ("NOTIFY.WAV", s_notify), ("DEVADD.WAV", s_devadd), ("DEVREM.WAV", s_devremove),
-          ("DEFAULT.WAV", s_default)]
+          ("DEFAULT.WAV", s_default), ("DUSKSTRT.WAV", s_dusk_startup), ("DUSKSHUT.WAV", s_dusk_shutdown)]
 
 
 def main():
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
     for name, fn in SOUNDS:
-        write_wav(os.path.join(out, name), fn(), peak=0.72 if name in ("STARTUP.WAV", "SHUTDOWN.WAV") else 0.6)
+        write_wav(os.path.join(out, name), fn(), peak=0.72 if name in ("STARTUP.WAV", "SHUTDOWN.WAV", "DUSKSTRT.WAV", "DUSKSHUT.WAV") else 0.6)
     # a demo for Media Player (C:\Documents\Music), as IMA ADPCM
     os.makedirs(os.path.join(out, "music"), exist_ok=True)
     write_ima_wav(os.path.join(out, "music", "Halcyon Dawn.wav"), s_demo())

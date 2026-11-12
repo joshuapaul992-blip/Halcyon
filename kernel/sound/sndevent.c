@@ -11,9 +11,14 @@
  * (snd_play_static) for the audio thread. Replaced sounds are freed only
  * after they can no longer be playing.
  *
- * Settings: sound.sounds (0 = no system sounds), sound.event.<key> (0 =
- * this one off), sound.file.<key> (another WAV file), sound.tray (the volume
- * icon), and the base layer's sound.volume / sound.mute. */
+ * Schemes choose the default files: "Halcyon" (the files named after the
+ * events) or "Halcyon Dusk" (a longer startup and shutdown sound in A-flat
+ * major / F minor; the other events as in "Halcyon").
+ *
+ * Settings: sound.sounds (0 = no system sounds), sound.scheme (dusk; absent
+ * = Halcyon), sound.event.<key> (0 = this one off), sound.file.<key>
+ * (another WAV file), sound.tray (the volume icon), and the base layer's
+ * sound.volume / sound.mute. */
 #include "sound/snddev.h"
 #include "sound/sound.h"
 #include "core/kernel.h"
@@ -41,6 +46,14 @@ static const struct { const char *key, *label, *file; } evinfo[SNDEV_COUNT] = {
     { "devremove", "Device Disconnect", "DEVREM.WAV" },
     { "default", "Default Sound", "DEFAULT.WAV" },
 };
+
+/* sound schemes: a default file for some events (NULL = the event's own) */
+static const struct { const char *key, *name, *file[SNDEV_COUNT]; } schemes[] = {
+    { "", "Halcyon", { NULL } },
+    { "dusk", "Halcyon Dusk", { [SNDEV_STARTUP] = "DUSKSTRT.WAV", [SNDEV_SHUTDOWN] = "DUSKSHUT.WAV" } },
+};
+#define SCHEME_COUNT (int)(sizeof schemes / sizeof schemes[0])
+static int scheme;
 
 typedef struct sysnd {
     u8 *buf;                        /* the whole file (the samples point into it) */
@@ -131,7 +144,7 @@ void sound_event_file(int ev, char *out, int n) {
     snprintf(key, sizeof key, "sound.file.%s", evinfo[ev].key);
     const char *f = settings_get(key, NULL);
     if (f && *f) strlcpy(out, f, n);
-    else boot_media(out, n, evinfo[ev].file);
+    else boot_media(out, n, schemes[scheme].file[ev] ? schemes[scheme].file[ev] : evinfo[ev].file);
 }
 
 /* (the worker thread; blocks on the disk) */
@@ -241,6 +254,20 @@ void sound_event_set_file(int ev, const char *path) {
     wake();
 }
 
+int sound_scheme_count(void) { return SCHEME_COUNT; }
+const char *sound_scheme_name(int i) { return i >= 0 && i < SCHEME_COUNT ? schemes[i].name : ""; }
+int sound_scheme(void) { return scheme; }
+void sound_scheme_set(int i) {
+    if (i < 0 || i >= SCHEME_COUNT || i == scheme) return;
+    for (int ev = 0; ev < SNDEV_COUNT; ev++)
+        if (schemes[i].file[ev] != schemes[scheme].file[ev]) {
+            evs[ev].state = evs[ev].state == 1 ? 1 : 0;
+            reload_mask |= 1u << ev;
+        }
+    scheme = i;
+    wake();
+}
+
 static void request_save(u64 delay_ms) {
     u64 at = time_ms() + delay_ms;
     if (!save_pending || at > save_at) save_at = at;
@@ -252,6 +279,7 @@ void sound_scheme_save(void) {
     char key[48];
     settings_set_int("sound.sounds", scheme_on);
     settings_set_int("sound.tray", tray_on);
+    settings_set("sound.scheme", scheme ? schemes[scheme].key : NULL);
     for (int i = 0; i < SNDEV_COUNT; i++) {
         snprintf(key, sizeof key, "sound.event.%s", evinfo[i].key);
         settings_set(key, enabled[i] ? NULL : "0");     /* on is the default */
@@ -331,6 +359,10 @@ void sound_settings_loaded(void) {
     char key[48];
     scheme_on = settings_get_int("sound.sounds", 1) ? 1 : 0;
     tray_on = settings_get_int("sound.tray", 1) ? 1 : 0;
+    const char *sk = settings_get("sound.scheme", "");
+    scheme = 0;
+    for (int i = 1; i < SCHEME_COUNT; i++)
+        if (sk && !strcmp(sk, schemes[i].key)) scheme = i;
     for (int i = 0; i < SNDEV_COUNT; i++) {
         snprintf(key, sizeof key, "sound.event.%s", evinfo[i].key);
         enabled[i] = settings_get_int(key, 1) ? 1 : 0;
