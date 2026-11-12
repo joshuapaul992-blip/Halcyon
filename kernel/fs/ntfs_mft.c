@@ -483,11 +483,11 @@ static int rec_attr_ok(ntfs_t *fs, const u8 *rec, u32 pos, u32 used) {
     const ntfs_attr_t *a = (const ntfs_attr_t *)(rec + pos);
     if (pos + 16 > used) return 0;
     u32 len = a->length;
-    if (len < NTFS_ATTR_RESIDENT_HDR || (len & 7) || pos + len + 4 > used) return 0;
+    if (len < NTFS_ATTR_RESIDENT_HDR || (len & 7) || (u64)pos + len + 4 > used) return 0;
     if (a->non_resident > 1) return 0;
     if (a->name_length && (u32)a->name_offset + 2u * a->name_length > len) return 0;
     if (!a->non_resident) {
-        if ((u32)a->r.value_offset + a->r.value_length > len) return 0;
+        if ((u64)a->r.value_offset + a->r.value_length > len) return 0;
         if (a->r.value_length && a->r.value_offset < NTFS_ATTR_RESIDENT_HDR) return 0;
     } else {
         if (len < NTFS_ATTR_NONRES_HDR) return 0;

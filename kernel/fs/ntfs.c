@@ -313,8 +313,9 @@ static int names_update(ntfs_t *fs, nino_t *ino) {
     r = nt_attr_first(ino, &c, NTFS_AT_FILE_NAME, NULL, 0, 0);
     while (!r) {
         ntfs_attr_t *a = ac_attr(&c);
-        if (!a->non_resident && a->r.value_length >= sizeof(ntfs_file_name_t)) {
-            ntfs_file_name_t *fn = (ntfs_file_name_t *)attr_value(a);
+        ntfs_file_name_t *fn = (ntfs_file_name_t *)attr_value(a);
+        if (!a->non_resident && a->r.value_length >= sizeof(ntfs_file_name_t) && a->r.value_length <= NT_FN_MAX &&
+            sizeof(ntfs_file_name_t) + 2u * fn->name_length <= a->r.value_length) {
             fn->creation_time = si.ct;
             fn->data_change_time = si.mt;
             fn->mft_change_time = si.rt;
@@ -1404,7 +1405,8 @@ static int fn_attr_remove(nino_t *ino, const ntfs_file_name_t *fn) {
     while (!r) {
         ntfs_attr_t *a = ac_attr(&c);
         ntfs_file_name_t *x = (ntfs_file_name_t *)attr_value(a);
-        if (!a->non_resident && a->r.value_length >= sizeof *x && x->parent == fn->parent &&
+        if (!a->non_resident && a->r.value_length >= sizeof *x &&
+            sizeof *x + 2u * x->name_length <= a->r.value_length && x->parent == fn->parent &&
             x->name_type == fn->name_type && x->name_length == fn->name_length &&
             !memcmp(x->name, fn->name, 2u * fn->name_length))
             return nt_attr_remove(ino, &c);
