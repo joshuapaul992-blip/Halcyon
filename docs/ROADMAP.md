@@ -54,9 +54,53 @@
 ## Planned (in recommended order)
 
 ### M8: Polish
-- Settings that survive a reboot; installer to the internal disk; Explorer
-  drag-and-drop, multiple selection, Recycle Bin; Notepad undo and word wrap;
-  screensaver; help viewer.
+
+Halcyon becomes something you can install and live in day to day.
+
+- **Installer:** "Install Halcyon" (Start menu, and offered when Halcyon
+  starts from a USB stick or CD). It installs to an internal SATA or NVMe disk.
+  - Choices: the whole disk (erased after a confirmation naming the disk,
+    its size and what is on it) or the free space next to existing
+    partitions. Existing partitions are never shrunk.
+  - Partitioning: GPT with an EFI system partition on UEFI machines; MBR
+    with an active FAT32 partition on BIOS machines. The disk boots both
+    ways when the layout allows it.
+  - Halcyon's boot code and loaders, the kernel, programs, system sounds and
+    the sample documents are copied, then verified. The installed system
+    keeps the user's settings from the stick.
+  - Windows on the same disk stays bootable: its EFI files are kept, and
+    the firmware or BIOS boot menu chooses.
+- **Explorer:**
+  - Multiple selection: Ctrl and Shift clicks, a rubber band, Ctrl+A, and
+    the keyboard.
+  - Drag and drop between Explorer windows, the desktop and the Recycle Bin.
+    Within a drive it moves, across drives it copies; Ctrl copies and Shift
+    moves. Files dropped on Notepad, Paint or Media Player open there.
+  - Recycle Bin: deleted files go to a hidden per-drive folder with the
+    original path and date, and can be restored or emptied. A desktop icon
+    shows when it is full. Shift+Delete and removable drives delete for good,
+    after a confirmation, as on Windows.
+- **Notepad:** multi-level undo and redo, and word wrap (Format menu,
+  remembered), with the status bar's line and column following wrapped
+  lines.
+- **Screen saver:** a Screen Saver tab in Display Properties: a choice of
+  screen savers, the wait time and a preview. Halcyon's own screen savers
+  are blank, starfield, drifting lines and a bouncing Halcyon logo, plus
+  scrolling text with its own settings. Screen savers are programs (`.SCR`)
+  in `C:\PROGRAMS`, ended by the mouse or a key.
+- **Help:** a help viewer with contents, an index and search, for
+  Halcyon's own help pages (`C:\HALCYON\HELP`). F1 in the built-in programs
+  opens their page, and Start → Help and Support opens the contents.
+- **Settings that survive a reboot, everywhere:** every choice a user makes
+  is kept in `SETTINGS.INI` (window positions and sizes, Explorer's view and
+  sort order, Notepad's font and wrap, Paint's colours, desktop icon
+  positions, the screen saver, mouse speed and double-click time), and
+  written atomically so a power cut never loses the file.
+- Tests: an install into a blank virtual disk, then booting it (BIOS and
+  UEFI) in the boot matrix; host tests for the Recycle Bin, undo and the
+  settings file; screenshots of the new dialogs.
+- Depends on M3 (Format, the file system layer), M7.5 (reading the
+  Windows partitions next to the install) and M9 (user-mode programs).
 
 ### M10: NVIDIA graphics (Kelvin up to Pascal)
 
