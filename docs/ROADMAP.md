@@ -32,10 +32,15 @@
    TLS 1.2) for programs, WGET and a small web browser. See
    docs/DESIGN-M6.md and docs/DESIGN-M6-WEB.md.
 
-## Planned (in recommended order)
+7. **Audio:** sound cards (Intel HD Audio with codec path finding and jack
+   sensing, AC'97, virtio-sound, ES1370, Sound Blaster 16, PC-speaker
+   beeps), a mixer and audio thread, sound streams for programs, Halcyon's own
+   synthesized system sounds, the taskbar volume control and volume keys,
+   Sounds and Audio Devices, and Media Player for WAV files. The version
+   string gained the build number (1.0.<commits>) and pre-release builds a
+   desktop watermark. See docs/DESIGN-M7.md.
 
-### M7: Audio
-- Intel HD Audio, AC'97 (QEMU), a startup sound, a system call API for sound.
+## Planned (in recommended order)
 
 ### M7.5: NTFS (read and write)
 
