@@ -2642,6 +2642,7 @@ static void s_hostile(void) {
 
 #include "isotest.c"
 #include "ntfstest.c"
+#include "recycletest.c"
 
 typedef struct { const char *name; void (*fn)(void); } scen_t;
 
@@ -3477,6 +3478,7 @@ static const scen_t scenarios[] = {
     { "gpt", s_gpt }, { "4k", s_4k }, { "misc", s_misc }, { "random", s_random }, { "testdisks", s_testdisks },
     { "hostile", s_hostile }, { "unicode", s_unicode }, { "format", s_format }, { "iso", s_iso }, { "exfat", s_exfat },
     { "ntfs", s_ntfs }, { "ntfsw", s_ntfsw }, { "ntfssafe", s_ntfssafe }, { "ntfsbig", s_ntfsbig }, { "ntfsdbg", s_ntfsdbg },
+    { "recycle", s_recycle },
 };
 
 int main(int argc, char **argv) {
