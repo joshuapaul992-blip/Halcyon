@@ -6,9 +6,13 @@
 #include "core/kernel.h"
 #include "core/kmath.h"
 #include "core/settings.h"
+#include "sound/sound.h"
 #include "version.h"
 
-#define CP_W 560
+#define CP_W 620
+#define COL_W ((CP_W - 36) / 2)  /* two columns of groups */
+#define COL2 (24 + COL_W)
+#define LB_X (12 + (COL_W - 238) / 2)   /* the theme and wallpaper lists, centred under the preview */
 #define CP_H 420
 #define BANNER_H 58
 #define NWP 4
@@ -263,14 +267,14 @@ static void cp_paint(window_t *w, gc_t *g) {
     gfx_text(g, &font_ui, 57, 34, "Personalize Halcyon and review your system.", color_lighten(th->menu_header_top, 150));
 
     /* appearance */
-    draw_group(g, mkrect(12, 68, 262, 304), "Appearance");
-    draw_preview(g, c, 12 + (262 - TH_W - 16) / 2, 88);
+    draw_group(g, mkrect(12, 68, COL_W, 304), "Appearance");
+    draw_preview(g, c, 12 + (COL_W - TH_W - 16) / 2, 88);
 
     /* date and time */
     struct rtc_time tm;
     rtc_read(&tm);
     c->last_sec = tm.second;
-    rect_t dg = mkrect(286, 68, 262, 118);
+    rect_t dg = mkrect(COL2, 68, COL_W, 118);
     draw_group(g, dg, "Date and Time");
     draw_clock(g, dg.x + 54, dg.y + 64, 40, &tm);
     static const char *days[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
@@ -288,7 +292,7 @@ static void cp_paint(window_t *w, gc_t *g) {
     gfx_text(g, &font_ui, tx, dg.y + 67, t3, HEX(0x1C2230));
 
     /* system */
-    rect_t sg = mkrect(286, 196, 262, 176);
+    rect_t sg = mkrect(COL2, 196, COL_W, 176);
     draw_group(g, sg, "System");
     struct mm_stats st;
     mm_get_stats(&st);
@@ -355,6 +359,7 @@ static void on_ok(window_t *w, widget_t *b) { apply(w); wm_close(w); }
 static void on_cancel(window_t *w, widget_t *b) { wm_close(w); }
 static void on_keyboard(window_t *w, widget_t *b) { app_keyboard(); }
 static void on_network(window_t *w, widget_t *b) { (void)w; (void)b; app_network(); }
+static void on_sound(window_t *w, widget_t *b) { (void)w; (void)b; app_sound(); }
 static void on_timezone(window_t *w, widget_t *b) { (void)b; app_timezone(w); }
 
 static void cp_tick(window_t *w) {
@@ -388,17 +393,17 @@ void app_control(void) {
     w->on_tick = cp_tick;
     w->on_destroy = cp_destroy;
 
-    widget_t *l1 = widget_add(w, W_LABEL, mkrect(24, 272, 110, 16), "Theme:", 0);
-    widget_t *l2 = widget_add(w, W_LABEL, mkrect(148, 272, 110, 16), "Wallpaper:", 0);
+    widget_t *l1 = widget_add(w, W_LABEL, mkrect(LB_X, 272, 110, 16), "Theme:", 0);
+    widget_t *l2 = widget_add(w, W_LABEL, mkrect(LB_X + 124, 272, 110, 16), "Wallpaper:", 0);
     (void)l1; (void)l2;
-    widget_t *tl = widget_add(w, W_LISTBOX, mkrect(24, 290, 114, 4 * 18 + 2), "", ID_THEMES);
+    widget_t *tl = widget_add(w, W_LISTBOX, mkrect(LB_X, 290, 114, 4 * 18 + 2), "", ID_THEMES);
     char *items[8];
     int n = MIN(g_theme_count, 8);
     for (int i = 0; i < n; i++) items[i] = (char *)g_themes[i].name;
     widget_list_set(w, tl, items, n);
     tl->value = c->theme;
     tl->on_change = list_change;
-    widget_t *wl = widget_add(w, W_LISTBOX, mkrect(148, 290, 114, 4 * 18 + 2), "", ID_WALLS);
+    widget_t *wl = widget_add(w, W_LISTBOX, mkrect(LB_X + 124, 290, 114, 4 * 18 + 2), "", ID_WALLS);
     widget_list_set(w, wl, (char **)wp_names, NWP);
     wl->value = c->wall;
     wl->on_change = list_change;
@@ -408,14 +413,17 @@ void app_control(void) {
     widget_t *cn = widget_add(w, W_BUTTON, mkrect(CP_W - 12 - 2 * 75 - 8, CP_H - 35, 75, 23), "Cancel", ID_CANCEL);
     cn->style |= WS_CANCEL; cn->on_click = on_cancel;
     widget_t *ap = widget_add(w, W_BUTTON, mkrect(CP_W - 12 - 75, CP_H - 35, 75, 23), "Apply", ID_APPLY);
-    widget_t *db = widget_add(w, W_BUTTON, mkrect(12, CP_H - 35, 90, 23), "Display...", 0);
+    widget_t *db = widget_add(w, W_BUTTON, mkrect(12, CP_H - 35, 80, 23), "Display...", 0);
     db->on_click = on_display;
     ap->style |= WS_DISABLED; ap->on_click = on_apply;
-    widget_t *kb = widget_add(w, W_BUTTON, mkrect(110, CP_H - 35, 90, 23), "Keyboard...", 0);
+    widget_t *kb = widget_add(w, W_BUTTON, mkrect(98, CP_H - 35, 80, 23), "Keyboard...", 0);
     kb->on_click = on_keyboard;
-    widget_t *nb = widget_add(w, W_BUTTON, mkrect(208, CP_H - 35, 90, 23), "Network...", 0);
+    widget_t *nb = widget_add(w, W_BUTTON, mkrect(184, CP_H - 35, 80, 23), "Network...", 0);
     nb->on_click = on_network;
-    widget_t *tz = widget_add(w, W_BUTTON, mkrect(286 + 112, 68 + 88, 138, 22), "", ID_TZBTN);
+    widget_t *sb = widget_add(w, W_BUTTON, mkrect(270, CP_H - 35, 80, 23), "Sounds...", 0);
+    sb->on_click = on_sound;
+    strlcpy(sb->tip, "Sounds and Audio Devices: volume, sound cards, system sounds", sizeof sb->tip);
+    widget_t *tz = widget_add(w, W_BUTTON, mkrect(COL2 + 112, 68 + 88, 138, 22), "", ID_TZBTN);
     tz->on_click = on_timezone;
     strlcpy(tz->tip, "The difference between this computer's clock and UTC", sizeof tz->tip);
     tz_button_text(w);

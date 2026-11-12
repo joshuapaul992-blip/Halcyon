@@ -10,6 +10,9 @@
 #include "core/io.h"
 
 volatile int gui_desktop_ready;      /* the desktop is drawn (system sounds, test hooks wait for it) */
+/* the volume UI (gui/volume.c) */
+int  volume_key(u8 key, int pressed) __attribute__((weak));
+void gui_overlay_paint(gc_t *g, rect_t clip) __attribute__((weak));
 
 /* ---------------- themes ---------------- */
 const theme_t g_themes[] = {
@@ -830,6 +833,8 @@ static void handle_input(void) {
                 shell_run("C:/PROGRAMS/TASKMGR.EXE", NULL);
                 continue;
             }
+            /* Mute / Volume Up / Volume Down: the master volume (gui/volume.c) */
+            if (volume_key && volume_key(ev.key, ev.pressed)) continue;
             /* Calculator key (USB consumer control) */
             if (ev.pressed && ev.key == KEY_CALCULATOR) {
                 desktop_launch_calculator();
@@ -889,6 +894,7 @@ static void compose(rect_t r) {
         if (w->client) gfx_blit(&g, c.x, c.y, w->client, mkrect(0, 0, w->client->w, w->client->h));
     }
     if (!taskbar_drawn) taskbar_paint(&g, r);
+    if (gui_overlay_paint) gui_overlay_paint(&g, r);     /* the volume indicator, tray tooltips */
     draw_cursor(&g);
 }
 

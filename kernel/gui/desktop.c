@@ -2,6 +2,8 @@
  * notification balloons, shutdown */
 #include "net/netcfg.h"
 #include "wm.h"
+#include "volume.h"
+#include "sound/sound.h"
 #include "core/lib.h"
 #include "core/proc.h"
 #include "core/mm.h"
@@ -322,7 +324,7 @@ int desktop_event(gui_event_t *e) {
 static int start_hover, start_pressed;
 static window_t *start_menu;
 static int task_hover = -1, task_pressed = -1;
-static int tray_usb_hover, tray_net_hover;
+static int tray_usb_hover, tray_net_hover, tray_vol_hover;
 static int last_minute = -1;
 /* the network icon: -1 no adapter (hidden), 0 not connected, 1 connected */
 static int net_tray = -1;
@@ -340,17 +342,19 @@ static int usb_disks_present(void) {
 #define LANG_W 28          /* keyboard layout indicator */
 static int usb_w(void) { return usb_disks_present() ? 22 : 0; }
 static int net_w(void) { return net_tray >= 0 ? 22 : 0; }
+static int vol_w(void) { return volume_tray_visible() ? 22 : 0; }
 static rect_t tray_rect(void) {
-    int w = TRAY_MIN_W + LANG_W + usb_w() + net_w();
+    int w = TRAY_MIN_W + LANG_W + usb_w() + net_w() + vol_w();
     rect_t t = taskbar_rect();
     return mkrect(t.w - w, t.y, w, t.h);
 }
 static rect_t lang_rect(void) {
     rect_t tr = tray_rect();
-    return mkrect(tr.x + 6 + usb_w() + net_w(), tr.y + 6, LANG_W - 4, tr.h - 11);
+    return mkrect(tr.x + 6 + usb_w() + net_w() + vol_w(), tr.y + 6, LANG_W - 4, tr.h - 11);
 }
 static rect_t usb_icon_rect(void) { rect_t tr = tray_rect(); return mkrect(tr.x + 4, tr.y, 22, tr.h); }
 static rect_t net_icon_rect(void) { rect_t tr = tray_rect(); return mkrect(tr.x + 4 + usb_w(), tr.y, 22, tr.h); }
+static rect_t vol_icon_rect(void) { rect_t tr = tray_rect(); return mkrect(tr.x + 4 + usb_w() + net_w(), tr.y, 22, tr.h); }
 
 void net_status_text(const hal_ifinfo_t *f, char *out, int n);   /* apps/network.c */
 
@@ -444,6 +448,10 @@ void taskbar_paint(gc_t *g, rect_t clip) {
         gfx_icon(g, x, tr.y + 7, &icons16[net_tray ? ICON_NETWORK : ICON_NETWORK_OFF]);
         x += 22;
     }
+    if (volume_tray_visible()) {
+        volume_tray_paint(g, x, tr.y + 7, tray_vol_hover);
+        x += 22;
+    }
     rect_t lr = lang_rect();             /* keyboard layout: "EN", "DE"... */
     gfx_rounded(g, lr, 2, 15, HEX(0x3A78D8), HEX(0x1C4FA8));
     gfx_rounded_outline(g, lr, 2, 15, HEX(0x123A80));
@@ -497,9 +505,11 @@ int taskbar_event(gui_event_t *e) {
         rect_t tr = tray_rect();
         int uh = rect_contains(usb_icon_rect(), e->x, e->y) && usb_disks_present();
         int nh = rect_contains(net_icon_rect(), e->x, e->y) && net_tray >= 0;
+        int vh = rect_contains(vol_icon_rect(), e->x, e->y) && volume_tray_visible() && e->type == GE_MOUSE_MOVE;
         (void)tr;
-        if (sh != start_hover || th != task_hover || uh != tray_usb_hover || nh != tray_net_hover) {
-            start_hover = sh; task_hover = th; tray_usb_hover = uh; tray_net_hover = nh;
+        volume_tray_hover(vol_icon_rect(), vh);
+        if (sh != start_hover || th != task_hover || uh != tray_usb_hover || nh != tray_net_hover || vh != tray_vol_hover) {
+            start_hover = sh; task_hover = th; tray_usb_hover = uh; tray_net_hover = nh; tray_vol_hover = vh;
             taskbar_invalidate();
         }
         return 1;
@@ -524,6 +534,10 @@ int taskbar_event(gui_event_t *e) {
             menu_popup(tray_dummy, &net_menu, net_icon_rect().x, t.y);
             return 1;
         }
+        if (volume_tray_visible() && rect_contains(vol_icon_rect(), e->x, e->y) && e->button == MOUSE_LEFT) {
+            volume_tray_click(vol_icon_rect(), e->type == GE_DBLCLICK);
+            return 1;
+        }
         return 1;
     }
     if (e->type == GE_MOUSE_UP) {
@@ -543,6 +557,7 @@ int taskbar_event(gui_event_t *e) {
 /* ---------------- start menu ---------------- */
 typedef struct sitem { const char *label; const char *sub; int icon; void (*launch)(void); } sitem_t;
 static void l_network(void) { app_network(); }
+static void l_mplayer(void) { shell_run("C:/PROGRAMS/MPLAYER.EXE", NULL); }
 static void l_docs2(void) { shell_explorer("C:/Documents"); }
 static const sitem_t left_items[] = {
     { "My Computer", "Browse drives and files", ICON_COMPUTER, l_computer },
@@ -551,6 +566,7 @@ static const sitem_t left_items[] = {
     { "Paint", "Draw pictures", ICON_PAINT, l_paint },
     { "Web Browser", "Browse the Web", ICON_WEB, l_browser },
     { "Calculator", NULL, ICON_CALC, l_calc },
+    { "Media Player", NULL, ICON_MEDIA, l_mplayer },
     { "Sonar", NULL, ICON_GAME, l_mines },
 };
 static const sitem_t right_items[] = {
@@ -563,10 +579,10 @@ static const sitem_t right_items[] = {
     { "About Halcyon", NULL, ICON_HELP, l_about },
 };
 #define SM_W 400
-#define SM_H 484                   /* 7 programs on the left */
+#define SM_H 528                   /* 8 programs on the left */
 #define SM_HEAD 62
 #define SM_FOOT 44
-static int sm_hover = -1;   /* 0..6 left, 10..14 right, 20 restart?, 21 shutdown */
+static int sm_hover = -1;   /* 0..7 left, 10..16 right, 20 restart?, 21 shutdown */
 
 static rect_t sm_item_rect(int id) {
     if (id < 10) return mkrect(6, SM_HEAD + 8 + id * 44, 196, 42);
@@ -651,7 +667,7 @@ static void sm_event(window_t *w, gui_event_t *e) {
     } else if (e->type == GE_KEY && e->key.pressed) {
         if (e->key.key == KEY_ESC) menu_close_all();
         else if (e->key.key == KEY_DOWN || e->key.key == KEY_UP) {
-            int order[] = { 0, 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 20, 21 };
+            int order[] = { 0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 20, 21 };
             int n = ARRAY_SIZE(order), cur = -1;
             for (int i = 0; i < n; i++) if (order[i] == sm_hover) cur = i;
             cur = cur < 0 ? 0 : (cur + (e->key.key == KEY_DOWN ? 1 : n - 1)) % n;
@@ -708,10 +724,18 @@ static void show_balloon(const char *title, const char *text) {
     balloon->on_event = balloon_event;
     balloon->on_destroy = balloon_destroy;
     balloon_until = time_ms() + 6000;
+    sound_event(SNDEV_NOTIFY);
 }
 
 /* ---------------- shell tick ---------------- */
 static u32 last_vgen, last_ugen;
+static int usb_known;                   /* USB devices (hubs too): more or fewer = connect / disconnect sound */
+
+static int usb_count(void) {
+    int n = 0;
+    for (usb_device_t *d = usb_first_device(); d; d = d->next) n++;
+    return n;
+}
 static int known_letters[26];
 
 void shell_tick(void) {
@@ -724,7 +748,14 @@ void shell_tick(void) {
         net_tray_poll();
     }
     if (balloon && time_ms() > balloon_until) wm_destroy(balloon);
-    if (usb_generation() != last_ugen) { last_ugen = usb_generation(); taskbar_invalidate(); }
+    if (usb_generation() != last_ugen) {
+        last_ugen = usb_generation();
+        taskbar_invalidate();
+        int n = usb_count();
+        if (n != usb_known) sound_event(n > usb_known ? SNDEV_DEVICE_ADD : SNDEV_DEVICE_REMOVE);
+        usb_known = n;
+    }
+    volume_tick();
     static u32 last_kgen;
     if (input_layout_generation() != last_kgen) { last_kgen = input_layout_generation(); taskbar_invalidate(); }
     if (vfs_generation() != last_vgen) {
@@ -764,8 +795,10 @@ static void final_screen(const char *msg) {
 int bootlog_save(const char *reason);
 static void restart_now(void) {
     final_screen("Halcyon is restarting...");
+    sound_shutdown_begin();             /* plays while the log is saved; heard in full before the reset */
     bootlog_save("restart");
     vfs_sync_all();
+    sound_shutdown_wait(4000);
     mdelay(400);
     reboot();
 }
@@ -818,8 +851,10 @@ void shutdown_dialog(void) {
     if (sd_choice == 1) restart_now();
     if (sd_choice == 2) {
         final_screen("Halcyon is shutting down...");
+        sound_shutdown_begin();
         bootlog_save("shutdown");
         vfs_sync_all();
+        sound_shutdown_wait(4000);
         mdelay(500);
         shutdown();
         final_screen("It is now safe to turn off your computer.");
@@ -851,6 +886,10 @@ void shell_open(const char *path) {
     if (!strcasecmp(ext, "htm") || !strcasecmp(ext, "html")) { shell_browser(path, 1); return; }
     for (size_t i = 0; i < ARRAY_SIZE(text_ext); i++) if (!strcasecmp(ext, text_ext[i])) { shell_notepad(path); return; }
     if (!strcasecmp(ext, "bmp")) { shell_paint(path); return; }
+    if (!strcasecmp(ext, "wav")) {         /* Media Player (no built-in fallback: shell_run reports why) */
+        if (!run_prog("C:/PROGRAMS/MPLAYER.EXE", path)) shell_run("C:/PROGRAMS/MPLAYER.EXE", NULL);
+        return;
+    }
     char msg[VFS_MAX_PATH + 96];
     snprintf(msg, sizeof msg, "There is no program associated with \"%s\".\n\nOpen it with Notepad?", vfs_basename(path));
     if (msgbox(NULL, "Open With", msg, ICON_QUESTION, MB_YESNO) == ID_YES) shell_notepad(path);
@@ -861,6 +900,8 @@ void desktop_init(void) {
     if (th > 0 && th < g_theme_count) theme_set(th);
     desktop_wallpaper_set(CLAMP(settings_get_int("desktop.wallpaper", 0), 0, 3));
     last_vgen = vfs_generation();
+    last_ugen = usb_generation();
+    usb_known = usb_count();
     for (int i = 0; i < vfs_volume_count(); i++) {
         volume_t *v = vfs_volume(i);
         if (v->letter >= 'A' && v->letter <= 'Z') known_letters[v->letter - 'A'] = 1;

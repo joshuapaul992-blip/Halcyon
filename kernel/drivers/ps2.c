@@ -144,6 +144,9 @@ static u8 ext_key(u8 sc) {
     case 0x5B: return KEY_LGUI;
     case 0x5C: return KEY_RGUI;
     case 0x5D: return KEY_MENU;
+    case 0x20: return 0x7F;          /* multimedia keys: Mute, Volume Down, Volume Up (HID 0x7F-0x81) */
+    case 0x2E: return 0x81;
+    case 0x30: return 0x80;
     }
     return 0;
 }

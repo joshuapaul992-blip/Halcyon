@@ -167,6 +167,13 @@ def ic_page(kind="text"):
     elif kind == "sys":
         fill(img, ellipse((11, 13, 22, 24)), "#A7B4C8", "#5E6E8A", outline="#3D4A60")
         fill(img, ellipse((14.5, 16.5, 18.5, 20.5)), "#FFFFFF")
+    elif kind == "audio":
+        # a beamed pair of notes
+        fill(img, ellipse((8.5, 21, 14, 25.5)), "#5A86E0", "#1F4FA8", outline="#123070")
+        fill(img, ellipse((17.5, 19, 23, 23.5)), "#5A86E0", "#1F4FA8", outline="#123070")
+        line(img, [(13.3, 23), (13.3, 12.5)], "#123070", 1.3)
+        line(img, [(22.3, 21), (22.3, 10.5)], "#123070", 1.3)
+        fill(img, poly([(12.6, 11.8), (23, 9.8), (23, 13), (12.6, 15)]), "#3A66C8", "#123070")
     return finish(img, m)
 
 
@@ -526,6 +533,31 @@ def ic_network(off=False):
     return finish(img)
 
 
+def ic_speaker(muted=False):
+    """a loudspeaker with sound waves (muted: a red slashed circle instead)"""
+    img = new()
+    m = fill(img, rrect((3, 11, 10, 21), 1), "#E8ECF4", "#8A94A8", outline="#3A4458")
+    fill(img, poly([(9, 11), (17, 4), (17, 28), (9, 21)]), "#D8DEEA", "#6E7890", outline="#3A4458")
+    gloss(img, m, 0.5, 90)
+    d = ImageDraw.Draw(img)
+    if not muted:
+        for r, a in ((5, 255), (9, 230), (13, 200)):
+            d.arc(box(15 - r, 16 - r, 15 + r, 16 + r), start=-50, end=50, fill=(30, 90, 200, a), width=u(1.9))
+    else:
+        d.ellipse(box(19, 16, 30, 27), outline=hexc("#C01810"), width=u(2.3))
+        line(img, [(21.2, 25), (27.8, 18)], "#C01810", 2.3)
+    return finish(img)
+
+
+def ic_media():
+    """Media Player: a round blue-violet button with a play triangle and a note"""
+    img = new()
+    m = fill(img, ellipse((2, 2, 30, 30)), "#A890FF", "#3A22A0", outline="#1E1060")
+    gloss(img, m, 0.5, 120)
+    fill(img, poly([(12, 9), (24, 16), (12, 23)]), "#FFFFFF", "#E6E0FF")
+    return finish(img, m)
+
+
 ICONS = [
     ("computer", ic_computer),
     ("hdd", ic_hdd),
@@ -571,6 +603,10 @@ ICONS = [
     ("home", ic_home),
     ("network", ic_network),
     ("network_off", lambda: ic_network(True)),
+    ("speaker", ic_speaker),
+    ("speaker_muted", lambda: ic_speaker(True)),
+    ("file_audio", lambda: ic_page("audio")),
+    ("media", ic_media),
 ]
 
 SIZES = (16, 32, 48)
