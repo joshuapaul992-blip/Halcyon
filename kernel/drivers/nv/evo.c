@@ -137,6 +137,7 @@ static u32 vrd32(nv_evo_t *e, u64 off) {
  * (nv50_dmac_kick: 0x070000; NV50 itself: 0x00330c) */
 static int bar_flush(nv_evo_t *e) {
     u32 reg = e->chipset == 0x50 ? 0x00330c : 0x070000;
+    if (e->ops.wmb) e->ops.wmb(e->ops.ctx);
     wr(e, reg, 0x00000001);
     u32 last;
     if (wait(e, reg, 0x00000002, 0, 2000, &last)) {
@@ -970,7 +971,21 @@ static int chan_idle(nv_evo_t *e, u32 us) {
     }
 }
 
+static int submit(nv_evo_t *e, const nv_evo_stream_t *s, int wait_update);
+
 int nv_evo_submit(nv_evo_t *e, const nv_evo_stream_t *s, int wait_update) {
+    int r = submit(e, s, wait_update);
+    /* two updates in a row that never finished: the channel is given up
+     * (a restore would only wait another 3 seconds) */
+    if (r == E_TIMEOUT && ++e->stuck >= 2 && e->chan_up) {
+        e->chan_up = 0;
+        nv_evo_log(e, "the core channel is given up after %d timeouts in a row", e->stuck);
+    }
+    if (!r) e->stuck = 0;
+    return r;
+}
+
+static int submit(nv_evo_t *e, const nv_evo_stream_t *s, int wait_update) {
     if (!e->chan_up) { fail(e, "the core channel is not running"); return E_IO; }
     if (wait_update) vwr32(e, e->sync, 0);               /* notifier: not done */
     u32 errs = e->errors;

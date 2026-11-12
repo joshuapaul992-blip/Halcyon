@@ -230,6 +230,8 @@ typedef struct nv_evo_ops {
     /* 8-bit register access (VGA CRTC index / data for script opcodes); NULL: none */
     u8   (*rd8)(void *ctx, u32 reg);
     void (*wr8)(void *ctx, u32 reg, u8 v);
+    /* the CPU's writes through BAR1 leave its write-combining buffers (sfence); NULL: none */
+    void (*wmb)(void *ctx);
 } nv_evo_ops_t;
 
 /* an output resource as the hardware has it */
@@ -284,6 +286,7 @@ struct nv_evo {
     u32 head_mask, sor_mask, dac_mask;
     /* state */
     int chan_up;                /* the core channel is ours and running */
+    int stuck;                  /* updates in a row that timed out (2: the channel is given up) */
     u32 put;                    /* bytes */
     nv_evo_fw_t fw;
     nv_evo_saved_t saved;

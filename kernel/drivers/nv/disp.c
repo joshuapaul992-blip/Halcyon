@@ -105,6 +105,7 @@ static int evo_aux(void *ctx, int ccb, u8 req, u32 addr, u8 *buf, u8 *len) {
     return nv_aux_xfer(((nvd_t *)ctx)->d, ccb, req, addr, buf, len);
 }
 static u8 evo_rd8(void *ctx, u32 reg) { return nv_rd08(((nvd_t *)ctx)->d, reg); }
+static void evo_wmb(void *ctx) { (void)ctx; __asm__ volatile("sfence" ::: "memory"); }
 static void evo_wr8(void *ctx, u32 reg, u8 v) { nv_wr08(((nvd_t *)ctx)->d, reg, v); }
 
 static int fail(nvd_t *n, int err, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
@@ -446,6 +447,7 @@ static int pramin_check(nvd_t *n, u64 off, int write) {
         want[i] = write ? (0x4E564842u ^ (u32)(off >> 12) ^ (u32)i * 0x01010101u) : p[i];
         if (write) p[i] = want[i];
     }
+    __asm__ volatile("sfence" ::: "memory");
     nv_wr32(d, d->chip.chipset == 0x50 ? 0x00330c : 0x070000, 1);
     for (u64 end = time_us() + 2000; (nv_rd32(d, d->chip.chipset == 0x50 ? 0x00330c : 0x070000) & 2) && time_us() < end;) cpu_relax();
     u32 save = nv_rd32(d, 0x001700);
@@ -477,11 +479,51 @@ static void layout(nvd_t *n) {
     if (d->vram && d->vram <= n->window + 16 * MiB) nv_evo_vram_hole(&n->vram, d->vram - 16 * MiB, 16 * MiB, "end of VRAM");
 }
 
+/* the simulated card: what a first mode set would send (no hardware) */
+static void dry_run(nvd_t *n) {
+    nv_device_t *d = n->d;
+    for (int i = 0; i < n->nconn; i++) {
+        nv_connector_t *c = &d->conn[n->conn[i].nvc];
+        if (c->edid_len <= 0) continue;
+        display_mode_t m[8];
+        if (edid_timings(c->edid, c->edid_len, m, 8) <= 0 || !m[0].t.clock_khz) continue;
+        int k = n->conn[i].out[0];
+        const nv_dcb_output_t *o = dcb(n, k);
+        if (!o) continue;
+        nv_evo_timing_t t = { m[0].t.clock_khz, m[0].t.hactive, m[0].t.hsync_start, m[0].t.hsync_end, m[0].t.htotal,
+                              m[0].t.vactive, m[0].t.vsync_start, m[0].t.vsync_end, m[0].t.vtotal,
+                              (u8)!(m[0].flags & DT_HSYNC_POS), (u8)!(m[0].flags & DT_VSYNC_POS) };
+        nv_evo_head_cfg_t cfg;
+        memset(&cfg, 0, sizeof cfg);
+        if (nv_evo_raster(&t, &cfg.r)) continue;
+        cfg.on = 1;
+        cfg.w = (u16)m[0].w; cfg.h = (u16)m[0].h;
+        cfg.pitch = ALIGN_UP((u32)m[0].w * 4, 256u);
+        cfg.offset = 4 * MiB;
+        cfg.vram_handle = EVO_HANDLE_VRAM;
+        cfg.or_id = o->or_mask ? __builtin_ctz(o->or_mask) : 0;
+        cfg.or_heads = 1;
+        cfg.proto = o->type == NV_OUT_DP ? EVO_PROTO_DP_A : EVO_PROTO_TMDS_A;
+        cfg.depth = o->type == NV_OUT_DP ? EVO_DEPTH_24 : 0;
+        nv_evo_stream_t s;
+        memset(&s, 0, sizeof s);
+        nv_evo_head_methods(n->g, &s, &cfg);
+        nv_evo_update(n->g, &s, 1);
+        nvlog(n, "dry run: %dx%d at %u kHz on head 0, SOR%d %s: %d method words (%08x %08x ... %08x)", m[0].w, m[0].h,
+              m[0].t.clock_khz, cfg.or_id, nv_out_type_str(o->type), s.n, s.w[0], s.w[1], s.w[s.n - 1]);
+        return;
+    }
+    nvlog(n, "dry run: no monitor with a timing on the simulated card");
+}
+
 static int nvd_enable(display_adapter_t *a) {
     nvd_t *n = a->priv;
     nv_device_t *d = n->d;
     a->why[0] = 0;
-    if (d->fake) return fail(n, E_NODEV, "simulated card (QEMU test hook): no registers, native modesetting not attempted");
+    if (d->fake) {
+        dry_run(n);
+        return fail(n, E_NODEV, "simulated card (QEMU test hook): no registers, native modesetting not attempted");
+    }
     if (!d->mmio || !d->bios) return fail(n, E_NODEV, "no registers or no video BIOS");
     if (d->chip.family >= NV_FAM_FERMI) {
         u32 fuse = nv_rd32(d, d->chip.chipset >= 0x110 ? 0x021C04 : 0x022500);
@@ -532,7 +574,7 @@ static int nvd_enable(display_adapter_t *a) {
     e->r = &d->regs;
     e->bios = d->bios;
     e->chipset = d->chip.chipset;
-    e->ops = (nv_evo_ops_t){ n, evo_i2c, evo_aux, evo_log, evo_rd8, evo_wr8 };
+    e->ops = (nv_evo_ops_t){ n, evo_i2c, evo_aux, evo_log, evo_rd8, evo_wr8, evo_wmb };
     e->vram = n->bar1;
     e->vram_base = 0;
     e->vram_size = n->window;

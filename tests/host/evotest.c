@@ -896,7 +896,7 @@ static void evo_setup(u16 chipset) {
     E.r = &SREGS;
     E.bios = &BIOS;
     E.chipset = chipset;
-    E.ops = (nv_evo_ops_t){ NULL, NULL, sink_aux, t_log, NULL, NULL };
+    E.ops = (nv_evo_ops_t){ NULL, NULL, sink_aux, t_log, NULL, NULL, NULL };
     E.vram = vram;
     E.vram_base = 0;
     E.vram_size = VRAM_SIZE;
@@ -1076,6 +1076,9 @@ static void test_hangs(void) {
     CHECK(!nv_evo_takeover(&E), "takeover");
     t0 = S.t;
     CHECK(set_1080(0, 3, 2, EVO_PROTO_TMDS_A, NULL) == E_TIMEOUT && S.t - t0 <= 3100000 && strstr(E.why, "did not complete"), "no notifier: %s", E.why);
+    CHECK(E.chan_up && set_1080(0, 3, 2, EVO_PROTO_TMDS_A, NULL) == E_TIMEOUT && !E.chan_up && logged("given up"), "second timeout: given up");
+    t0 = S.t;
+    CHECK(set_1080(0, 3, 2, EVO_PROTO_TMDS_A, NULL) == E_IO && S.t - t0 < 1000, "a channel given up fails at once");
     /* no supervisor at all (and no notifier) */
     evo_setup(0x124); fw_state(); S.f_nosuper = 1; S.f_nonotify = 1;
     CHECK(!nv_evo_takeover(&E), "takeover");
