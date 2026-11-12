@@ -330,13 +330,15 @@ static void head_all_stale(display_head_t *h) {
 static void accel_guard_key(const display_adapter_t *a, char *k, int n) { snprintf(k, (size_t)n, "display.%s.accel.guard", a->driver); }
 
 /* acceleration ends for the session: the driver stops, the CPU redraws every buffer */
-static void accel_fail(display_adapter_t *a, const char *why) {
+static void accel_fail(display_adapter_t *a, const char *why_in) {
     if (!a->accel_ops) return;
+    char why[96];
+    strlcpy(why, why_in ? why_in : "?", sizeof why);       /* (it may be a->accel_why itself) */
     int was = a->accel || a->accel_last != a->accel_seen;
     a->accel = 0;
-    if (why && (was || !a->accel_why[0])) strlcpy(a->accel_why, why, sizeof a->accel_why);
+    if (was || !a->accel_why[0]) strlcpy(a->accel_why, why, sizeof a->accel_why);
     if (was) {
-        kprintf("display: %s: acceleration off for this session: %s; the CPU draws\n", a->name, why ? why : "?");
+        kprintf("display: %s: acceleration off for this session: %s; the CPU draws\n", a->name, why);
         if (a->accel_ops->stop) a->accel_ops->stop(a, why);
         if (a->accel_guard_armed)
             kprintf("display: %s: the acceleration marker stays (display.%s.accel.guard): acceleration stays off at the next start\n",
@@ -371,7 +373,7 @@ static int accel_check(display_adapter_t *a, u32 fence) {
         if ((i32)(fence - a->accel_seen) > 0) { a->accel_seen = fence; a->accel_last_ms = time_ms(); }
         return 1;
     }
-    if (r < 0) { accel_fail(a, a->accel_why[0] && !a->accel ? a->accel_why : "the device reported an error"); return r; }
+    if (r < 0) { accel_fail(a, a->accel_why[0] ? a->accel_why : "the device reported an error"); return r; }
     if (time_ms() - a->accel_last_ms > DISPLAY_ACCEL_TIMEOUT_MS) {
         char w[64];
         snprintf(w, sizeof w, "a fence did not complete in %d ms", DISPLAY_ACCEL_TIMEOUT_MS);
@@ -431,6 +433,13 @@ static int accel_src(display_adapter_t *a) {
     if (r) kprintf("display: %s: the desktop surface (%llu KiB) is not readable by the device (%s): uploads by the CPU\n", a->name,
                    (unsigned long long)(bytes >> 10), strerror(r));
     return a->accel_src_ok;
+}
+
+static void acc_frame(display_head_t *h) {
+    display_adapter_t *a = h->adapter;
+    if (++h->acc_frames == 1 || h->acc_frames == 100)
+        kprintf("display: %s: %u updates presented through acceleration (%u uploads, %u copies, %u fills so far)\n", h->conn ? h->conn->name : "?",
+                h->acc_frames, a->accel_uploads, a->accel_copies, a->accel_fills);
 }
 
 /* queue the upload of head rectangle r into fb; 1 queued, 0 the CPU must do it */
@@ -500,7 +509,7 @@ static int accel_flip_prepare(display_head_t *h, int back) {
     }
     h->stale_n[back] = 0;
     h->frames++;
-    h->acc_frames++;
+    acc_frame(h);
     h->acc_queued = 1;
     h->acc_flip = 1;
     h->acc_back = back;
@@ -553,7 +562,7 @@ void display_present(int x, int y, int w, int hgt) {
         if (accel_has(a, ACCEL_UPLOAD) && accel_fb_ok(ffb) && accel_src(a) && accel_has(a, ACCEL_UPLOAD) && accel_upload(h, ffb, r)) {
             /* queued: flushed once its fence is done (head_commit) */
             h->acc_queued = 1;
-            h->acc_frames++;
+            acc_frame(h);
             if (a->ops->flush) rect_add((drect_t *)h->dirty, &h->dirty_n, 8, r);
             else h->frames++;
             continue;

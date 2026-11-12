@@ -142,6 +142,9 @@ static void display_rows(si_t *s, char *d) {
                  a->nheads, caps & HEAD_CAP_CURSOR ? ", hardware cursor" : "", caps & HEAD_CAP_FLIP ? ", page flips at vertical blank" : "",
                  a->nconns, a->live ? "at once" : "at the next start");
         strlcat(d, m, 2048);
+        char acc[160];
+        snprintf(m, sizeof m, "Acceleration: %s\n", display_accel_state(a, acc, sizeof acc));   /* M10e */
+        strlcat(d, m, 2048);
         add(s, 1, ICON_DISPLAY, CAT_DISPLAY, d, "%s%s", a->name, a->state == ADAPTER_ACTIVE ? "" : a->state == ADAPTER_RETIRED ? " (replaced)" : " (not in use)");
         for (int k = 0; k < a->nconns; k++) {
             display_connector_t *c = &a->conns[k];

@@ -33,6 +33,7 @@
  * guard (display.nv.guard). */
 #include "nv.h"
 #include "evo.h"
+#include "accel.h"
 #include "drivers/display.h"
 #include "core/lib.h"
 #include "core/io.h"
@@ -113,6 +114,7 @@ typedef struct nvd {
     int pci_cmd_saved;
     int first_set_done;
     u64 next_hpd;
+    nv_accel_t *acc;            /* 10e: the copy engine (accel.c) */
     char state[96];
     char *log;
     int loglen;
@@ -702,6 +704,9 @@ static int pramin_check(nvd_t *n, u64 off, int write) {
     return ok;
 }
 
+/* 10e: BAR1 maps this VRAM offset 1:1 (a pattern written and read back through PRAMIN) */
+static int vram_linear(void *ctx, u64 off) { return pramin_check(ctx, off, 1); }
+
 static void layout(nvd_t *n) {
     nv_device_t *d = n->d;
     nv_evo_vram_init(&n->vram, 0, n->window);
@@ -939,6 +944,9 @@ static int nvd_enable(display_adapter_t *a) {
     /* 10d: page flips and the hardware cursor; a channel that does not come
      * up only turns its feature off (the 10b behaviour), never the driver */
     chans_start(n);
+    /* 10e: the copy engine starts later (nvd_poll), once the start guard is done */
+    nv_accel_host_t ah = { n->bar1, n->window, &n->vram, n, evo_log, vram_linear };
+    nv_accel_attach(n->acc, &ah);
     if (e->fw.valid && !n->fw_ok) nvlog(n, "the firmware's surface is not in BAR1: restore can only switch the heads off");
     if (e->fw.valid && n->fw_ok && ((u64)e->fw.hs.offset << 8) != n->fw_off)
         nvlog(n, "note: the firmware head scans out %llx, its frame buffer is at %llx", (unsigned long long)e->fw.hs.offset << 8,
@@ -954,6 +962,7 @@ static void nvd_restore(display_adapter_t *a) {
     nv_evo_t *e = &n->e;
     if (!n->armed) return;
     nvlog(n, "giving the display back to the firmware frame buffer");
+    nv_accel_release(n->acc, "the display goes back to the firmware");     /* 10e first: nothing writes into VRAM any more */
     /* 10d first: the base layers off (they would cover the firmware's
      * surface), the base and cursor channels stopped (bounded) */
     if (n->taken) {
@@ -1010,6 +1019,7 @@ static void nvd_restore(display_adapter_t *a) {
 static void nvd_poll(display_adapter_t *a) {
     nvd_t *n = a->priv;
     if (!n->taken) return;
+    nv_accel_poll(n->acc);                          /* 10e: the copy engine's bring-up, once */
     /* 10d: flips that completed at a vertical blank (polled: the notifier and GET) */
     for (int k = 0; k < a->nheads; k++) {
         display_head_t *dh = &a->heads[k];
@@ -1171,6 +1181,7 @@ static void probe_one(nv_device_t *d) {
           "a head drives up to %u kHz", n->want_curs ? "on" : "off (nv.hwcursor=0)", nv_evo_curs_class(g), EVO_CURS_SIZE, EVO_CURS_SIZE,
           n->want_flip ? "on" : "off (nv.flip=0)", nv_evo_base_class(g), nheads, n->heads_avail,
           nheads < n->heads_avail && max_heads < n->heads_avail ? " (nv.heads)" : "", nv_evo_head_max_khz(g));
+    n->acc = nv_accel_probe(d, a, evo_log, n);     /* 10e (reads nothing) */
     for (int k = 0; k < n->nconn; k++) {
         char outs[48] = "";
         for (int i = 0; i < n->conn[k].nout; i++) {
@@ -1214,6 +1225,18 @@ const char *nv_display_state(nv_device_t *d, char *buf, int n) {
         break;
     }
     return buf;
+}
+
+/* 10e: the copy engine for NVREPORT (bytes) and System Information (one line) */
+int nv_display_accel(nv_device_t *d, char *buf, int size) {
+    nvd_t *x = nvd_of(d);
+    if (size > 0) buf[0] = 0;
+    return x ? nv_accel_report(x->acc, buf, size) : 0;
+}
+const char *nv_display_accel_state(nv_device_t *d, char *buf, int n) {
+    nvd_t *x = nvd_of(d);
+    if (!x) { snprintf(buf, (size_t)n, "none (no native driver)"); return buf; }
+    return nv_accel_state(x->acc, buf, n);
 }
 
 const char *nv_display_log(nv_device_t *d) {
