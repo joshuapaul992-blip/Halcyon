@@ -58,6 +58,7 @@ enum { IS_PREPARE = 0, IS_PARTITION, IS_FORMAT, IS_BOOTCODE, IS_COPY, IS_VERIFY,
 typedef struct inst_job {
     inst_plan_t plan;
     volatile int step, done, result;
+    int wrote;                        /* something was written to the disk */
     char status[160];
     char current[VFS_MAX_PATH + 1];   /* the file being copied / verified */
     u64 total_bytes, done_bytes;      /* copy, then verify */

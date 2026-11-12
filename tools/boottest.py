@@ -806,6 +806,10 @@ def make_install_disk(kind):
     with open(disk, "r+b") as f:                   # something in the MSR partition too
         f.seek(msr[0] * 512)
         f.write(bytes(range(256)) * 64)
+    with open(disk, "r+b") as f:                   # boot code in the protective MBR, as Windows writes it
+        code = (b"\xfa\x33\xc0\x8e\xd0\xbc\x00\x7c" + b"\x90" * 300 + b"Invalid partition table\0"
+                b"Error loading operating system\0Missing operating system\0")
+        f.write(code[:440].ljust(440, b"\0"))
     subprocess.run([sys.executable, "tests/host/ntfs_mkimg.py", vol, "700", "boot", "-p", str(nt[0])], check=True,
                    stdout=subprocess.DEVNULL)
     subprocess.run(["dd", "if=" + vol, "of=" + disk, "bs=512", "seek=%d" % nt[0], "conv=notrunc,sparse", "status=none"],
@@ -922,11 +926,16 @@ def run_install(cfg, hc, fw, opts):
         for i, (s, n) in enumerate(windows):
             if file_hash(disk, s * 512, n * 512) != win_hash[i]:
                 fails.append("Windows' partition %d changed" % (i + 1))
-        if kind == "installntfs":
+        if kind in ("installntfs", "installgpt"):
             s0 = open(disk, "rb").read(512)
-            if s0[446:462] != sector0[446:462] or s0[440:444] != sector0[440:444]:
-                fails.append("Windows' MBR entry or the disk signature changed")
+            keep = (446, 462) if kind == "installntfs" else (440, 512)
+            if s0[keep[0]:keep[1]] != sector0[keep[0]:keep[1]] or s0[440:444] != sector0[440:444]:
+                fails.append("Windows' (protective) MBR entry or the disk signature changed")
+            if not bios_code:
+                fails.append("no BIOS boot code")
             out = os.path.join(BUILD, "ci_install_file.bin")
+            if os.path.exists(out):
+                os.remove(out)
             subprocess.run(["mcopy", "-n", "-i", partimg, "::/HALCYON/BOOT/MBRSAVE.BIN", out],
                            env=dict(os.environ, MTOOLS_SKIP_CHECK="1"), stdout=subprocess.DEVNULL)
             if not os.path.exists(out) or open(out, "rb").read() != sector0:

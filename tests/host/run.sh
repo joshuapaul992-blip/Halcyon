@@ -3,7 +3,8 @@
 # (netsim: simulated computers on a simulated Ethernet, and the fuzzer's
 # seeds replayed), the USB HID report parser, the EDID / video mode choice,
 # the HD Audio codec layer (hdatest.c: synthetic codecs), the NTFS
-# formatter (ntfsfmt.c: NTFSARGS=quick for fewer images and no FUSE),
+# formatter (ntfsfmt.c: NTFSARGS=quick for fewer images and no FUSE), the
+# installer's partition tables (parttest.c, checked with sfdisk / sgdisk),
 # then the storage stack. Extra arguments
 # are passed to fstest: "-v" for verbose output, scenario names
 # (paths fat12 fat16 fat32 gpt 4k misc random testdisks hostile unicode format

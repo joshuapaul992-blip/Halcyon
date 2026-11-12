@@ -240,9 +240,12 @@ static void finish_texts(wiz_t *z) {
         snprintf(t + n, sizeof z->text - n, "Remove the USB stick, then click Restart to start Halcyon from the hard disk.");
     } else {
         set_text(z, ID_TITLE, "Setup could not install Halcyon");
-        snprintf(t, sizeof z->text, "%s\n\n%s", j ? j->error : "", j && j->step > IS_PARTITION ?
-                 "The disk now holds an incomplete installation of Halcyon. Run Setup again to install it once more." :
-                 "Nothing on the disk was changed.");
+        snprintf(t, sizeof z->text, "%s\n\n%s", j ? j->error : "",
+                 !j || !j->wrote ? "Nothing on the disk was changed." :
+                 z->plan.mode == INST_WHOLE ? "The disk was erased and holds an incomplete installation of Halcyon. "
+                                              "You can run Setup again." :
+                 "Halcyon's new partition holds an incomplete installation. The other partitions on the disk "
+                 "were not changed.");
     }
     set_text(z, ID_TEXT, t);
 }

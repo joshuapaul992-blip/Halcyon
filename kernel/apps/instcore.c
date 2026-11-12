@@ -349,7 +349,10 @@ int inst_plan(const inst_disk_t *d, int mode, inst_plan_t *p, char *why, int why
             int pmbr = mbr_code_kind(t->mbr);
             if (ss != 512) strlcpy(p->bios_note, "PC BIOSes cannot start disks with 4 KB sectors.", sizeof p->bios_note);
             else if (t->free_entries < 2) strlcpy(p->bios_note, "The partition table has no entry left for a BIOS boot partition.", sizeof p->bios_note);
-            else if (pmbr == 2 || pmbr == 3) strlcpy(p->bios_note, "Another boot loader's code is at the start of the disk; Halcyon leaves it there.", sizeof p->bios_note);
+            /* (a standard MBR's code in a protective MBR is never run: Windows
+             * starts GPT disks with UEFI only; another loader's, e.g. GRUB's
+             * for BIOS + GPT, is) */
+            else if (pmbr == 3) strlcpy(p->bios_note, "Another boot loader's code is at the start of the disk; Halcyon leaves it there.", sizeof p->bios_note);
             else if (p->count < A + INST_MIN_BYTES / ss) strlcpy(p->bios_note, "There is no room for a BIOS boot partition next to Halcyon's.", sizeof p->bios_note);
             else {
                 p->bios = 1;
@@ -484,6 +487,7 @@ static int do_partition(inst_job_t *j, u8 *saved_mbr, u8 *part_guid, int *index)
         for (blockdev_t *b = blockdev_first(); b; b = b->next) if (b->parent == bd) vfs_unmount_blockdev(b);
         vfs_unmount_blockdev(bd);
         /* the old tables, boot code and file system signatures at both ends */
+        j->wrote = 1;
         u64 edge = MIN(bd->sector_count / 2, (u64)MIB(bd->sector_size));
         r = zero_range(bd, 0, edge);
         if (!r) r = zero_range(bd, bd->sector_count - edge, edge);
@@ -534,6 +538,7 @@ static int do_partition(inst_job_t *j, u8 *saved_mbr, u8 *part_guid, int *index)
         }
         if (r) { fail(j, r, r == E_BUSY ? "The disk's partition table changed after Setup looked at it" : "Adding the partition failed"); kfree(t); return r; }
         *index = idx[0];
+        j->wrote = 1;
         /* the new partitions are ours (the table accepted them: they overlap
          * nothing): no stale file system signatures in them */
         r = zero_range(bd, p->start, MIN(p->count, (u64)MIB(bd->sector_size)));
@@ -639,7 +644,7 @@ void inst_run(inst_job_t *j) {
     w.j = j; w.p = p; w.src = src; w.dst = j->letter; w.mode = W_COPY;
     r = walk_dir(&w, "", 0);
     if (r) { fail(j, r, "Copying %s failed", w.errpath); goto out; }
-    if (p->mode == INST_FREE && p->bios && !p->gpt) {
+    if (p->mode == INST_FREE && p->bios && (!p->gpt || mbr_code_kind(saved_mbr) == 2)) {
         /* the disk's original first sector, for going back to the old boot code */
         char path[64];
         snprintf(path, sizeof path, "%c:/HALCYON/BOOT/MBRSAVE.BIN", j->letter);
