@@ -1,0 +1,43 @@
+# Help and Support contents (tools/mkhelp.py): "Title|page.htm", two spaces
+# of indentation per level; an entry followed by deeper ones is a book.
+Welcome to Help and Support|welcome.htm
+Getting started
+  Getting started with Halcyon|start.htm
+  The desktop and the Start menu|desktop.htm
+  Working with windows|windows.htm
+  Keyboard shortcuts|shortcuts.htm
+  Using Help and Support|help.htm
+Files, folders and drives
+  Files and folders in Explorer|files.htm
+  Selecting several files|select.htm
+  Moving files with drag and drop|dragdrop.htm
+  The Recycle Bin|recycle.htm
+  Drives, USB sticks and CDs|drives.htm
+  Formatting a disk|format.htm
+  NTFS drives and Windows|ntfs.htm
+Programs
+  Notepad|notepad.htm
+  Paint|paint.htm
+  Calculator|calc.htm
+  Media Player|mplayer.htm
+  Web Browser|browser.htm
+  Command Prompt|cmd.htm
+  Task Manager|taskmgr.htm
+  System Information|sysinfo.htm
+  Sonar|sonar.htm
+Control Panel and settings
+  Control Panel|control.htm
+  Display Properties|display.htm
+  Screen savers|screensaver.htm
+  Keyboard and input languages|keyboard.htm
+  Sounds and Audio Devices|sounds.htm
+  Date, time and time zone|timezone.htm
+Networking and the Internet
+  Connecting to a network|network.htm
+  Network tools for the Command Prompt|nettools.htm
+Installing Halcyon
+  Installing Halcyon on a computer|install.htm
+Troubleshooting
+  Solving startup problems|troubleshoot.htm
+  The boot log|bootlog.htm
+  When a program stops responding|crash.htm

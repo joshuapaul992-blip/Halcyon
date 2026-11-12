@@ -1,0 +1,57 @@
+<html><head><title>NTFS drives and Windows</title>
+<meta name="keywords" content="NTFS; Windows drives; read-only drive#why; Fast Startup#faststartup; hibernation#faststartup; Windows did not shut down completely#faststartup; chkdsk#dirty; drive needs checking#dirty; allow Halcyon to write#internal; internal Windows disk#internal; dual boot#internal">
+</head><body>
+<h2 style="color:#1f4e9a">NTFS drives and Windows</h2>
+<p>NTFS is the file system Windows uses for its own disks, and many external
+hard disks come formatted with it too. Halcyon can read and write NTFS drives.
+Because these drives often belong to Windows, Halcyon is careful with them: if
+there is any chance that writing could confuse Windows, it opens the drive
+<b>read-only</b> and tells you why. You can still open and copy every file.</p>
+
+<h3 id="why">Why is my drive read-only?</h3>
+<p>Right-click the drive in <b>My Computer</b> and choose <b>Properties</b>.
+The reason is written there. The common ones are explained below.</p>
+
+<h3 id="faststartup">"Windows did not shut down completely"</h3>
+<p>Windows 8, 10 and 11 normally do not really shut down: with <b>Fast
+Startup</b> they hibernate instead, so they start faster next time. The Windows
+drive is then still "in use" by the sleeping Windows, and changing it from
+another system could lose your work. Halcyon leaves such a drive alone.</p>
+<p>To let Halcyon write to it, do one of these in Windows:</p>
+<ul>
+<li>Hold <kbd>Shift</kbd> while you click <b>Shut down</b>. This shuts Windows
+down completely, just this once.</li>
+<li>Choose <b>Restart</b> instead of Shut down, and start Halcyon from the
+restart. A restart always shuts Windows down completely.</li>
+<li>Turn Fast Startup off for good: in Windows, open <b>Control Panel &gt;
+Power Options &gt; Choose what the power buttons do</b>, click <b>Change
+settings that are currently unavailable</b> and untick <b>Turn on fast
+startup</b>.</li>
+</ul>
+<p>The same applies after you have used <b>Hibernate</b> in Windows.</p>
+
+<h3 id="dirty">"The drive needs to be checked"</h3>
+<p>Windows marks a drive when it was not unplugged or shut down properly, or
+when it found a problem. Start Windows and let it check the drive (or run
+<code>chkdsk</code>), then try again in Halcyon.</p>
+
+<h3 id="internal">"This is an internal Windows drive"</h3>
+<p>The disk inside your computer that Windows starts from is opened read-only
+even when Windows shut down properly, so that you never change it by
+accident. If you do want to write to it, open the drive's <b>Properties</b> and
+tick <b>Allow Halcyon to write to this drive</b>. Halcyon remembers this for
+that drive; untick it to make the drive read-only again.</p>
+
+<h3>Good habits</h3>
+<ul>
+<li>Use <b>Safely remove USB storage</b> (or turn Halcyon off) before you unplug
+an external NTFS disk; otherwise Windows checks it at its next start.</li>
+<li>Some files are shown but cannot be opened: files encrypted by Windows, files
+Windows compressed with its newer compression, and shortcuts that point
+elsewhere on the disk (symbolic links and junctions).</li>
+</ul>
+
+<p><b>Related topics:</b> <a href="drives.htm#props">Drive properties</a> &middot;
+<a href="format.htm">Formatting a disk as NTFS</a> &middot;
+<a href="install.htm">Installing Halcyon next to Windows</a></p>
+</body></html>

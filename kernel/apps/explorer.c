@@ -1005,6 +1005,7 @@ static void ex_destroy(window_t *w) {
 
 void app_explorer(const char *path) {
     window_t *w = wm_create("My Computer", ICON_COMPUTER, -1, -1, 700, 480, WF_RESIZABLE);
+    if (w) w->help = "files";              /* F1 */
     w->min_w = 360; w->min_h = 240;
     ex_t *x = kzalloc(sizeof *x);
     x->win = w;

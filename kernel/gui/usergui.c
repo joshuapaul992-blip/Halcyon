@@ -150,6 +150,7 @@ static void uw_notify(window_t *w, widget_t *wd, int type, int code) {
 }
 static void uw_click(window_t *w, widget_t *wd) { uw_notify(w, wd, EVT_COMMAND, CMD_CLICK); }
 static void uw_activate(window_t *w, widget_t *wd) { uw_notify(w, wd, EVT_COMMAND, CMD_ACTIVATE); }
+static void uw_changed(window_t *w, widget_t *wd) { uw_notify(w, wd, EVT_COMMAND, CMD_CHANGE); }
 static void uw_scroll(window_t *w, widget_t *wd, int part) { uw_notify(w, wd, EVT_SCROLL, part); }
 
 static void uw_menu(window_t *w, int id) {
@@ -329,6 +330,7 @@ static void job_ctl(void *a) {
     wd->style |= (u32)j->style;
     if (j->type == CTL_BUTTON || j->type == CTL_TOOLBUTTON) wd->on_click = uw_click;
     if (j->type == CTL_CHECKBOX || j->type == CTL_LISTBOX) wd->on_change = uw_click;
+    if (j->type == CTL_TEXTBOX && (j->style & CTL_CHANGES)) wd->on_change = uw_changed;
     if (j->type == CTL_TEXTBOX && !w->focus) w->focus = wd;
     if (j->type == CTL_VSCROLL || j->type == CTL_HSCROLL) { wd->on_scroll = uw_scroll; w->on_tick = uw_tick; }
     if (j->type == CTL_STATUSBAR) dock(w);
@@ -751,7 +753,7 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
         if (a4 && copyin_str(j->text, a4, sizeof j->text) == E_INVAL) { kfree(j); return E_INVAL; }
         j->u = u; j->type = (int)a2;
         j->r = unpack_rect(a3);
-        j->id = (int)a5; j->style = (int)(a6 & 0x1FF);
+        j->id = (int)a5; j->style = (int)(a6 & 0x3FF);
         gui_call(job_ctl, j);
         kfree(j);
         wm_invalidate(u->w);

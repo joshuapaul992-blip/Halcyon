@@ -512,6 +512,7 @@ static void np_destroy(window_t *w) {
 
 void app_notepad(const char *path) {
     window_t *w = wm_create("Untitled - Notepad", ICON_NOTEPAD, -1, -1, 620, 440, WF_RESIZABLE);
+    if (w) w->help = "notepad";              /* F1 */
     np_t *n = kzalloc(sizeof *n);
     n->win = w;
     n->cap = 4096;

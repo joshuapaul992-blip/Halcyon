@@ -36,7 +36,7 @@ when there is no sound card) behind a mixer that plays any number of streams at 
 | GUI | Compositing window manager (move, resize, minimize, maximize), drag and drop between windows of any program and the desktop (a drag image, copy / move / no-entry feedback, a right-drag menu), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Theme and wallpaper are kept across restarts (`C:\HALCYON\SETTINGS.INI`). |
 | Display | The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; the QEMU/Bochs/VirtualBox adapter switches at once, with Windows' "keep these settings?" 15-second revert. The frame buffer is write-combining (PAT). |
 | Web | A web browser (Web Browser, `BROWSER.EXE`): HTTP/1.1 and HTTPS, pages with headings, lists, tables, forms and PNG / GIF / BMP images, history, error pages, local files; `WGET.EXE` on the command line. HTTPS through BearSSL (TLS 1.2) with certificates checked against Mozilla's root list. Both are user programs on libweb, a library for URLs, HTTP, TLS and gzip. They reach the network through the internet stack (see Network). See [docs/DESIGN-M6-WEB.md](docs/DESIGN-M6-WEB.md). |
-| Apps | Explorer (My Computer with drive properties and a padlock on read-only drives, file management; copies and deletes in a worker thread; multiple selection with Ctrl and Shift clicks, a rubber band and the keyboard; drag and drop between Explorer windows, the desktop, Notepad, Paint and Media Player; the Recycle Bin: per-drive, restore, empty, a size limit; view and sort order kept; see [docs/DESIGN-M8-EXPLORER.md](docs/DESIGN-M8-EXPLORER.md)), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Media Player (WAV files), Sonar (a mine-hunting puzzle), Control Panel (with Time Zone), Display Properties, Keyboard settings, Network Connections, Sounds and Audio Devices, About. |
+| Apps | Explorer (My Computer with drive properties and a padlock on read-only drives, file management; copies and deletes in a worker thread; multiple selection with Ctrl and Shift clicks, a rubber band and the keyboard; drag and drop between Explorer windows, the desktop, Notepad, Paint and Media Player; the Recycle Bin: per-drive, restore, empty, a size limit; view and sort order kept; see [docs/DESIGN-M8-EXPLORER.md](docs/DESIGN-M8-EXPLORER.md)), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB, multi-level undo and redo, word wrap, Replace, Go To, a choice of fonts), Help and Support (contents, index and full-text search of Halcyon's own help pages; F1 in every program), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Media Player (WAV files), Sonar (a mine-hunting puzzle), Control Panel (with Time Zone), Display Properties, Keyboard settings, Network Connections, Sounds and Audio Devices, About. |
 
 ## Building
 
@@ -127,6 +127,11 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
 - the host keyboard layout test (`tests/host/kbdtest.c`): keys at every level,
   Caps Lock, AltGr, dead keys and shortcut letters of each layout, written from
   the Windows layouts independently of the tables, plus checks on every table
+- the host Notepad tests (`tests/host/notepadtest.c`, run by
+  `tests/host/run.sh`): the text model and undo engine of `NOTEPAD.EXE`
+  compiled for Linux: word wrap against rows made from scratch after random
+  edits and width changes (the stale rows rebuilt in slices meanwhile), undo
+  grouping, the saved state and the memory limit, a 10 MB file
 - the host USB HID tests (`tests/host/hidtest.c`, run first by `tests/host/run.sh`):
   the report descriptor parser and report decoder against QEMU's keyboard, mouse
   and tablet, an n-key-rollover gaming keyboard, a wireless receiver, media key
@@ -175,6 +180,8 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   lost), and
   user mode: `SELFTEST.EXE` runs after boot and checks the system calls, bad
   pointers, crashing and looping child programs, preemption and windows;
+  `HELP.EXE --test` renders every help page and checks its links, the
+  index and the search;
   `SOCKTEST.EXE` checks sockets and poll between copies of itself (large
   transfers, datagrams, timeouts, backlogs, peers that crash or are ended,
   per-program and system-wide limits); and
@@ -245,7 +252,13 @@ settings with `shell_setting_get` / `shell_setting_set`: see
 blit it, then add text). `NOTEPAD.EXE` is Notepad: menus, a scroll bar and a
 status bar from the API below, the text drawn line by line and measured with
 the local font metrics, a gap buffer so editing a file of several megabytes
-stays fast; the shell starts it for text files. `PAINT.EXE` is Paint (the
+stays fast, word wrap rebuilt a slice at a time after a resize, and undo
+(`notepad/doc.c` and `notepad/undo.c`, tested on the host); the shell starts
+it for text files. `HELP.EXE` is Help and Support: the pages in `help/`
+(checked and indexed by `tools/mkhelp.py`, installed in `C:\HALCYON\HELP`)
+drawn with the Web Browser's HTML engine; programs open a page with
+`help_open("notepad")`. See
+[docs/DESIGN-M8-NOTEPAD-HELP.md](docs/DESIGN-M8-NOTEPAD-HELP.md). `PAINT.EXE` is Paint (the
 desktop icon, the Start menu, `.bmp` files and the `PAINT` command start it):
 menus, scroll bars and a status bar from the API, the picture drawn straight
 into the window's mapped pixels (`win_canvas`), and a BMP reader that checks
@@ -293,7 +306,8 @@ The window API in `hal.h` (comments there give the details):
   tab-separated parts. `ctl_move` lays them out again after a resize,
   `ctl_focus` moves the keyboard between controls and the program's own
   drawing, and `CTL_NOTIFY` makes Enter in a text box (or a double click in a
-  list box) send a command.
+  list box) send a command; `CTL_CHANGES` makes a text box report every
+  change (`CMD_CHANGE`).
 - **Dialogs and clipboard:** `msgbox`, `file_dialog`, `inputbox` (a one-line
   question), `clipboard_set_n` for text up to 1 MiB, `clipboard_get`.
 - **Drag and drop:** `dnd_begin` starts a drag of paths while a button is
@@ -301,6 +315,9 @@ The window API in `hal.h` (comments there give the details):
   with `dnd_accept`; `dnd_data` gives the paths; `dnd_open_target` is a whole
   target for programs that open a dropped file (Notepad, Paint, Media
   Player).
+- **Settings and help:** `setting_get` / `setting_set` (and `_int`) keep a
+  program's choices in `SETTINGS.INI` (keys such as `notepad.wrap`);
+  `help_open(page)` opens Help and Support on one of its pages.
 
 Every call checks the program's pointers and bounds its work, and a window's
 menus, controls and canvas go away with the window or the program.
@@ -393,7 +410,8 @@ kernel/apps  applications built into the kernel
 userland/    user-mode runtime (crt0, C library subset, GUI calls) and programs;
              lib/web the web library, lib/wav.c the WAV library, third_party
              BearSSL and the CA list
-tools/       image builder, font, icon and sound generators, QEMU test harness
+help/        Help and Support's pages and contents (tools/mkhelp.py builds C:\HALCYON\HELP)
+tools/       image builder, font, icon and sound generators, help page checker, QEMU test harness
 tests/host   host-side storage, keyboard layout, USB HID, display and network tests, fuzzers
 tests/web    host tests of the web library and the browser's parser and decoders
 tests/sound  host tests of the WAV library

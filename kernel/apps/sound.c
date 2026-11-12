@@ -307,6 +307,7 @@ void app_sound(void) {
     c->tray = sound_tray_enabled();
     for (int i = 0; i < SNDEV_COUNT; i++) c->enabled[i] = sound_event_enabled(i);
     window_t *w = wm_create("Sounds and Audio Devices", ICON_SPEAKER, -1, -1, SW_W, SW_H, WF_NO_MAXIMIZE);
+    if (w) w->help = "sounds";              /* F1 */
     if (!w) { kfree(c); return; }
     sw_win = w;
     w->data = c;

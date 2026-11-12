@@ -1,0 +1,57 @@
+<html><head><title>Command Prompt</title>
+<meta name="keywords" content="Command Prompt; Terminal; commands; DOS commands; DIR; CD; COPY; DEL; TYPE; redirection#redirect; programs, running from the Command Prompt#programs; batch of commands; HELP command">
+</head><body>
+<h2 style="color:#1f4e9a">Command Prompt</h2>
+<p>The Command Prompt is a window where you type commands instead of clicking.
+It feels like the DOS prompt of old Windows versions. Open it from the desktop
+or the <b>Start</b> menu, or right-click a folder in Explorer and choose
+<b>Command Prompt Here</b> to start in that folder.</p>
+<p>Type a command and press <kbd>Enter</kbd>. Commands are not case sensitive:
+<code>dir</code> and <code>DIR</code> are the same. Type <code>HELP</code> to
+see them all.</p>
+
+<h3>Files and folders</h3>
+<table cellpadding="3" cellspacing="0">
+<tr><td width="170"><code>DIR [path] [/W]</code></td><td>Lists a folder (<code>/W</code>: names only, in columns).</td></tr>
+<tr><td><code>CD [path]</code></td><td>Changes to another folder; <code>CD ..</code> goes up one. <code>E:</code> switches to drive E.</td></tr>
+<tr><td><code>TREE [path]</code></td><td>Shows the folders below a folder as a tree.</td></tr>
+<tr><td><code>TYPE file</code></td><td>Shows a text file (<code>HEXDUMP file</code> shows any file byte by byte).</td></tr>
+<tr><td><code>COPY from to</code></td><td>Copies files or folders; <code>MOVE</code> moves them.</td></tr>
+<tr><td><code>DEL file</code></td><td>Deletes files; <code>*</code> and <code>?</code> match several names.</td></tr>
+<tr><td><code>REN old new</code></td><td>Renames a file or folder.</td></tr>
+<tr><td><code>MD dir</code>, <code>RD [/S] dir</code></td><td>Makes or removes a folder (<code>/S</code>: with everything in it).</td></tr>
+<tr><td><code>START file</code></td><td>Opens a file with its program, as a double-click does.</td></tr>
+</table>
+
+<h3>Your computer</h3>
+<table cellpadding="3" cellspacing="0">
+<tr><td width="170"><code>VOL</code>, <code>DRIVES</code>, <code>DISKS</code></td><td>Drives, volumes and disks.</td></tr>
+<tr><td><code>MEM</code></td><td>Memory in use.</td></tr>
+<tr><td><code>LSUSB</code>, <code>LSPCI</code></td><td>USB devices and PCI devices.</td></tr>
+<tr><td><code>IRQ</code></td><td>Interrupts, the timer and how busy the processor is.</td></tr>
+<tr><td><code>DMESG [n]</code></td><td>The last messages of the system log; see <a href="bootlog.htm">The boot log</a>.</td></tr>
+<tr><td><code>DATE</code>, <code>TIME</code>, <code>VER</code></td><td>The date, the time and the Halcyon version.</td></tr>
+<tr><td><code>TASKLIST</code>, <code>TASKKILL</code></td><td>Running programs, and ending one.</td></tr>
+<tr><td><code>FORMAT</code></td><td>Formats a drive; see <a href="format.htm">Formatting a disk</a>.</td></tr>
+<tr><td><code>KEYBOARD</code></td><td>Lists and switches <a href="keyboard.htm">keyboard layouts</a>.</td></tr>
+<tr><td><code>DISPLAY</code></td><td>Opens <a href="display.htm">Display Properties</a>.</td></tr>
+<tr><td><code>SYNC</code>, <code>REBOOT</code>, <code>SHUTDOWN</code></td><td>Writes everything to the disks; restarts; turns off.</td></tr>
+</table>
+
+<h3 id="programs">Running programs</h3>
+<p>Type the name of any program in <code>C:\PROGRAMS</code> to run it, for
+example <code>NOTEPAD readme.txt</code>, <code>PAINT</code> or <code>CALC</code>.
+Programs that write text, such as <code>PING</code>, <code>IPCONFIG</code> and
+<code>NSLOOKUP</code> (see <a href="nettools.htm">Network tools</a>), show it
+in the Command Prompt window. <code>EXPLORER [folder]</code> opens a folder.</p>
+
+<h3 id="redirect">Saving a command's output</h3>
+<p>Add <code>&gt; file</code> to a command to write what it prints to a file,
+or <code>&gt;&gt; file</code> to add it to the end of a file. For example
+<code>DIR C:\Documents &gt; list.txt</code>. <code>ECHO text &gt; file</code>
+writes a line of your own, <code>CLS</code> clears the window and
+<code>COLOR 0A</code> changes its colours.</p>
+
+<p><b>Related topics:</b> <a href="nettools.htm">Network tools</a> &middot;
+<a href="troubleshoot.htm">Solving startup problems</a></p>
+</body></html>

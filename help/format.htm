@@ -1,0 +1,43 @@
+<html><head><title>Formatting a disk</title>
+<meta name="keywords" content="formatting; format a USB stick; quick format; file system, choosing#choose; allocation unit size#choose; cluster size#choose; volume label#choose; FORMAT command#cmd">
+</head><body>
+<h2 style="color:#1f4e9a">Formatting a disk</h2>
+<table width="100%" cellpadding="6" cellspacing="0" bgcolor="#fde8e4"><tr><td>
+<b>Warning</b> Formatting erases <b>everything</b> on the drive. Copy anything
+you want to keep somewhere else first.
+</td></tr></table>
+<p>Formatting prepares a drive with a fresh, empty file system. You might do it
+to clean out an old USB stick, or to use a stick on another kind of computer.</p>
+
+<h3>How to format a drive</h3>
+<ol>
+<li>Open <b>My Computer</b>.</li>
+<li>Right-click the drive and choose <b>Format...</b>.</li>
+<li>Choose the file system, the allocation unit size and a label (see below).</li>
+<li>Click <b>Start</b>, read the warning, and click <b>OK</b> if you are sure.</li>
+</ol>
+<p>Halcyon does a <b>quick format</b>: it writes a new, empty file system
+without checking every sector of the disk, so it takes only a few seconds.
+Halcyon will not format the drive it is running from.</p>
+
+<h3 id="choose">Which settings should I choose?</h3>
+<ul>
+<li><b>File system</b>: Halcyon suggests the same one Windows would. <b>FAT32</b>
+works almost everywhere (but holds no file over 4 GB); <b>exFAT</b> suits large
+sticks and cards and big files; <b>NTFS</b> is what Windows uses for its own
+disks. FAT12 and FAT16 are for very small or very old media.</li>
+<li><b>Allocation unit size</b>: leave it on the default unless you know you
+need something else. Larger units can be a little faster for big files but waste
+space with many small ones.</li>
+<li><b>Volume label</b>: a name for the drive, shown in My Computer.</li>
+</ul>
+
+<h3 id="cmd">Formatting from the Command Prompt</h3>
+<p>The <code>FORMAT</code> command does the same job. For example
+<code>FORMAT E: /FS:NTFS</code> formats drive E: with NTFS. Type
+<code>FORMAT</code> on its own to see the options. See
+<a href="cmd.htm">Command Prompt</a>.</p>
+
+<p><b>Related topics:</b> <a href="drives.htm">Drives, USB sticks and CDs</a> &middot;
+<a href="ntfs.htm">NTFS drives and Windows</a></p>
+</body></html>

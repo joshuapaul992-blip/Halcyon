@@ -25,6 +25,11 @@ interrupts on, get a working interrupt:
   user    run C:\\PROGRAMS\\SELFTEST.EXE after boot (QEMU fw_cfg autorun): user-mode
           system calls, crashing / looping child programs, windows; it must
           report "selftest: all N checks passed"
+  help    run C:\\PROGRAMS\\HELP.EXE --test notepad after boot (Help and Support):
+          the contents and index load, every page in the contents renders and
+          its links lead to pages and anchors, Back / Forward, an anchor, the
+          index filter and the search ranking work; it must report
+          "helptest: all N checks passed"
   sock    run C:\\PROGRAMS\\SOCKTEST.EXE after boot: local stream and datagram
           sockets between programs, poll, limits, peers that crash or are
           ended; it must report "socktest: all N checks passed"
@@ -152,12 +157,12 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "uhci:uefi", "ehci:uefi", "ich9:uefi", "xhci:uefi",
           "xhci:bios:nomsi", "uhci:bios:pic", "xhci:uefi:pic", "ehci:bios:noirq",
           "xhci:bios:nvme", "xhci:uefi:nvme4k", "xhci:bios:nvme+nomsi", "xhci:uefi:nvme+noirq",
-          "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user", "xhci:bios:sock", "xhci:bios:web",
+          "xhci:bios:cd", "xhci:bios:user", "xhci:bios:help", "uhci:uefi:user", "xhci:bios:sock", "xhci:bios:web",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
           "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:bios:ac97+dusk", "xhci:uefi:hda+tide", "xhci:uefi:virtiosnd", "xhci:bios:audio",
           "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:bios:recycle"]
-VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
+VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "help": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0,
             "recycle": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
@@ -204,7 +209,7 @@ CHECKS = [
 ]
 BAD = ["CPU EXCEPTION", "KERNEL PANIC", "nested fault"]
 # variants that run a test program after boot: (program, its report prefix)
-PROGRAMS = {"user": ("SELFTEST.EXE", "selftest"), "sock": ("SOCKTEST.EXE", "socktest"), "web": ("WEBTEST.EXE", "webtest"),
+PROGRAMS = {"user": ("SELFTEST.EXE", "selftest"), "help": ("HELP.EXE", "helptest"), "sock": ("SOCKTEST.EXE", "socktest"), "web": ("WEBTEST.EXE", "webtest"),
             "net": ("NETTEST.EXE", "nettest"), "audio": ("SNDTEST.EXE", "sndtest"), "ntfsrw": ("NTFSTEST.EXE", "ntfstest")}
 PROGRAM_TIMEOUT = {"net": 300}
 NET_LOSS_PCT = 3
@@ -777,7 +782,7 @@ def run(cfg):
         elif "audio" not in opts:       # (SNDTEST plays its own signal instead of the kernel's test)
             extra += " -fw_cfg name=opt/halcyon/soundtest,string=%d" % SOUND_TEST_MS
     prog = next((PROGRAMS[v] for v in opts if v in PROGRAMS), None)
-    prog_args = ""
+    prog_args = " --test notepad" if "help" in opts else ""
     ini_lines = []
     STARTUP_REF[0] = "DUSKSTRT.WAV" if "dusk" in opts else "TIDESTRT.WAV" if "tide" in opts else "STARTUP.WAV"
     for sch in ("dusk", "tide"):

@@ -1,0 +1,91 @@
+<html><head><title>Notepad</title>
+<meta name="keywords" content="Notepad; text files; editing text; undo#undo; redo#undo; Ctrl+Z#undo; Ctrl+Y#undo; word wrap#wrap; wrapping long lines#wrap; fonts in Notepad#font; status bar#status; line and column#status; find text#find; replace text#find; Go To line#find; Time/Date#keys; line endings#save; CR/LF#save; saving files#save; .txt files">
+</head><body>
+<h2 style="color:#1f4e9a">Notepad</h2>
+<p>Notepad is a simple editor for plain text: notes, lists, settings files
+like <code>SETTINGS.INI</code>, or the occasional letter. It opens when you
+double-click a text file (<code>.txt</code>, <code>.ini</code>,
+<code>.log</code> and many more), and you can start it from the desktop or the
+<b>Start</b> menu.</p>
+<p>Notepad handles text in any of Halcyon's keyboard layouts and files of up to
+16 MB, and stays quick even with large files.</p>
+
+<h3 id="undo">Undo and redo</h3>
+<p>Made a mistake? Press <kbd>Ctrl+Z</kbd> (or choose <b>Edit &gt; Undo</b>) to
+take back your last change. Notepad remembers many changes, so you can keep
+pressing <kbd>Ctrl+Z</kbd> to go further back. Changed your mind again? Press
+<kbd>Ctrl+Y</kbd> (<b>Edit &gt; Redo</b>) to put the change back.</p>
+<ul>
+<li>Typing is undone a word at a time. A pause in your typing, a new line or
+moving the cursor also starts a new step.</li>
+<li>Cutting, pasting, deleting a selection, <b>Replace All</b> and inserting the
+time and date are each undone in one step.</li>
+<li>Undo also puts back the selection you had, so you can see exactly what changed.</li>
+<li>If you undo all the way back to the moment you last saved, the asterisk
+(<b>*</b>) disappears from the title bar: the text is the same as the file again.</li>
+</ul>
+<table width="100%" cellpadding="6" cellspacing="0" bgcolor="#fff8dc"><tr><td>
+<b>Note</b> Notepad keeps about 4 MB of changes for undo. With very large edits
+the oldest steps are forgotten first, but your latest change can always be undone.
+</td></tr></table>
+
+<h3 id="wrap">Word wrap</h3>
+<p>Long lines normally run off the right edge of the window and you scroll
+sideways to read them. Choose <b>Format &gt; Word Wrap</b> to fit the lines to
+the window instead: Notepad breaks them between words (a very long word is
+broken wherever it has to be). Resize the window and the text flows again.</p>
+<p>Word wrap only changes how the text is shown. The file itself keeps its long
+lines when you save it. While word wrap is on, the horizontal scroll bar is
+hidden because nothing needs scrolling sideways.</p>
+<p>Notepad remembers whether word wrap is on, even after you restart the computer.</p>
+
+<h3 id="font">Choosing a font</h3>
+<p>Choose <b>Format &gt; Font...</b> to pick the font Notepad uses. The sample
+shows what it looks like before you click <b>OK</b>. The monospace font, where
+every letter is the same width, is best for lists and settings files; the
+sans serif fonts are easier on the eye for longer text. Your choice is kept for
+next time.</p>
+
+<h3 id="status">The status bar</h3>
+<p>The status bar at the bottom shows the size of the file, the number of lines,
+whether the file uses Windows line endings (CR/LF), and where the cursor is:
+<b>Ln</b> is the line and <b>Col</b> the column. With word wrap on, a long line
+that is shown on several rows still counts as one line, so the numbers always
+match the file. Turn the status bar off and on with <b>View &gt; Status Bar</b>.</p>
+
+<h3 id="find">Finding and replacing text</h3>
+<ul>
+<li><b>Edit &gt; Find...</b> (<kbd>Ctrl+F</kbd>) looks for a word or phrase;
+<kbd>F3</kbd> finds the next one. Tick <b>Match case</b> to tell capital
+letters apart.</li>
+<li><b>Edit &gt; Replace...</b> (<kbd>Ctrl+H</kbd>) replaces the text one match
+at a time (<b>Replace</b>) or everywhere at once (<b>Replace All</b>).</li>
+<li><b>Edit &gt; Go To...</b> (<kbd>Ctrl+G</kbd>) jumps to a line number.</li>
+</ul>
+
+<h3 id="keys">Handy keys</h3>
+<table cellpadding="3" cellspacing="0">
+<tr><td><kbd>Ctrl+A</kbd></td><td>Select all the text</td></tr>
+<tr><td><kbd>Ctrl+X</kbd>, <kbd>Ctrl+C</kbd>, <kbd>Ctrl+V</kbd></td><td>Cut, copy and paste</td></tr>
+<tr><td><kbd>Ctrl+Left</kbd>, <kbd>Ctrl+Right</kbd></td><td>Move a word at a time</td></tr>
+<tr><td><kbd>Ctrl+Backspace</kbd></td><td>Delete the word before the cursor</td></tr>
+<tr><td><kbd>Home</kbd>, <kbd>End</kbd></td><td>Start and end of the row (press Home twice to skip the indentation)</td></tr>
+<tr><td><kbd>Ctrl+Home</kbd>, <kbd>Ctrl+End</kbd></td><td>Start and end of the file</td></tr>
+<tr><td><kbd>F5</kbd></td><td>Insert the time and date</td></tr>
+<tr><td><kbd>F1</kbd></td><td>Open this page</td></tr>
+</table>
+<p>When you press <kbd>Enter</kbd>, the new line starts with the same
+indentation as the one before.</p>
+
+<h3 id="save">Saving and line endings</h3>
+<p><b>File &gt; Save</b> (<kbd>Ctrl+S</kbd>) saves your work; <b>Save As...</b>
+saves a copy under another name. If you type a name without an extension,
+Notepad adds <code>.txt</code>. Files are saved with Windows line endings
+(CR/LF), so they open nicely on Windows too; a file that came with Unix line
+endings keeps them. If you try to close Notepad with unsaved changes, it asks
+whether to save them first.</p>
+
+<p><b>Related topics:</b> <a href="files.htm">Files and folders in Explorer</a> &middot;
+<a href="dragdrop.htm">Opening a file by dragging it onto Notepad</a> &middot;
+<a href="shortcuts.htm">Keyboard shortcuts</a></p>
+</body></html>

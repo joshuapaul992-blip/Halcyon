@@ -49,6 +49,7 @@ enum {
      *   160     SYS_WIN_CANVAS: the window's pixels mapped into the program
      *   164     SYS_VOLUME_SET_WRITE: drive properties (core/syscall.c)
      *   168-169 Explorer: built-in shell tools, file details (core/syscall.c)
+     *   170-171 settings of programs in SETTINGS.INI (core/syscall.c)
      *   180-182 drag and drop (gui/dnd.c, through gui/usergui.c)
      *   183-189 the Recycle Bin and Explorer's settings (apps/shellsys.c) */
     SYS_WIN_CANVAS = 160,
@@ -58,6 +59,8 @@ enum {
                                    and the volume is mounted again (E_BUSY while files are open on it) */
     SYS_GETRANDOM = 128,        /* (buf, len <= 65536): cryptographically strong bytes */
     SYS_SHELL_APP = 168, SYS_STAT_EX,
+    SYS_SETTING_GET = 170,      /* (key, buf, n): the value's length (NUL-terminated in buf), E_NOENT */
+    SYS_SETTING_SET = 171,      /* (key, value or NULL to remove): set and save SETTINGS.INI */
     SYS_SOUND_FIRST = 140, SYS_SOUND_LAST = 151,
     /* drag and drop between windows of any program and the desktop (DESIGN-M8-EXPLORER.md) */
     SYS_DND_BEGIN = 180,        /* (win, paths, len, effects | icon << 8, count): start a drag of paths
@@ -227,6 +230,7 @@ typedef struct hal_rbinfo {
 /* EVT_COMMAND notifications (button field) */
 #define CMD_CLICK    0           /* button / tool button clicked, check box or list selection changed */
 #define CMD_ACTIVATE 1           /* CTL_NOTIFY: Enter in a text box, double click or Enter in a list box */
+#define CMD_CHANGE   2           /* CTL_CHANGES: the text of a text box changed (typing, cut, paste) */
 
 /* EVT_SCROLL parts (button field) */
 enum { SCROLL_LINE_UP = 1, SCROLL_LINE_DOWN, SCROLL_PAGE_UP, SCROLL_PAGE_DOWN, SCROLL_THUMB_TRACK,
@@ -255,6 +259,7 @@ enum { CTL_BUTTON = 1, CTL_LABEL, CTL_TEXTBOX, CTL_CHECKBOX, CTL_LISTBOX, CTL_GR
 #define CTL_READONLY 0x40
 #define CTL_WRAP     0x80
 #define CTL_NOTIFY   0x100       /* text box / list box: send EVT_COMMAND with CMD_ACTIVATE */
+#define CTL_CHANGES  0x200       /* text box: send EVT_COMMAND with CMD_CHANGE on every change by the user */
 
 /* menus (SYS_MENU_SET, SYS_MENU_POPUP): a flat array. For a menu bar each
  * MENU_TITLE entry starts a menu ("&File") and the entries after it are its
