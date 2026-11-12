@@ -354,3 +354,80 @@ install and keep using. No new big features: finishing, fixing and testing.
 **Recommended order:** 5 → 9 → 6 → 7 → 7.5 → 8 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17
 (Mesa, M15, comes after the Linux layer, M13, which it runs on; Firefox, M14,
 does not need it.)
+
+## Halcyon 1.1
+
+After 1.0 RTM the version becomes 1.1.<build> (`major_minor` in
+tools/mkversion.sh), and pre-release builds show the watermark again. 1.1
+starts with newer graphics: the generations that M10 and M12 stop short of, up
+to 2020, the year NVIDIA's Ampere came out.
+
+### M18: NVIDIA Turing and Ampere
+
+Generations: Turing (TU102/104/106: RTX 20 series; TU116/117: GTX 16 series;
+2018-2019) and Ampere (GA102/103/104/106/107: RTX 30 series, 2020-2021).
+GA100 is a compute-only chip with no display and is not covered.
+
+- **Display:** Turing and Ampere use the newer display engine (NVDisplay, from
+  Volta on) instead of M10's EVO: the same idea of a command channel to the
+  display, with different channel classes, memory-based notifiers and a new
+  output and clock setup per generation. The M10 features follow: native
+  modes, resolution switching without a reboot, several monitors, hardware
+  cursor, page flips; DisplayPort 1.4 and HDMI 2.0/2.1 links (link training,
+  DSC on high-resolution monitors where needed).
+- **Firmware:** both generations have a GPU System Processor (GSP, a RISC-V
+  core). NVIDIA publishes its firmware (GSP-RM) in linux-firmware under a
+  license that allows redistribution; with it, the GPU's initialisation,
+  power management and engine setup are done by the GSP, and the driver
+  talks to it through a message queue. This is how Turing and Ampere get full
+  clock speeds, unlike Pascal in M10. Modesetting is attempted without the
+  firmware first (as nouveau did before GSP); acceleration and clocks need
+  it. The firmware is large (tens of MB per generation), so it lives in a
+  separate firmware pack on the image or the disk, not in the kernel.
+- **Sources:** NVIDIA's open GPU kernel modules (released under MIT and GPLv2:
+  the MIT terms allow porting, with copyright notices kept), open-gpu-doc,
+  envytools and nouveau (MIT).
+- **3D:** M15's approach extended: the nouveau DRM interface on top of the
+  GSP-based driver, and Mesa on top. Vulkan through NVK is at its best on
+  Turing and later, so these cards become the preferred ones for Xenithium
+  (M16) and Firefox's GPU rendering.
+- **Testing:** no test card at hand yet (the GTX 1070 is Pascal); VFIO
+  passthrough or bare metal, with `BOOT.LOG` reports from testers.
+- Depends on M10 (identification, the display framework) and, for 3D, M15.
+
+### M19: Intel and AMD graphics up to 2020
+
+M12's range carried forward to the same point in time.
+
+- **Intel:**
+  - Gen11 (Ice Lake, 2019; Jasper Lake and Elkhart Lake) and Gen12 / Xe-LP
+    (Tiger Lake 2020, Rocket Lake 2021, Iris Xe MAX "DG1" as the first Intel
+    discrete GPU).
+  - The display engine changed a lot: Type-C ports with DisplayPort Alt Mode
+    and Thunderbolt (a handshake with the Type-C subsystem before a port can
+    be used), new combo PHYs, the display state buffer, and power wells that
+    the display microcontroller (DMC) firmware manages in low-power states
+    (redistributable, in linux-firmware).
+  - Intel still publishes programmer's reference manuals for these
+    generations.
+- **AMD:**
+  - Vega (Vega 56/64 and Radeon VII, and the Raven Ridge, Picasso and Renoir
+    APUs, 2017-2020), RDNA1 (Navi 10/14: RX 5000, 2019) and RDNA2 (Navi
+    21-23: RX 6000, November 2020: two months after Ampere, the same
+    generation).
+  - These are the cards M12 deferred: their platform security processor
+    (PSP) must first load AMD's signed firmware (system management unit,
+    display microcontroller DMCUB, and others; redistributable, in
+    linux-firmware), and their display code (DCN 1.0 to 3.0) is very large.
+    The amdgpu driver's display core is MIT-licensed; porting the needed
+    parts, rather than writing DCN from scratch, is the realistic path.
+- **3D on both:** as for NVIDIA: the Linux DRM interfaces (i915 or amdgpu)
+  behind Halcyon's drivers and Mesa's drivers on top (iris and ANV for
+  Intel, radeonsi and RADV for AMD), on M13.
+- **Testing:** AMD through VFIO passthrough; Intel on laptops and NUCs (bare
+  metal).
+- Depends on M12 and, for 3D, M13 and M15.
+
+**1.1 order:** 18 → 19, then a 1.1 release in the style of M17 (release
+candidates, hardware matrix, 1.1 RTM).
+
