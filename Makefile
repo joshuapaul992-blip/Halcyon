@@ -135,6 +135,14 @@ $(BUILD)/user/notepad.exe: userland/programs/notepad.c $(NOTEPAD_SRC) $(wildcard
 	strip $@
 
 IMG_DEPS += $(UPROGS)
+
+# screen savers (userland/savers/*.c): ordinary programs named NAME.SCR
+USAVERS := $(patsubst userland/savers/%.c,$(BUILD)/user/%.scr,$(wildcard userland/savers/*.c))
+$(BUILD)/user/%.scr: userland/savers/%.c userland/savers/saver.h $(ULIB) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $<
+	strip $@
+IMG_DEPS += $(USAVERS)
 .SECONDARY: $(ULIB) $(WAVLIB)
 
 # ---- libraries linked only into the programs that use them ----

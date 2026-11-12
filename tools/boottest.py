@@ -71,6 +71,13 @@ interrupts on, get a working interrupt:
           desktop is up; afterwards the partition table must say 0x07 and the
           partition must pass ntfsfix -n, ntfsinfo -m (label, cluster size)
           and tests/host/ntfs_tool.py check on the host (ntfs-3g tools)
+  saver   the screen saver test hook (fw_cfg screensaver = "5:STARS.SCR"), with
+          GUIDEMO.EXE running (it logs the input it gets): after 5 s without
+          input Starfield must start full screen and a screendump be mostly
+          black with stars; a click on GUIDEMO's window must end it without
+          reaching GUIDEMO (press or release) and the desktop come back, the
+          next click must reach it; started again, a key must end it, and
+          the third time a mouse movement
   recycle the Recycle Bin and drag and drop (QEMU fw_cfg recycletest, a kernel
           thread: kernel/apps/recycletest.c): on the FAT32 test disk a file
           goes to the bin and stays, another goes to the bin, its folder is
@@ -165,11 +172,11 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
           "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:bios:ac97+dusk", "xhci:uefi:hda+tide", "xhci:uefi:virtiosnd", "xhci:bios:audio",
-          "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:bios:recycle",
+          "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:bios:recycle", "xhci:bios:saver",
           "xhci:uefi:install", "xhci:bios:install"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "help": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0,
-            "recycle": 0}
+            "recycle": 0, "saver": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -281,6 +288,82 @@ def cd_media_change(log, isos):
     subprocess.run([sys.executable, "tools/qemu_ctl.py", mon, "change cd0 %s" % isos[1]], stdout=subprocess.DEVNULL)
     if not wait_log(log, "ISO9660 'SECONDDISC' on cd0", start, 8):
         fails.append("second CD not mounted")
+    return fails
+
+
+def screen_stats(png):
+    """(share of dark pixels, share of bright pixels) of a screendump"""
+    from PIL import Image
+    im = Image.open(png).convert("L")
+    h = im.histogram()
+    n = sum(h) or 1
+    return sum(h[:24]) / n, sum(h[121:]) / n
+
+
+def saver_test(log):
+    """the screen saver (GUIDEMO.EXE runs and logs the input it gets): it
+    starts after the wait and shows stars without the pointer; a click on
+    GUIDEMO's window ends it and reaches GUIDEMO neither as the press nor as
+    the release, the next click does; it starts again and a key ends it,
+    and again, a mouse movement"""
+    mon = os.path.join(BUILD, "mon.sock")
+    png = os.path.abspath(os.path.join(BUILD, "ci_saver.png"))
+    fails = []
+
+    def ctl(*cmds):
+        subprocess.run([sys.executable, "tools/qemu_ctl.py", mon] + list(cmds), stdout=subprocess.DEVNULL)
+
+    def offset():
+        return len(open(log, errors="replace").read())
+
+    if not wait_log(log, "guidemo: window client at", 0, 30):
+        return ["GUIDEMO.EXE did not start"]
+    text = open(log, errors="replace").read()
+    m = re.search(r"guidemo: window client at (-?\d+),(-?\d+) size (\d+)x(\d+)", text)
+    cx, cy = (int(m.group(1)) + int(m.group(3)) // 2, int(m.group(2)) + int(m.group(4)) // 2) if m else (512, 384)
+    s = re.search(r"desktop ready \((\d+)x(\d+)\)", text)
+    if s:                                # qemu_ctl's pointer positions are for 1024 x 768
+        cx, cy = cx * 1024 // int(s.group(1)), cy * 768 // int(s.group(2))
+    ctl("move:%d,%d" % (cx, cy))         # the pointer waits on the window: the click is a click only
+    start = offset()
+    if not wait_log(log, "screensaver: STARS.SCR is showing", start, 30):
+        return ["screen saver did not start"]
+    time.sleep(1.5)
+    ctl("png:" + png)
+    dark, bright = screen_stats(png)
+    if dark < 0.9 or bright < 0.0003:
+        fails.append("screen saver frame: %.0f%% dark, %.2f%% bright" % (dark * 100, bright * 100))
+    start = offset()
+    ctl("click:%d,%d" % (cx, cy))
+    if not wait_log(log, "screensaver: stopped (click)", start, 8):
+        fails.append("a click did not end the screen saver")
+    time.sleep(1)
+    after = open(log, errors="replace").read()[start:]
+    if "guidemo: press at" in after or "guidemo: drag" in after:
+        fails.append("the click that ended the screen saver reached the window")
+    ctl("png:" + png)
+    dark, bright = screen_stats(png)
+    if dark > 0.5:
+        fails.append("desktop not back after the screen saver (%.0f%% dark)" % (dark * 100))
+    start = offset()
+    ctl("click:%d,%d" % (cx, cy))
+    if not wait_log(log, "guidemo: press at", start, 5):
+        fails.append("a click after the screen saver did not reach the window")
+    start = offset()
+    if not wait_log(log, "screensaver: STARS.SCR is showing", start, 15):
+        return fails + ["screen saver did not start again"]
+    start = offset()
+    ctl("sendkey a")
+    if not wait_log(log, "screensaver: stopped (key)", start, 8):
+        fails.append("a key did not end the screen saver")
+    start = offset()
+    if not wait_log(log, "screensaver: STARS.SCR is showing", start, 15):
+        return fails + ["screen saver did not start a third time"]
+    time.sleep(1.2)                  # (motion right after a start is ignored)
+    start = offset()
+    ctl("move:200,150", "move:600,500")
+    if not wait_log(log, "screensaver: stopped (mouse moved)", start, 8):
+        fails.append("mouse movement did not end the screen saver")
     return fails
 
 
@@ -1192,6 +1275,13 @@ def run(cfg):
         with open(argf, "w") as f:
             f.write("C:/PROGRAMS/" + prog[0] + prog_args)
         extra += " -fw_cfg name=opt/halcyon/autorun,file=" + argf
+    if "saver" in opts:
+        extra += " -fw_cfg name=opt/halcyon/screensaver,string=5:STARS.SCR"
+        if not prog:                     # GUIDEMO.EXE logs the input that reaches it
+            argf = os.path.abspath(os.path.join(BUILD, "ci_autorun.txt"))
+            with open(argf, "w") as f:
+                f.write("C:/PROGRAMS/GUIDEMO.EXE")
+            extra += " -fw_cfg name=opt/halcyon/autorun,file=" + argf
     if "switch" in opts:
         extra += " -fw_cfg name=opt/halcyon/setmode,string=1600x900"
         checks.append(("live mode switch", "test mode switch to 1600x900: ok (desktop 1600x900)"))
@@ -1275,7 +1365,11 @@ def run(cfg):
             time.sleep(0.5)
             text = open(log, errors="replace").read()
     idle = None
-    if p.poll() is None and "gui: desktop ready" in text and not prog:
+    saver_fails = []
+    if "saver" in opts and p.poll() is None and "gui: desktop ready" in text:
+        saver_fails = saver_test(log)
+        text = open(log, errors="replace").read()
+    if p.poll() is None and "gui: desktop ready" in text and not prog and "saver" not in opts:
         time.sleep(2)
         c0 = cpu_seconds(p.pid)
         time.sleep(4)
@@ -1311,6 +1405,7 @@ def run(cfg):
             failures.append("CD volume")
         failures += cd_fails
     failures += kbd_fails
+    failures += saver_fails
     if ntfs_disk:
         failures += ntfs_failures(text, ntfs_disk)
     if ntfsrw_disk:

@@ -39,6 +39,10 @@ if ls $BUILD/user/*.exe >/dev/null 2>&1; then
         n=$(basename "$f" | tr a-z A-Z)
         mcopy -i "$PART" "$f" "::/PROGRAMS/$n"
     done
+    # screen savers (build/user/*.scr -> C:\PROGRAMS\NAME.SCR)
+    for f in $BUILD/user/*.scr; do
+        [ -e "$f" ] && mcopy -i "$PART" "$f" "::/PROGRAMS/$(basename "$f" | tr a-z A-Z)"
+    done
 fi
 # system sounds (tools/mksounds.py)
 if ls $BUILD/media/*.WAV >/dev/null 2>&1; then

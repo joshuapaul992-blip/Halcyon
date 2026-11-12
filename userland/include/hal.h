@@ -169,17 +169,25 @@ static inline int dnd_data(int serial, char *buf, int size) { return (int)SC3(SY
  * (its path in path), else 0 (it answers DND_ENTER / DND_OVER itself) */
 int  dnd_open_target(const hal_event_t *ev, const char *exts, char *path, int pathsz);
 
-/* ---- settings kept in C:\HALCYON\SETTINGS.INI ("program.name" keys of
- * letters, digits, '.', '-', '_'; values of one line, up to 127 bytes) ---- */
-/* the value's length (the value, NUL-terminated, in buf), or E_NOENT */
-static inline int setting_get(const char *key, char *buf, int n) { return (int)SC3(SYS_SETTING_GET, key, buf, n); }
-static inline int setting_set(const char *key, const char *value) { return (int)SC2(SYS_SETTING_SET, key, value); }   /* NULL removes; saved at once */
-int  setting_get_int(const char *key, int def);
-int  setting_set_int(const char *key, int value);
-
 /* ---- help: opens HELP.EXE (Help and Support) on a page of
  * C:\HALCYON\HELP, e.g. help_open("notepad"), or the contents (NULL) ---- */
 int  help_open(const char *page);
+/* ---- settings kept in C:\HALCYON\SETTINGS.INI. Any key can be read; a
+ * program writes only keys named after it: "paint.*" for PAINT.EXE,
+ * "marquee.*" for MARQUEE.SCR (else E_PERM), of letters, digits, '.', '-',
+ * '_', with one-line values up to 599 bytes, at most 64 keys per program.
+ * Changes are written to the file a moment later, coalesced, and survive
+ * the program ending at once. ---- */
+/* the value's length (the value, NUL-terminated, in buf), or E_NOENT */
+static inline int setting_get(const char *key, char *buf, int n) { return (int)SC3(SYS_SETTING_GET, key, buf, n); }
+static inline int setting_set(const char *key, const char *value) { return (int)SC2(SYS_SETTING_SET, key, value); }   /* NULL removes */
+int  setting_get_int(const char *key, int def);
+int  setting_set_int(const char *key, int value);
+
+/* ---- the screen saver: while on (and the program runs), it does not
+ * start (Media Player while it plays). A WIN_FULLSCREEN window keeps it
+ * away too. ---- */
+static inline int keep_awake(int on) { return (int)SC1(SYS_KEEP_AWAKE, on); }
 
 /* ---- files (fd 0/1/2: console) ---- */
 static inline int open(const char *p, int flags) { return (int)SC2(SYS_OPEN, p, flags); }
@@ -244,6 +252,12 @@ int getline(char *buf, int n);
 typedef struct { int x, y, w, h; } hal_rect_t;
 #define RGB(r, g, b) ((unsigned)(((r) << 16) | ((g) << 8) | (b)))
 int  win_create(const char *title, int w, int h, int flags);   /* client size; window handle */
+int  win_create_preview(const char *title, int handle);           /* a screen saver's "/p <handle>" window (WIN_PREVIEW) */
+/* only the rectangle x, y, w, h of the canvas changed: cheaper than win_invalidate (no controls over it) */
+static inline void win_invalidate_rect(int win, int x, int y, int w, int h) {
+    SC2(SYS_WIN_INVALIDATE_RECT, win, (long)((unsigned long)(unsigned short)x << 48 | (unsigned long)(unsigned short)y << 32 |
+                                             (unsigned long)(unsigned short)w << 16 | (unsigned short)h));
+}
 void win_destroy(int win);
 void win_set_title(int win, const char *title);
 void win_invalidate(int win);                                    /* repaint the client area */

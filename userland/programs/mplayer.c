@@ -232,6 +232,7 @@ static void update_controls(void) {
     menu_enable(win, M_BACK, state != ST_NONE);
     menu_enable(win, M_AHEAD, state != ST_NONE);
     set_status(state == ST_NONE ? "Ready" : state == ST_PLAYING ? "Playing" : state == ST_PAUSED ? "Paused" : "Stopped");
+    keep_awake(state == ST_PLAYING);   /* no screen saver while it plays */
 }
 
 /* the meter follows the samples at the playing position */

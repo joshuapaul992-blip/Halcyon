@@ -29,6 +29,7 @@ Control Panel and settings
   Control Panel|control.htm
   Display Properties|display.htm
   Screen savers|screensaver.htm
+  Mouse Properties|mouse.htm
   Keyboard and input languages|keyboard.htm
   Sounds and Audio Devices|sounds.htm
   Date, time and time zone|timezone.htm

@@ -671,7 +671,12 @@ static void finish_move(sonar_t *s) {
     } else if (s->state == ST_WON) {
         char msg[200];
         int lvl = s->level, rec = s->seconds < best_time[lvl];
-        if (rec) best_time[lvl] = s->seconds;
+        if (rec) {
+            best_time[lvl] = s->seconds;
+            char key[24];
+            snprintf(key, sizeof key, "sonar.best%d", lvl);
+            setting_set_int(key, s->seconds);       /* kept in SETTINGS.INI */
+        }
         snprintf(msg, sizeof msg, "Bay cleared! You charted all %d sea mines in %d second%s.%s", s->nmines, s->seconds,
                  s->seconds == 1 ? "" : "s", rec ? "\n\nThat is a new best time for this level." : "");
         msgbox(win, "Sonar", msg, MBX_ICON_INFO, MBX_OK);
@@ -680,6 +685,7 @@ static void finish_move(sonar_t *s) {
 
 static void set_level(sonar_t *s, int lvl) {
     s->level = lvl;
+    setting_set_int("sonar.level", lvl);
     new_game(s);
     s->hover_cell = -1;
     int cw, ch;
@@ -824,7 +830,15 @@ static void handle(sonar_t *s, hal_event_t *e) {
 int main(int argc, char **argv) {
     sonar_t *s = &S;
     s->rng = entropy() | 1;
-    s->level = 0;
+    /* the level and the best times of last time (SETTINGS.INI) */
+    s->level = setting_get_int("sonar.level", 0);
+    if (s->level < 0 || s->level > 2) s->level = 0;
+    for (int i = 0; i < 3; i++) {
+        char key[24];
+        snprintf(key, sizeof key, "sonar.best%d", i);
+        int b = setting_get_int(key, 999);
+        if (b > 0 && b < 999) best_time[i] = b;
+    }
     s->hover_cell = s->bar_hover = s->bar_pressed = -1;
     s->active = 1;
     s->mx = s->my = -10000;

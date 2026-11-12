@@ -93,6 +93,10 @@ struct widget {
 #define WF_NO_CLOSE    0x0040
 #define WF_CENTER      0x0080   /* center on screen when created */
 #define WF_NOSHADOW    0x0100
+#define WF_FULLSCREEN  0x0200   /* no frame, the whole screen (with WF_TOPMOST: over the taskbar) */
+#define WF_SAVER       0x0400   /* part of the running screen saver: above everything, gets no input */
+#define WF_EMBED       0x0800   /* drawn inside its owner's client area at restore.x/y (a screen
+                                   saver's preview): never active, clicks go to the owner */
 
 enum { WS_NORMAL = 0, WS_MINIMIZED, WS_MAXIMIZED };
 
@@ -129,6 +133,9 @@ struct window {
     int closed;               /* set when destroyed (for nested loops) */
     const char *help;         /* F1 opens this Help and Support page (shell_help), or NULL */
     window_t *next;           /* z-order, bottom to top */
+    char place_key[40];       /* "window.<key>" in SETTINGS.INI keeps its place and size (wm_place_restore) */
+    int place_top;            /* height not counted in the saved size (a user program's menu bar) */
+    surface_t *direct;        /* a full-screen program's canvas, drawn as it is (no copy into client) */
 };
 
 enum { CURSOR_ARROW = 0, CURSOR_IBEAM, CURSOR_BUSY, CURSOR_RESIZE_NWSE, CURSOR_RESIZE_H, CURSOR_RESIZE_V, CURSOR_HAND, CURSOR_CROSS };
@@ -152,6 +159,15 @@ int  wm_mouse_x(void);
 int  wm_mouse_y(void);
 void wm_set_busy(int busy);            /* hourglass cursor */
 void wm_cursor_changed(void);          /* a window's cursor shape changed: redraw the pointer */
+/* window places that survive a reboot: put w where "window.<key>" says
+ * (clamped to the screen; the size too if resizable; maximized again if it
+ * was) and keep that setting up to date from now on */
+void wm_place_restore(window_t *w, const char *key);
+/* the mouse (Control Panel, Mouse): pointer speed 1..20 (10 = as moved),
+ * double-click time in ms, primary and secondary buttons swapped */
+void wm_mouse_config(int speed, int dblclick_ms, int swap);
+void wm_mouse_get(int *speed, int *dblclick_ms, int *swap);
+void wm_mouse_load(void);              /* from SETTINGS.INI (mouse.*) */
 window_t *wm_window_at(int x, int y);  /* the window at a screen position (drag and drop) */
 int  wm_mouse_buttons(void);           /* MOUSE_* held */
 void wm_capture_release(void);         /* a drag starts: no window has the mouse any more */
@@ -271,6 +287,27 @@ void drive_props_dialog(window_t *owner, char letter);   /* apps/driveprops.c */
 void format_test_hook(void);                       /* apps/format.c: QEMU fw_cfg opt/halcyon/formattest */
 void app_installer(void);                          /* apps/installer.c: Halcyon Setup (Install Halcyon) */
 void installer_boot_hook(void);                    /* apps/installer.c: welcome prompt, test hook */
+/* screen savers (gui/saver.c; docs/DESIGN-M8-SCREENSAVER-SETTINGS.md) */
+#define SAVER_MAX 32
+typedef struct saver_info { char file[64]; char name[64]; } saver_info_t;
+void saver_init(void);                 /* settings, test hook */
+void saver_reload(void);               /* screensaver.* changed */
+int  saver_input(const input_event_t *ev);   /* 1: consumed (it ended the saver, or follows that) */
+void saver_tick(void);                 /* each GUI step: start after the wait */
+int  saver_active(void);
+void saver_start(const char *file);    /* now, until input ("" = blank screen) */
+void saver_stop(const char *why);
+int  saver_list(saver_info_t *out, int max);   /* C:\PROGRAMS\*.SCR with their display names */
+int  saver_is_saver_pid(u32 pid);       /* the running screen saver's process */
+int  saver_keep_awake(u32 pid, int on); /* SYS_KEEP_AWAKE */
+/* a preview box for "/p <handle>": returns the handle; the program started
+ * with it (pid) may create a WIN_PREVIEW window, drawn in host at r */
+int  saver_preview_open(window_t *host, rect_t r);
+void saver_preview_set_pid(int handle, u32 pid);
+void saver_preview_close(int handle);  /* ends its program */
+window_t *saver_preview_host(int handle, u32 pid, rect_t *r);
+void mouse_dialog(void);               /* apps/mouse.c: Control Panel, Mouse */
+void app_display_saver(void);          /* Display Properties on its Screen Saver tab */
 struct proc;
 int  gui_ask_permission(struct proc *asker, const char *title, const char *text);   /* permit.c */
 int  shell_run(const char *path, const char *args);   /* start a user program; pid or error (reported) */

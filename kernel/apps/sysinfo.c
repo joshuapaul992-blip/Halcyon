@@ -458,4 +458,5 @@ void app_sysinfo(void) {
     widget_t *c = widget_add(w, W_BUTTON, mkrect(w->client->w - 88, y, 80, 24), "Close", 3);
     c->on_click = si_close; c->style |= WS_CANCEL;
     build(s);
+    wm_place_restore(w, "sysinfo");      /* where it was last time (window.sysinfo) */
 }

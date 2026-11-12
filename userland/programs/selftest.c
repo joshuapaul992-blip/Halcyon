@@ -69,6 +69,22 @@ int main(int argc, char **argv) {
     }
     printf("selftest: starting (pid %d)\n", getpid());
 
+    /* settings (SETTINGS.INI): a program's own keys only */
+    {
+        char v[64];
+        CHECK(setting_set("selftest.value", "hello, world") == 0, "setting_set own key");
+        CHECK(setting_get("selftest.value", v, sizeof v) == 12 && !strcmp(v, "hello, world"), "setting_get");
+        CHECK(setting_get("selftest.value", v, 6) == 12 && !strcmp(v, "hello"), "setting_get truncated");
+        CHECK(setting_set_int("selftest.number", -42) == 0 && setting_get_int("selftest.number", 0) == -42, "setting int");
+        CHECK(setting_set("paint.fg", "000000") == E_PERM, "another program's key");
+        CHECK(setting_set("ntfs.write.0000000000000001", "1") == E_PERM, "a permission key");
+        CHECK(setting_set("selftest.bad key", "1") == E_INVAL && setting_set("selftest.x", "a\nb") == E_INVAL, "bad key / value");
+        CHECK(setting_set("selftest.value", 0) == 0 && setting_get("selftest.value", v, sizeof v) == E_NOENT, "remove");
+        CHECK(setting_set("selftest.number", 0) == 0, "remove 2");
+        CHECK(setting_get((const char *)16, v, sizeof v) == E_INVAL && setting_get("selftest.x", (char *)16, 8) != 0, "bad pointers");
+        CHECK(keep_awake(1) == 0 && keep_awake(0) == 0, "keep_awake");
+    }
+
     /* files */
     const char *dir = "C:/SELFTEST.TMP";
     mkdir(dir);

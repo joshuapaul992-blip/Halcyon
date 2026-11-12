@@ -362,6 +362,7 @@ static void on_keyboard(window_t *w, widget_t *b) { app_keyboard(); }
 static void on_network(window_t *w, widget_t *b) { (void)w; (void)b; app_network(); }
 static void on_sound(window_t *w, widget_t *b) { (void)w; (void)b; app_sound(); }
 static void on_timezone(window_t *w, widget_t *b) { (void)b; app_timezone(w); }
+static void on_mouse(window_t *w, widget_t *b) { (void)w; (void)b; mouse_dialog(); }
 
 static void cp_tick(window_t *w) {
     cpanel_t *c = w->data;
@@ -415,14 +416,18 @@ void app_control(void) {
     widget_t *cn = widget_add(w, W_BUTTON, mkrect(CP_W - 12 - 2 * 75 - 8, CP_H - 35, 75, 23), "Cancel", ID_CANCEL);
     cn->style |= WS_CANCEL; cn->on_click = on_cancel;
     widget_t *ap = widget_add(w, W_BUTTON, mkrect(CP_W - 12 - 75, CP_H - 35, 75, 23), "Apply", ID_APPLY);
-    widget_t *db = widget_add(w, W_BUTTON, mkrect(12, CP_H - 35, 80, 23), "Display...", 0);
+    /* the other settings: five buttons left of OK */
+    widget_t *db = widget_add(w, W_BUTTON, mkrect(12, CP_H - 35, 68, 23), "Display...", 0);
     db->on_click = on_display;
     ap->style |= WS_DISABLED; ap->on_click = on_apply;
-    widget_t *kb = widget_add(w, W_BUTTON, mkrect(98, CP_H - 35, 80, 23), "Keyboard...", 0);
+    widget_t *kb = widget_add(w, W_BUTTON, mkrect(82, CP_H - 35, 70, 23), "Keyboard...", 0);
     kb->on_click = on_keyboard;
-    widget_t *nb = widget_add(w, W_BUTTON, mkrect(184, CP_H - 35, 80, 23), "Network...", 0);
+    widget_t *mb = widget_add(w, W_BUTTON, mkrect(154, CP_H - 35, 64, 23), "Mouse...", 0);
+    mb->on_click = on_mouse;
+    strlcpy(mb->tip, "Mouse: buttons, double-click speed, pointer speed", sizeof mb->tip);
+    widget_t *nb = widget_add(w, W_BUTTON, mkrect(220, CP_H - 35, 70, 23), "Network...", 0);
     nb->on_click = on_network;
-    widget_t *sb = widget_add(w, W_BUTTON, mkrect(270, CP_H - 35, 80, 23), "Sounds...", 0);
+    widget_t *sb = widget_add(w, W_BUTTON, mkrect(292, CP_H - 35, 68, 23), "Sounds...", 0);
     sb->on_click = on_sound;
     strlcpy(sb->tip, "Sounds and Audio Devices: volume, sound cards, system sounds", sizeof sb->tip);
     widget_t *tz = widget_add(w, W_BUTTON, mkrect(COL2 + 112, 68 + 88, 138, 22), "", ID_TZBTN);
@@ -431,4 +436,5 @@ void app_control(void) {
     tz_button_text(w);
     w->focus = tl;
     cp_win = w;
+    wm_place_restore(w, "control");
 }

@@ -49,7 +49,9 @@ enum {
      *   160     SYS_WIN_CANVAS: the window's pixels mapped into the program
      *   164     SYS_VOLUME_SET_WRITE: drive properties (core/syscall.c)
      *   168-169 Explorer: built-in shell tools, file details (core/syscall.c)
-     *   170-171 settings of programs in SETTINGS.INI (core/syscall.c)
+     *   170-171 programs' settings in SETTINGS.INI (core/syscall.c)
+     *   176     SYS_KEEP_AWAKE: no screen saver while a program plays (gui/saver.c)
+     *   177     SYS_WIN_INVALIDATE_RECT (gui/usergui.c)
      *   180-182 drag and drop (gui/dnd.c, through gui/usergui.c)
      *   183-189 the Recycle Bin and Explorer's settings (apps/shellsys.c) */
     SYS_WIN_CANVAS = 160,
@@ -60,7 +62,10 @@ enum {
     SYS_GETRANDOM = 128,        /* (buf, len <= 65536): cryptographically strong bytes */
     SYS_SHELL_APP = 168, SYS_STAT_EX,
     SYS_SETTING_GET = 170,      /* (key, buf, n): the value's length (NUL-terminated in buf), E_NOENT */
-    SYS_SETTING_SET = 171,      /* (key, value or NULL to remove): set and save SETTINGS.INI */
+    SYS_SETTING_SET = 171,      /* (key, value or NULL to remove): keys "<program>.*" only (E_PERM);
+                                   saved in SETTINGS.INI a moment later (changes are coalesced) */
+    SYS_KEEP_AWAKE = 176,       /* (on): while on (and the program runs) the screen saver does not start */
+    SYS_WIN_INVALIDATE_RECT = 177,  /* (win, x << 48 | y << 32 | w << 16 | h): only that part of the canvas changed */
     SYS_SOUND_FIRST = 140, SYS_SOUND_LAST = 151,
     /* drag and drop between windows of any program and the desktop (DESIGN-M8-EXPLORER.md) */
     SYS_DND_BEGIN = 180,        /* (win, paths, len, effects | icon << 8, count): start a drag of paths
@@ -240,6 +245,11 @@ enum { SCROLL_LINE_UP = 1, SCROLL_LINE_DOWN, SCROLL_PAGE_UP, SCROLL_PAGE_DOWN, S
 #define WIN_RESIZABLE 0x01
 #define WIN_DIALOG    0x02
 #define WIN_NO_MAX    0x04
+#define WIN_FULLSCREEN 0x100     /* no frame, the whole screen, above the taskbar (screen savers, video);
+                                    w and h are ignored. While one is shown the screen saver waits. */
+#define WIN_PREVIEW   0x200      /* a screen saver's "/p <handle>" preview: the window is drawn inside
+                                    the box Display Properties shows; win_create's 5th argument is the
+                                    handle, w and h are the box's (win_create_preview) */
 
 /* fonts for SYS_GFX_TEXT* */
 enum { FONT_UI = 0, FONT_UI_BOLD, FONT_TITLE, FONT_MONO, FONT_LARGE, FONT_HUGE, FONT_SMALL };

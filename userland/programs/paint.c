@@ -1188,6 +1188,49 @@ static void mouse_move(const hal_event_t *e, layout_t *L) {
     if (h != hover) { hover = h; need |= N_TOOLS; }
 }
 
+/* ---- the colours, palette, tool and tool options survive a restart:
+ * paint.fg / paint.bg / paint.palette (RRGGBB, the 28 cells), paint.tool,
+ * paint.options (one digit per tool), kept in SETTINGS.INI ---- */
+static char prefs_last[400];
+static void prefs_text(char *out, int n) {
+    int o = snprintf(out, (size_t)n, "%06x|%06x|%d|", fg & 0xFFFFFF, bg & 0xFFFFFF, tool == T_PICK ? prev_tool : tool);
+    for (int i = 0; i < NTOOLS && o < n - 1; i++) out[o++] = (char)('0' + (opt[i] & 3));
+    for (int i = 0; i < 28 && o < n - 8; i++) o += snprintf(out + o, (size_t)(n - o), "%c%06x", i ? ',' : '|', pal[i] & 0xFFFFFF);
+    out[o < n ? o : n - 1] = 0;
+}
+static unsigned hex_at(const char *s) { return (unsigned)strtol(s, 0, 16) & 0xFFFFFF; }
+static void prefs_load(void) {
+    char b[300];
+    if (setting_get("paint.fg", b, sizeof b) == 6) fg = OPAQUE | hex_at(b);
+    if (setting_get("paint.bg", b, sizeof b) == 6) bg = OPAQUE | hex_at(b);
+    int t = setting_get_int("paint.tool", T_PENCIL);
+    if (t >= 0 && t < NTOOLS && t != T_PICK) tool = prev_tool = t;
+    if (setting_get("paint.options", b, sizeof b) == NTOOLS)
+        for (int i = 0; i < NTOOLS; i++) if (b[i] >= '0' && b[i] <= '3') opt[i] = b[i] - '0';
+    if (setting_get("paint.palette", b, sizeof b) == 28 * 7 - 1)
+        for (int i = 0; i < 28; i++) pal[i] = OPAQUE | hex_at(b + i * 7);
+    prefs_text(prefs_last, sizeof prefs_last);
+}
+/* after each batch of events: write what changed (the kernel coalesces) */
+static void prefs_sync(void) {
+    char now[400], b[300];
+    prefs_text(now, sizeof now);
+    if (!strcmp(now, prefs_last)) return;
+    strlcpy(prefs_last, now, sizeof prefs_last);
+    snprintf(b, sizeof b, "%06x", fg & 0xFFFFFF); setting_set("paint.fg", b);
+    snprintf(b, sizeof b, "%06x", bg & 0xFFFFFF); setting_set("paint.bg", b);
+    setting_set_int("paint.tool", tool == T_PICK ? prev_tool : tool);
+    for (int i = 0; i < NTOOLS; i++) b[i] = (char)('0' + (opt[i] & 3));
+    b[NTOOLS] = 0;
+    setting_set("paint.options", b);
+    int o = 0, custom = 0;
+    for (int i = 0; i < 28; i++) {
+        o += snprintf(b + o, sizeof b - (size_t)o, "%s%06x", i ? "," : "", pal[i] & 0xFFFFFF);
+        if ((pal[i] & 0xFFFFFF) != default_palette[i]) custom = 1;
+    }
+    setting_set("paint.palette", custom ? b : NULL);
+}
+
 static void handle(const hal_event_t *e) {
     if (e->win != win) return;
     layout_t L;
@@ -1253,6 +1296,7 @@ int main(int argc, char **argv) {
     fg = OPAQUE | 0x000000;
     bg = OPAQUE | 0xFFFFFF;
     for (int i = 0; i < 28; i++) pal[i] = OPAQUE | default_palette[i];
+    prefs_load();
 
     win = win_create("Untitled - Paint", TOOL_W + DEF_W + 2 * PAD + SB + 4, DEF_H + 2 * PAD + SB + PAL_H + STATUS_H + 4, WIN_RESIZABLE);
     if (win < 0) { printf("paint: no window (%d)\n", win); return 1; }
@@ -1277,5 +1321,6 @@ int main(int argc, char **argv) {
         /* everything that is already queued, then draw once */
         for (int i = 0; i < 64 && get_event(&ev, 0); i++) handle(&ev);
         flush();
+        prefs_sync();
     }
 }

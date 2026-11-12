@@ -22,6 +22,7 @@
 #include "core/sysabi.h"
 #include "fs/vfs.h"
 #include "fonts.h"
+#include "core/settings.h"
 
 #define MAX_WINDOWS 16
 #define QLEN 128
@@ -251,6 +252,7 @@ static void uw_resize(window_t *w) {
         if (u->canvas != u->mapped) surface_free(u->canvas);
     }
     u->canvas = n;
+    if (w->direct) w->direct = n;
     hal_event_t ev = { 0 };
     ev.win = u->handle;
     ev.x = n->w; ev.y = n->h;
@@ -267,15 +269,27 @@ static void uw_destroyed(window_t *w) {
 
 /* ---- jobs run on the GUI thread ---- */
 
-typedef struct { uwin_t *u; char title[96]; int cw, ch, flags; int ok; } create_job_t;
+typedef struct { uwin_t *u; char title[96]; int cw, ch, flags; int ok; window_t *host; rect_t box; } create_job_t;
 static void job_create(void *a) {
     create_job_t *j = a;
     u32 f = 0;
     if (j->flags & WIN_RESIZABLE) f |= WF_RESIZABLE;
     if (j->flags & WIN_DIALOG) f |= WF_DIALOG | WF_CENTER;
     if (j->flags & WIN_NO_MAX) f |= WF_NO_MAXIMIZE;
+    /* full screen (screen savers, video): above the taskbar; the running
+     * screen saver's above everything (gui/saver.c) */
+    if (j->flags & WIN_FULLSCREEN) {
+        f = WF_FULLSCREEN | WF_TOPMOST | WF_NOSHADOW;
+        if (saver_is_saver_pid(j->u->p->pid)) f |= WF_SAVER;
+    }
+    if (j->host) {                          /* a screen saver's preview, inside Display Properties */
+        if (!wm_alive(j->host)) return;
+        f = WF_EMBED | WF_DIALOG | WF_NOSHADOW;
+    }
     window_t *w = wm_create(j->title, ICON_FILE_APP, -1, -1, j->cw, j->ch, f);
     if (!w) return;
+    if (j->host) { w->owner = j->host; w->restore = j->box; }
+    if (f & WF_FULLSCREEN) w->direct = j->u->canvas;   /* drawn straight from the canvas */
     j->u->w = w;
     w->data = j->u;
     w->on_paint = uw_paint;
@@ -296,6 +310,15 @@ static void job_destroy(void *a) {
         u->w->on_close = NULL; u->w->data = NULL; wm_destroy(u->w);
     }
     u->w = NULL;
+}
+
+/* the place and size the program's window had last time */
+static void job_place(void *a) {
+    uwin_t *u = a;
+    if (!u->w || !u->p) return;
+    char key[40];
+    settings_prog_prefix(u->p->name, key, sizeof key);
+    wm_place_restore(u->w, key);
 }
 
 /* new client size; keep the window on screen (like Sonar's level change) */
@@ -416,6 +439,7 @@ static void job_menubar(void *a) {
     if (d) {
         for (widget_t *wd = w->widgets; wd; wd = wd->next) wd->r.y += d;
         u->top = top;
+        w->place_top = top;              /* the saved size is the canvas's */
         set_min(u);
         /* grow or shrink the window so the canvas keeps its size (not when maximized) */
         if (w->state == WS_NORMAL) {
@@ -445,6 +469,7 @@ static void job_owner(void *a) {
     owner_job_t *j = a;
     window_t *w = j->u->w, *o = j->owner ? j->owner->w : NULL;
     if (!w || (j->owner && !o)) return;
+    if (w->flags & WF_EMBED) return;         /* a preview stays in its box */
     /* no cycles: the owner chain must not lead back to w */
     for (window_t *x = o; x; x = x->owner) if (x == w) return;
     if (w->owner && wm_alive(w->owner) && w->owner->modal == w) w->owner->modal = NULL;
@@ -608,6 +633,13 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
         u = kzalloc(sizeof *u);
         int cw = (int)CLAMP((i64)a2, 32, 2048), ch = (int)CLAMP((i64)a3, 16, 1536);
         if (!j || !u || copyin_str(j->title, a1, sizeof j->title) == E_INVAL) { kfree(j); kfree(u); return E_INVAL; }
+        if (a4 & WIN_FULLSCREEN) { cw = screen_w(); ch = screen_h(); }
+        if (a4 & WIN_PREVIEW) {
+            /* only the program Display Properties started for that box */
+            j->host = saver_preview_host((int)a5, p->pid, &j->box);
+            if (!j->host) { kfree(j); kfree(u); return E_INVAL; }
+            cw = j->box.w; ch = j->box.h;
+        }
         if (s->pixels + (u64)cw * ch > MAX_PIXELS || mm_heap_free() < GUI_RESERVE + (u64)cw * ch * 8) { kfree(j); kfree(u); return E_NOMEM; }
         u->p = p;
         u->canvas = surface_new_paged(cw, ch);
@@ -623,6 +655,8 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
         kfree(j);
         if (!ok) { handle_free(p, u->handle); s->pixels -= (u64)cw * ch; surface_free(u->canvas); kfree(u); return E_NOMEM; }
         s->wins[slot] = u;
+        /* a program's main window comes back where it was (window.<program>) */
+        if (!(a4 & (WIN_DIALOG | WIN_FULLSCREEN | WIN_PREVIEW))) gui_call(job_place, u);
         hal_event_t ev = { 0 };
         ev.type = EVT_PAINT;
         ev.win = u->handle;
@@ -673,6 +707,7 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
         return 0;
     case SYS_WIN_RESIZE: {
         if (!(u = uwin(p, (int)a1))) return E_INVAL;
+        if (u->w->flags & (WF_FULLSCREEN | WF_EMBED)) return E_INVAL;   /* their size is the screen's / the box's */
         resize_job_t j = { u, (int)CLAMP((i64)a2, 32, 2048), (int)CLAMP((i64)a3, 16, 1536) };
         ustate_t *s = p->gui;
         u64 oldpx = u->canvas ? (u64)u->canvas->w * u->canvas->h : 0, newpx = (u64)j.cw * j.ch;
@@ -854,9 +889,24 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
                   (a5 && copyin_str(j->ext, a5, sizeof j->ext) == E_INVAL) || !user_writable(a6, VFS_MAX_PATH);
         if (bad) { kfree(j); return E_INVAL; }
         if (filedlg_open) { kfree(j); return E_BUSY; }
+        /* the folder the program's last Open / Save dialog ended in, kept as
+         * dialog.<program>.folder: used when the program asks for no folder
+         * or the default one (My Documents) */
+        char key[64], pre[40];
+        settings_prog_prefix(p->name, pre, sizeof pre);
+        snprintf(key, sizeof key, "dialog.%s.folder", pre);
+        const char *last = settings_get(key, NULL);
+        vfs_dirent_t st;
+        if (last && (!j->dir[0] || !strcasecmp(j->dir, "C:/Documents")) && !vfs_stat(last, &st) && st.is_dir)
+            strlcpy(j->dir, last, sizeof j->dir);
         filedlg_open = 1;
         gui_call(job_filedlg, j);
         filedlg_open = 0;
+        if (j->ok) {
+            char d[VFS_MAX_PATH];
+            vfs_dirname(j->out, d, sizeof d);
+            if (d[0] && strlen(d) < SETTINGS_VAL_MAX) { settings_set(key, d); settings_save_later(); }
+        }
         int r = j->ok ? (copyout(a6, j->out, strlen(j->out) + 1) ? E_INVAL : 1) : 0;
         kfree(j);
         return r;
@@ -928,6 +978,26 @@ static long usergui_syscall_more(proc_t *p, int nr, u64 a1, u64 a2, u64 a3, u64 
     uwin_t *u;
     gc_t g;
     switch (nr) {
+    case SYS_WIN_INVALIDATE_RECT: {
+        /* only that part of the canvas changed: it is copied into the
+         * window as it is and only it is drawn again (screen savers) */
+        if (!(u = uwin(p, (int)a1)) || !u->canvas) return E_INVAL;
+        window_t *w = u->w;
+        rect_t r = rect_intersect(unpack_rect(a2), mkrect(0, 0, u->canvas->w, u->canvas->h));
+        if (rect_empty(r)) return 0;
+        if (w->needs_paint || !w->client || w->widgets || w->menubar || w->client->w != u->canvas->w ||
+            w->client->h != u->canvas->h + u->top) {
+            wm_invalidate(w);                 /* controls are drawn over the canvas: all of it */
+            return 0;
+        }
+        if (w->direct != u->canvas) {          /* (a full-screen window is drawn from the canvas itself) */
+            g = gc_for(w->client);
+            gfx_blit(&g, r.x, r.y + u->top, u->canvas, r);
+        }
+        rect_t c = wm_client_rect(w);
+        wm_invalidate_rect(mkrect(c.x + r.x, c.y + u->top + r.y, r.w, r.h));
+        return 0;
+    }
     case SYS_MENU_SET: {
         /* items, count; count 0 removes the bar */
         if (!(u = uwin(p, (int)a1))) return E_INVAL;
