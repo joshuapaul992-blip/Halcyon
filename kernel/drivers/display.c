@@ -310,7 +310,7 @@ void display_present(int x, int y, int w, int hgt) {
         int x1 = MIN(x + w, h->x + h->mode.w), y1 = MIN(y + hgt, h->y + h->mode.h);
         if (x1 <= x0 || y1 <= y0 || !h->nfb) continue;
         drect_t r = { x0 - h->x, y0 - h->y, x1 - x0, y1 - y0 };
-        if (h->nfb == 2) {
+        if (h->nfb == 2 && (h->caps & HEAD_CAP_FLIP)) {
             for (int b = 0; b < 2; b++) rect_add((drect_t *)h->stale[b], &h->stale_n[b], 8, r);
             continue;
         }
@@ -320,8 +320,31 @@ void display_present(int x, int y, int w, int hgt) {
     }
 }
 
+/* flips were given up on a double-buffered head (a failed flip, one that
+ * never completed): the buffer on screen gets what it lacks, then the head
+ * is single buffered on it */
+static void flips_gone(display_head_t *h) {
+    int f = h->front;
+    for (int i = 0; i < h->stale_n[f]; i++) {
+        drect_t r = { h->stale[f][i].x, h->stale[f][i].y, h->stale[f][i].w, h->stale[f][i].h };
+        copy_rect(h, &h->fb[f], r);
+        if (h->adapter->ops->flush) rect_add((drect_t *)h->dirty, &h->dirty_n, 8, r);
+    }
+    h->stale_n[0] = h->stale_n[1] = 0;
+}
+
 static void head_commit(display_head_t *h) {
     display_adapter_t *a = h->adapter;
+    if (h->nfb == 2 && !(h->caps & HEAD_CAP_FLIP)) {
+        if (h->flip_pending) return;
+        flips_gone(h);
+        if (!h->dirty_n) return;
+        for (int i = 0; i < h->dirty_n; i++)
+            a->ops->flush(h, &h->fb[h->front], h->dirty[i].x, h->dirty[i].y, h->dirty[i].w, h->dirty[i].h);
+        h->dirty_n = 0;
+        h->frames++;
+        return;
+    }
     if (h->nfb == 1) {
         if (!h->dirty_n) return;
         for (int i = 0; i < h->dirty_n; i++)
@@ -344,11 +367,14 @@ static void head_commit(display_head_t *h) {
     h->flip_pending = 1;
     h->flip_ms = time_ms();
     if (a->ops->flip(h, fb)) {
-        /* the flip failed: the buffer is shown as it is (single buffering from now on) */
+        /* the flip failed: nothing changed on screen, so the front buffer
+         * stays; it gets what the back one just got (single buffering from now on) */
         kprintf("display: %s: page flip failed, single buffering\n", h->conn ? h->conn->name : "?");
         h->flip_pending = 0;
-        h->front = back;
         h->caps &= ~HEAD_CAP_FLIP;
+        drect_t all = { 0, 0, h->mode.w, h->mode.h };
+        rect_add((drect_t *)h->stale[h->front], &h->stale_n[h->front], 8, all);
+        head_commit(h);
     }
 }
 
