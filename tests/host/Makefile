@@ -38,7 +38,9 @@
 # clang with the libFuzzer runtime (libclang-rt-18-dev) for fuzz / fuzz-run.
 ROOT    := ../..
 OUT     ?= $(ROOT)/build/hosttest
-KSRCS   := $(ROOT)/kernel/fs/block.c $(ROOT)/kernel/fs/vfs.c $(ROOT)/kernel/fs/fat.c $(ROOT)/kernel/fs/exfat.c $(ROOT)/kernel/fs/iso9660.c $(ROOT)/kernel/core/unicode.c shim.c
+NTFS_SRCS := $(addprefix $(ROOT)/kernel/fs/,ntfs.c ntfs_mft.c ntfs_index.c ntfs_alloc.c ntfs_lznt1.c)
+KSRCS   := $(ROOT)/kernel/fs/block.c $(ROOT)/kernel/fs/vfs.c $(ROOT)/kernel/fs/fat.c $(ROOT)/kernel/fs/exfat.c $(ROOT)/kernel/fs/iso9660.c \
+           $(NTFS_SRCS) $(ROOT)/kernel/core/unicode.c shim.c
 SRCS    := $(KSRCS) fstest.c fuzz_fs.c
 HDRS    := $(wildcard $(ROOT)/kernel/fs/*.h) $(wildcard $(ROOT)/kernel/core/*.h) fuzz_fs.h
 WARN    := -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
@@ -106,7 +108,7 @@ $(OUT)/kbdtest: $(KBD_SRCS) $(ROOT)/kernel/drivers/keymap.h $(ROOT)/kernel/drive
 kbd: $(OUT)/kbdtest
 	$(OUT)/kbdtest
 
-$(OUT)/fstest: $(SRCS) isotest.c $(HDRS) Makefile
+$(OUT)/fstest: $(SRCS) isotest.c ntfstest.c $(HDRS) Makefile
 	@mkdir -p $(OUT)
 	gcc $(CFLAGS) $(SRCS) -o $@
 

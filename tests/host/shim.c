@@ -69,3 +69,37 @@ void mutex_lock(mutex_t *m) { (void)m; }
 int mutex_trylock(mutex_t *m) { (void)m; return 1; }
 void mutex_unlock(mutex_t *m) { (void)m; }
 int mutex_held(mutex_t *m) { (void)m; return 1; }
+
+/* settings (core/settings.h): an in-memory table the tests can fill */
+#include "core/settings.h"
+static struct { char k[64]; char v[64]; } g_settings[32];
+static int g_nsettings;
+
+const char *settings_get(const char *key, const char *def) {
+    for (int i = 0; i < g_nsettings; i++) if (!strcasecmp(g_settings[i].k, key)) return g_settings[i].v;
+    return def;
+}
+
+int settings_get_int(const char *key, int def) {
+    const char *v = settings_get(key, NULL);
+    return v ? atoi(v) : def;
+}
+
+void settings_set(const char *key, const char *value) {
+    for (int i = 0; i < g_nsettings; i++) {
+        if (strcasecmp(g_settings[i].k, key)) continue;
+        if (!value) { g_settings[i] = g_settings[--g_nsettings]; return; }
+        strlcpy(g_settings[i].v, value, sizeof g_settings[i].v);
+        return;
+    }
+    if (!value || g_nsettings >= 32) return;
+    strlcpy(g_settings[g_nsettings].k, key, sizeof g_settings[g_nsettings].k);
+    strlcpy(g_settings[g_nsettings].v, value, sizeof g_settings[g_nsettings].v);
+    g_nsettings++;
+}
+
+void settings_set_int(const char *key, int value) {
+    char b[16];
+    snprintf(b, sizeof b, "%d", value);
+    settings_set(key, b);
+}
