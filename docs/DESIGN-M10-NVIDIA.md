@@ -651,6 +651,28 @@ expects, link training against real sinks, the PLL limits of real tables
 (a version 5.0 table on Pascal would leave the pixel clock to the display
 engine), the timing of everything, and the restore path on hardware.
 
+### First run on the GTX 1070 (Halcyon 1.0.199)
+
+GP104, VBIOS 86.04.1e.00.01, UEFI, an LG UltraGear on DisplayPort
+(connector 1, SOR2, AUX channel 3). The driver took the display from the
+VBIOS, trained the link at 4 lanes x 8.1 Gbit/s with enhanced framing,
+programmed VPLL0 for 497.75 MHz and ran the monitor's preferred
+2560x1440 at 120 Hz on head 0, with 0 refused script writes. The PLL
+table was version 4.0, so the pixel-clock risk above did not apply.
+
+One bug: the picture was grayscale. The head's `HEAD_SET_PROCAMP` was
+written as 0, and its SAT_COS field (bits 19:8) is the saturation, so 0
+removed all colour. Unity is 1024 (nouveau's default colour vibrance
+gives the same value; the firmware leaves its unused heads at
+`00040000`). Fixed for both method layouts (0x0498 on 907d and later,
+0x08A8 on 507d / 827d), and evotest's expected streams now carry it.
+
+Also seen: "firmware frame buffer not in BAR1", so a fallback could only
+switch the heads off. The log line now prints the loader's frame-buffer
+address and depth to find out why. The CPU drawing speed test gave 205
+frames/s for RAM-to-screen copies at 2560x1440, so 10e (2D acceleration)
+is not needed for the desktop.
+
 ### What to check on the GTX 1070
 
 1. Boot from the stick (UEFI). The screen flickers once when the driver

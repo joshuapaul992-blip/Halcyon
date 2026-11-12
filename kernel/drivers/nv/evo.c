@@ -273,6 +273,12 @@ static void or_ctrl(const nv_evo_gen_t *g, nv_evo_stream_t *s, const nv_evo_head
       owner | ((c->proto & 0xF) << 8) | ((u32)c->r.nhsync << 12) | ((u32)c->r.nvsync << 13) | ((u32)(c->depth & 0xF) << 16));
 }
 
+/* HEAD_SET_PROCAMP: COLOR_SPACE RGB, SAT_COS (bits 19:8) 1024 = unity
+ * saturation, SAT_SINE 0, VESA range. nouveau computes the same 1024 from
+ * its default colour vibrance (150) and hue (90); the firmware leaves its
+ * unused heads at this value. SAT_COS 0 removes all colour. */
+#define NV_EVO_PROCAMP (1024u << 8)
+
 static void head_507d(const nv_evo_gen_t *g, nv_evo_stream_t *s, const nv_evo_head_cfg_t *c) {
     u32 i = (u32)c->head * 0x400;
     int is827 = g->mthd == MTHD_827D;
@@ -313,7 +319,7 @@ static void head_507d(const nv_evo_gen_t *g, nv_evo_stream_t *s, const nv_evo_he
     M(s, 0x0900 + i, 1, 0u);
     M(s, 0x0904 + i, 1, 0x00000100u);
     M(s, 0x08A0 + i, 1, 0u);
-    M(s, 0x08A8 + i, 1, 0u);
+    M(s, 0x08A8 + i, 1, NV_EVO_PROCAMP);              /* RGB, saturation 1024 (unity): 0 is grayscale */
 }
 
 static void head_907d(const nv_evo_gen_t *g, nv_evo_stream_t *s, const nv_evo_head_cfg_t *c) {
@@ -349,7 +355,7 @@ static void head_907d(const nv_evo_gen_t *g, nv_evo_stream_t *s, const nv_evo_he
     M(s, 0x04D0 + i, 1, 0u);
     M(s, 0x04D4 + i, 1, 0x00000100u);
     M(s, (g->mthd == MTHD_917D ? 0x04A0 : 0x0490) + i, 1, 0u);
-    M(s, 0x0498 + i, 1, 0u);
+    M(s, 0x0498 + i, 1, NV_EVO_PROCAMP);              /* RGB, saturation 1024 (unity): 0 is grayscale */
     /* head907d_or: output resource (polarities, depth), control */
     M(s, 0x0404 + i, 2, ((u32)r->nhsync << 3) | ((u32)r->nvsync << 4) | ((u32)(c->depth & 0xF) << 6),
       0x31EC6000u | ((u32)c->head << 25) | (r->interlace ? 1u : 0u));

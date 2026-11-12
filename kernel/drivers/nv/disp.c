@@ -542,9 +542,10 @@ static int nvd_enable(display_adapter_t *a) {
     n->fw_w = g_bootinfo.fb_width; n->fw_h = g_bootinfo.fb_height; n->fw_pitch = g_bootinfo.fb_pitch;
     n->fw_ok = fb >= b1->addr && fb + (u64)n->fw_pitch * n->fw_h <= b1->addr + n->window && g_bootinfo.fb_bpp == 32;
     n->fw_off = n->fw_ok ? fb - b1->addr : 0;
-    nvlog(n, "BAR1 %llx, %llu MiB (window %llu MiB of %llu MiB VRAM); firmware frame buffer %s at VRAM %llx, %ux%u, pitch %u",
+    nvlog(n, "BAR1 %llx, %llu MiB (window %llu MiB of %llu MiB VRAM); firmware frame buffer at %llx (%u bpp) %s at VRAM %llx, %ux%u, pitch %u",
           (unsigned long long)b1->addr, (unsigned long long)(b1->size >> 20), (unsigned long long)(n->window >> 20),
-          (unsigned long long)(d->vram >> 20), n->fw_ok ? "in BAR1" : "not in BAR1 (or not 32 bpp)", (unsigned long long)n->fw_off,
+          (unsigned long long)(d->vram >> 20), (unsigned long long)fb, (unsigned)g_bootinfo.fb_bpp,
+          n->fw_ok ? "in BAR1" : "not in BAR1 (or not 32 bpp)", (unsigned long long)n->fw_off,
           n->fw_w, n->fw_h, n->fw_pitch);
     nvlog(n, "BAR1 mode %08x (0x001704), BAR2 %08x, PRAMIN %08x, PMC_ENABLE %08x, interrupts %08x", nv_rd32(d, 0x001704),
           nv_rd32(d, 0x001714), nv_rd32(d, 0x001700), nv_rd32(d, 0x000200), nv_rd32(d, 0x000140));

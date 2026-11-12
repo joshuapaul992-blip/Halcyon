@@ -90,12 +90,11 @@ and two drivers that exercise all of it in QEMU: Bochs (moved behind the
 interface) and virtio GPU (several outputs, cursor, flips, hotplug). Its
 "Writing a native display driver" section is the checklist for 10b and 10d.
 
-**Status:** the display core, 10a and 10b are written; 10b (the EVO
-modesetting driver, Tesla to Pascal, with a start guard and the firmware
-frame buffer as the fallback) is tested on the host against a simulated
-display engine and in QEMU with a simulated card, and waits for its first
-run on the GTX 1070. Next is the NVIDIA side of 10d; 10e is decided from
-NVREPORT's frame-buffer speed test on the GTX 1070; 10c stays deferred.
+**Status:** the display core, 10a and 10b are done. 10b ran on the GTX 1070
+(DisplayPort, 2560x1440 at 120 Hz); its one bug, a grayscale picture from a
+zero saturation setting, is fixed. Next is the NVIDIA side of 10d. 10e can
+wait: NVREPORT measured 205 frames/s for CPU drawing at 2560x1440 on the
+native driver. 10c stays deferred.
 
 Two display engines cover all eight generations, so the work splits by engine:
 
