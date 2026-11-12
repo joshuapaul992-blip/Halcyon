@@ -10,6 +10,7 @@
 #include "fs/fat.h"
 #include "fs/iso9660.h"
 #include "fs/exfat.h"
+#include "fs/ntfs.h"
 
 #define NLETTERS 26
 #define COPY_BUF (64 * 1024)
@@ -26,6 +27,7 @@ static const fs_probe_fn g_probes[] = {
     fat_probe,
     iso9660_probe,
     exfat_probe,
+    ntfs_probe,
 };
 
 static volume_t *g_vol[NLETTERS];   /* indexed by letter - 'A' */

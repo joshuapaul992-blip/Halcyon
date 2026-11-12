@@ -48,6 +48,17 @@ interrupts on, get a working interrupt:
   fwvideo no display adapter driver (boot flag): the firmware frame buffer only
   switch  switch the display mode to 1600 x 900 once the desktop is up (QEMU
           fw_cfg test hook; needs the live QEMU/Bochs display driver)
+  ntfsrw  an internal SATA disk (one MBR partition of type 7) with an NTFS
+          volume made on the host by mkntfs and ntfs-3g (tests/host/
+          ntfs_mkimg.py, needs root): it has \\Windows\\System32, so it
+          mounts read-only until allowed; C:\\PROGRAMS\\NTFSTEST.EXE checks
+          that, reads HELLO.TXT and Folder\\data.bin (its CRC-32 is
+          compared), allows writing (volume_set_write: SETTINGS.INI and a
+          remount), creates, moves and deletes files, then takes the
+          permission back (the volume is synced, its dirty flag cleared);
+          it must report "ntfstest: all N checks passed", and the volume
+          must pass ntfsfix -n and ntfs_check.py and show the changes when
+          mounted by ntfs-3g
   ntfs    a blank 256 MiB SATA disk (model NTFSTEST, one MBR partition of
           type 0x0C) that the kernel's format test hook (fw_cfg formattest)
           formats as NTFS with 4 KiB clusters through vfs_format once the
@@ -131,9 +142,9 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
           "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:uefi:virtiosnd", "xhci:bios:audio",
-          "xhci:uefi:hda", "xhci:bios:ntfs"]
+          "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
-            "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0}
+            "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -176,7 +187,7 @@ CHECKS = [
 BAD = ["CPU EXCEPTION", "KERNEL PANIC", "nested fault"]
 # variants that run a test program after boot: (program, its report prefix)
 PROGRAMS = {"user": ("SELFTEST.EXE", "selftest"), "sock": ("SOCKTEST.EXE", "socktest"), "web": ("WEBTEST.EXE", "webtest"),
-            "net": ("NETTEST.EXE", "nettest"), "audio": ("SNDTEST.EXE", "sndtest")}
+            "net": ("NETTEST.EXE", "nettest"), "audio": ("SNDTEST.EXE", "sndtest"), "ntfsrw": ("NTFSTEST.EXE", "ntfstest")}
 PROGRAM_TIMEOUT = {"net": 300}
 NET_LOSS_PCT = 3
 _netservers = None
@@ -551,6 +562,74 @@ def ntfs_failures(text, disk):
     return fails
 
 
+NTFSRW_PART = (2048, 129024)        # start, sectors of the NTFS partition of the ntfsrw disk
+
+
+def make_ntfsrw_disk():
+    """a 64 MiB disk with an MBR partition (type 7) holding an NTFS volume
+    made by mkntfs and populated through ntfs-3g (tests/host/ntfs_mkimg.py,
+    profile boot: HELLO.TXT, Folder\\data.bin, Windows\\System32)"""
+    if os.geteuid() != 0 or subprocess.run(["sh", "-c", "command -v mkntfs && command -v ntfs-3g && test -w /dev/fuse"],
+                                           stdout=subprocess.DEVNULL).returncode:
+        return None
+    disk, vol = os.path.join(BUILD, "ci_ntfsrw.img"), os.path.join(BUILD, "ci_ntfsrw_vol.img")
+    subprocess.run([sys.executable, "tests/host/ntfs_mkimg.py", vol, str(NTFSRW_PART[1] * 512 >> 20), "boot"], check=True)
+    with open(disk, "wb") as f:
+        f.truncate((NTFSRW_PART[0] + NTFSRW_PART[1]) * 512)
+    subprocess.run(["sfdisk", "-q", disk], input="start=%d, size=%d, type=7\n" % NTFSRW_PART, text=True,
+                   check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["dd", "if=" + vol, "of=" + disk, "bs=512", "seek=%d" % NTFSRW_PART[0], "conv=notrunc,sparse",
+                    "status=none"], check=True)
+    return disk
+
+
+def ntfsrw_failures(text, disk):
+    """the volume NTFSTEST.EXE wrote to, checked on the host"""
+    fails = []
+    sys.path.insert(0, "tests/host")
+    import ntfs_mkimg
+    import zlib
+    want = "data.bin 100000 bytes crc %08x" % zlib.crc32(ntfs_mkimg.data("data.bin", 100000))
+    if want not in text:
+        fails.append("data.bin read wrong (%s)" % want)
+    if "on sata" not in text or "NTFS 'Halcyon Test' on sata" not in text:
+        fails.append("NTFS volume not mounted")
+    part = os.path.join(BUILD, "ci_ntfsrw_part.img")
+    subprocess.run(["dd", "if=" + disk, "of=" + part, "bs=512", "skip=%d" % NTFSRW_PART[0],
+                    "count=%d" % NTFSRW_PART[1], "conv=sparse", "status=none"], check=True)
+    r = subprocess.run(["ntfsfix", "-n", part], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if r.returncode or "processed successfully" not in r.stdout:
+        fails.append("ntfsfix -n: " + r.stdout.strip().splitlines()[-1])
+    r = subprocess.run([sys.executable, "tests/host/ntfs_check.py", part], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True)
+    if r.returncode or "volume clean" not in r.stdout:
+        fails.append("ntfs_check.py: " + r.stdout.strip().splitlines()[0])
+    mnt = os.path.join(BUILD, "ci_ntfsrw_mnt")
+    os.makedirs(mnt, exist_ok=True)
+    if subprocess.run(["ntfs-3g", "-o", "ro", part, mnt]).returncode:
+        return fails + ["ntfs-3g cannot mount the volume"]
+    try:
+        n = 300000
+        want = bytes((i * 7 + i // 251) & 0xFF for i in range(n))
+        def rd(p):
+            try:
+                return open(os.path.join(mnt, p), "rb").read()
+            except OSError:
+                return None
+        if rd("Written by Halcyon.txt") != want:
+            fails.append("ntfs-3g: Written by Halcyon.txt")
+        if rd("New Folder/inner.txt") != b"inner file\r\n" or rd("New Folder/HELLO moved.txt") != b"Hello from NTFS!\r\n":
+            fails.append("ntfs-3g: New Folder")
+        if rd("HELLO.TXT") is not None or rd("temporary.tmp") is not None or rd("refused.txt") is not None:
+            fails.append("ntfs-3g: files that should be gone")
+        nf = os.path.join(mnt, "New Folder")
+        if not os.path.isdir(nf) or len(os.listdir(nf)) != 42:
+            fails.append("ntfs-3g: New Folder missing or not 42 entries")
+    finally:
+        subprocess.run(["fusermount", "-u", mnt])
+    return fails
+
+
 def run(cfg):
     parts = cfg.split(":")
     hc, fw = parts[0], parts[1]
@@ -595,6 +674,14 @@ def run(cfg):
             f.write("NTFSTEST NTFS %s 4096" % NTFS_LABEL)
         extra += (" -drive if=none,id=d3,format=raw,file=%s -device ide-hd,drive=d3,bus=ide.3,model=NTFSTEST"
                   " -fw_cfg name=opt/halcyon/formattest,file=%s" % (ntfs_disk, spec))
+    ntfsrw_disk = None
+    if "ntfsrw" in opts:
+        ntfsrw_disk = make_ntfsrw_disk()
+        if not ntfsrw_disk:
+            print("%-22s SKIP (needs root, mkntfs and ntfs-3g)" % cfg, flush=True)
+            return True
+        extra += (" -drive if=none,id=d4,format=raw,file=%s -device ide-hd,drive=d4,bus=ide.3,model=NTFSRW"
+                  % ntfsrw_disk)
     if flags:
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
     nic = next((v for v in opts if v in NICS), None)
@@ -758,6 +845,8 @@ def run(cfg):
     failures += kbd_fails
     if ntfs_disk:
         failures += ntfs_failures(text, ntfs_disk)
+    if ntfsrw_disk:
+        failures += ntfsrw_failures(text, ntfsrw_disk)
     if nic:
         failures += net_failures(text, nic, opts)
     if beep:

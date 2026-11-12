@@ -33,6 +33,7 @@ void hwreport_late(void) WEAK;
 int  bootlog_save(const char *reason) WEAK;
 void settings_load(void) WEAK;
 void keyboard_settings_load(void) WEAK;
+void ntfs_settings_changed(void) WEAK;
 void sound_init(void) WEAK;
 void sound_settings_loaded(void) WEAK;
 #define PROGRESS(p, m) do { if (splash_progress) splash_progress(p, m); } while (0)
@@ -83,6 +84,7 @@ void kmain(struct bootinfo *bi) {
     PROGRESS(100, "Starting the desktop...");
     if (hwreport_late) hwreport_late();
     if (settings_load) settings_load();
+    if (ntfs_settings_changed) ntfs_settings_changed();   /* internal NTFS disks the user allowed writing to */
     if (keyboard_settings_load) keyboard_settings_load();
     if (net_settings_loaded) net_settings_loaded();
     /* sound after the settings: the saved volume applies from the first sound */

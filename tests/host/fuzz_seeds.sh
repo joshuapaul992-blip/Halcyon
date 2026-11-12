@@ -240,4 +240,31 @@ if command -v mkfs.exfat >/dev/null && command -v python3 >/dev/null; then
     seed exfat_mbr $((0x40 | 6 << 2)) "$T/xmbr.img"
 fi
 
+# --- NTFS (mkntfs + the ntfs-3g FUSE driver, as root; skipped otherwise) ---
+NT="python3 $(cd "$(dirname "$0")" && pwd)/ntfs_mkimg.py"
+if command -v mkntfs >/dev/null && command -v ntfs-3g >/dev/null && [ "$(id -u)" = 0 ] && [ -w /dev/fuse ]; then
+    $NT "$T/n4k.img" 2 tiny -c 4096
+    seed ntfs_4k 0 "$T/n4k.img"
+    seed ntfs_4k_ro 2 "$T/n4k.img"
+    seed ntfs_4k_faults $((0x80 | 3 << 2)) "$T/n4k.img"
+    seed ntfs_4k_ops $((5 << 2)) "$T/n4k.img"
+    $NT "$T/n512.img" 2 tiny -c 512
+    seed ntfs_512c 4 "$T/n512.img"
+    $NT "$T/n1k.img" 2 tiny -c 1024
+    seed ntfs_1kc 8 "$T/n1k.img"
+    # 4096-byte sectors, on 4096- and 512-byte devices
+    $NT "$T/n4ks.img" 2 tiny -c 4096 -s 4096
+    seed ntfs_4ks 1 "$T/n4ks.img"
+    seed ntfs_4ks_on512 16 "$T/n4ks.img"
+    # larger than the device
+    $NT "$T/ntr.img" 4 tiny -c 2048
+    seed ntfs_trunc 12 "$T/ntr.img" 2000K
+    # an MBR partition of type 7
+    truncate -s 2100K "$T/nmbr.img"
+    printf 'label: dos\nlabel-id: 0x0e0f7700\nstart=8, size=4096, type=7\n' \
+        | sfdisk -q --no-reread --no-tell-kernel "$T/nmbr.img" >/dev/null 2>&1
+    dd if="$T/n4k.img" of="$T/nmbr.img" bs=512 seek=8 count=4096 conv=notrunc 2>/dev/null
+    seed ntfs_mbr $((0x40 | 2 << 2)) "$T/nmbr.img"
+fi
+
 ls -l "$OUT"

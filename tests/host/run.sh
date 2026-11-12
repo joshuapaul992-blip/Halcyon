@@ -7,7 +7,8 @@
 # then the storage stack. Extra arguments
 # are passed to fstest: "-v" for verbose output, scenario names
 # (paths fat12 fat16 fat32 gpt 4k misc random testdisks hostile unicode format
-# exfat) to run a subset.
+# iso exfat ntfs ntfsw ntfssafe ntfsbig) to run a subset; the NTFS driver
+# scenarios (ntfstest.c) need root, FUSE and ntfs-3g.
 set -e
 cd "$(dirname "$0")"
 make --no-print-directory kbd

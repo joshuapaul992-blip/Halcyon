@@ -21,8 +21,11 @@ useful contribution right now, and both a success and a failure are worth report
    - Write a file: Notepad → type something → File → Save As → `C:\test.txt`.
    - Plug in a second USB stick. Does a "Found New Hardware" balloon appear?
      Can you open it in My Computer?
-   - Are your internal SATA disks listed? Only FAT-formatted volumes get a drive
-     letter.
+   - Are your internal SATA / NVMe disks listed? FAT, exFAT and NTFS volumes get
+     a drive letter. A Windows drive shows read-only (its Properties say why);
+     open a few folders and files on it. If you allow writing on a drive whose
+     data you have backed up, copy a file to it, then start Windows, run
+     `chkdsk X:` (without /f) and report what it says.
    - Open the Command Prompt and type `IRQ`. Every USB and SATA controller should
      be listed with a count above zero; one marked "polled" means its interrupt was
      not found. `IRQ > C:\IRQ.TXT` saves the table to the stick.
@@ -133,6 +136,22 @@ works.
   written, but have only been tested in QEMU and with images made by Linux tools.
   Please report sticks formatted by Windows, a Mac or a camera that don't mount,
   with `BOOT.LOG`.
+- **NTFS / Windows disks** are read and written, but have been tested with
+  volumes made by Linux tools (mkntfs, ntfs-3g) and Halcyon's formatter only,
+  not yet with Windows' chkdsk. Halcyon writes to an NTFS volume only if
+  Windows shut it down completely. Windows 8 and later shut down with **Fast
+  Startup** by default, which hibernates the system and leaves its drives in
+  use: Halcyon then shows the drive read-only ("Windows did not shut down
+  completely"). To write to it, turn Fast Startup off (Control Panel, Power
+  Options, "Choose what the power buttons do", "Turn on fast startup") or hold
+  Shift while choosing Shut down, or restart Windows instead of shutting down.
+  A drive that needs a check (dirty) stays read-only until `chkdsk` has run in
+  Windows. Internal disks with Windows on them are read-only until you allow
+  writing in the drive's Properties. After writing from Halcyon, use "Safely
+  Remove Hardware" (or shut Halcyon down) before unplugging; otherwise Windows
+  checks the drive at its next start. Reports of Windows drives that don't
+  mount, or that chkdsk complains about after Halcyon wrote to them, are very
+  welcome (with `BOOT.LOG` and chkdsk's output).
 
 ## Network adapters
 

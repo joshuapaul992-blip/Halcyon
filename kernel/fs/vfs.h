@@ -36,6 +36,7 @@
 #define VFS_ATTR_VOLUME   0x08
 #define VFS_ATTR_DIR      0x10
 #define VFS_ATTR_ARCHIVE  0x20
+#define VFS_ATTR_LINK     0x40   /* a symbolic link or junction (NTFS reparse point): listed, not followed */
 
 typedef struct vfs_time {
     u16 year; u8 month, day, hour, minute, second;

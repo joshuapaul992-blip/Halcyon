@@ -40,13 +40,17 @@
 #
 # Needs: gcc, mkfs.fat, fsck.fat, mtools, exfatprogs (mkfs.exfat, fsck.exfat),
 # sfdisk, truncate, dd, gzip, python3, xorriso, ntfs-3g (ntfsfix, ntfsinfo,
-# mkntfs, ntfsls, ntfscat, the ntfs-3g FUSE driver and fusermount, used as
-# root; the NTFS tests are skipped without them);
+# ntfsresize, mkntfs, ntfsls, ntfscat, the ntfs-3g FUSE driver and
+# fusermount, used as root and with /dev/fuse: the NTFS formatter tests and
+# the NTFS driver scenarios ntfs, ntfsw, ntfssafe, ntfsbig of fstest
+# (ntfstest.c) are skipped with a message without them);
 # clang with the libFuzzer runtime (libclang-rt-18-dev) for fuzz / fuzz-run.
 ROOT    := ../..
 OUT     ?= $(ROOT)/build/hosttest
-KSRCS   := $(ROOT)/kernel/fs/block.c $(ROOT)/kernel/fs/vfs.c $(ROOT)/kernel/fs/fat.c $(ROOT)/kernel/fs/exfat.c $(ROOT)/kernel/fs/iso9660.c $(ROOT)/kernel/core/unicode.c shim.c
-SRCS    := $(KSRCS) fstest.c fuzz_fs.c
+NTFS_SRCS := $(addprefix $(ROOT)/kernel/fs/,ntfs.c ntfs_mft.c ntfs_index.c ntfs_alloc.c ntfs_lznt1.c)
+KSRCS   := $(ROOT)/kernel/fs/block.c $(ROOT)/kernel/fs/vfs.c $(ROOT)/kernel/fs/fat.c $(ROOT)/kernel/fs/exfat.c $(ROOT)/kernel/fs/iso9660.c \
+           $(NTFS_SRCS) $(ROOT)/kernel/core/unicode.c shim.c
+SRCS    := $(KSRCS) $(ROOT)/kernel/fs/ntfs_mkfs.c $(ROOT)/kernel/fs/ntfs_upcase.c fstest.c fuzz_fs.c
 HDRS    := $(wildcard $(ROOT)/kernel/fs/*.h) $(wildcard $(ROOT)/kernel/core/*.h) fuzz_fs.h
 WARN    := -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
            -Wno-address-of-packed-member -Wno-unused-result -fno-strict-aliasing
@@ -113,7 +117,7 @@ $(OUT)/kbdtest: $(KBD_SRCS) $(ROOT)/kernel/drivers/keymap.h $(ROOT)/kernel/drive
 kbd: $(OUT)/kbdtest
 	$(OUT)/kbdtest
 
-$(OUT)/fstest: $(SRCS) isotest.c $(HDRS) Makefile
+$(OUT)/fstest: $(SRCS) isotest.c ntfstest.c $(HDRS) Makefile
 	@mkdir -p $(OUT)
 	gcc $(CFLAGS) $(SRCS) -o $@
 
