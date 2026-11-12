@@ -10,8 +10,9 @@ and slow envelopes), gliding blips, and a small Schroeder reverb (four damped
 comb filters and two all-passes per channel, with different delays left and
 right for width). Deterministic: the same script makes the same files.
 
-The sounds are Halcyon's own: a rising D-major-9 arpeggio of glassy bells
-over a slow pad for startup, the same colours falling for shutdown, and
+The sounds are Halcyon's own: a rising F-major-9 arpeggio of glassy bells
+over a slow pad for startup, a falling D-minor figure (the relative minor)
+for shutdown, and
 short motifs for the message box icons, balloons and USB devices. They do
 not copy or imitate any other system's sounds.
 
@@ -196,15 +197,15 @@ def write_wav(path, track, peak=0.72):
 
 # ---------------------------------------------------------------- the sounds
 def s_startup():
-    """a rising D-major-9 arpeggio of glass bells over a slow pad, ending in a bell chord"""
+    """a rising F-major-9 arpeggio of glass bells over a slow pad, ending in a bell chord"""
     t = Track(4.6, stereo=True)
-    t.add(0.0, pad([note("D3"), note("A3"), note("F#4"), note("E5")], 4.0, attack=1.3, release=1.6, harmonics=5), 0.55)
-    arp = [("D4", 0.00, -0.5), ("A4", 0.17, -0.25), ("D5", 0.34, 0.0), ("E5", 0.51, 0.25), ("A5", 0.72, 0.5)]
+    t.add(0.0, pad([note("F3"), note("C4"), note("A4"), note("G5")], 4.0, attack=1.3, release=1.6, harmonics=5), 0.55)
+    arp = [("F4", 0.00, -0.5), ("C5", 0.17, -0.25), ("F5", 0.34, 0.0), ("G5", 0.51, 0.25), ("C6", 0.72, 0.5)]
     for name, at, pan in arp:
         b = fm_bell(note(name), 1.8, ratio=3.5, index=1.8, decay=0.55, idecay=0.18)
         lowpass(b, 5000)
         t.add(at, b, 0.32, pan)
-    for name, pan in (("F#5", -0.35), ("A5", 0.35), ("D6", 0.0)):
+    for name, pan in (("A5", -0.35), ("C6", 0.35), ("F6", 0.0)):
         b = fm_bell(note(name), 2.6, ratio=2.0, index=1.2, decay=0.9, idecay=0.4)
         lowpass(b, 6000)
         t.add(1.12, b, 0.22, pan)
@@ -213,10 +214,10 @@ def s_startup():
 
 
 def s_shutdown():
-    """the startup colours falling: three bells down to a low resolving chord"""
+    """the startup colours falling in the relative minor: D-minor bells down to a low D-minor chord"""
     t = Track(2.7, stereo=True)
-    t.add(0.0, pad([note("D3"), note("A3"), note("D4")], 2.3, attack=0.25, release=1.6, harmonics=4), 0.5)
-    for name, at, pan in (("F#5", 0.0, 0.4), ("D5", 0.19, 0.0), ("A4", 0.38, -0.4)):
+    t.add(0.0, pad([note("D3"), note("A3"), note("D4"), note("F4")], 2.3, attack=0.25, release=1.6, harmonics=4), 0.5)
+    for name, at, pan in (("F5", 0.0, 0.4), ("D5", 0.19, 0.0), ("A4", 0.38, -0.4)):
         b = fm_bell(note(name), 1.6, ratio=3.5, index=1.6, decay=0.5, idecay=0.2)
         lowpass(b, 5000)
         t.add(at, b, 0.32, pan)

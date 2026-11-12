@@ -223,10 +223,11 @@ gliding blips, one-pole low-pass filters, and a Schroeder reverb (four damped
 combs and two all-passes per channel, the right channel's delays a little
 longer for width). The script is deterministic.
 
-- Startup (4.6 s, stereo): a rising D, A, D, E, A arpeggio of glass bells
-  panned left to right over a D-major-9 pad that swells in, settling on an
-  F#-A-D bell chord.
-- Shutdown (2.7 s, stereo): the same colours falling, F#, D, A, to a low D.
+- Startup (4.6 s, stereo), in F major: a rising F, C, F, G, C arpeggio of
+  glass bells panned left to right over an F-major-9 pad that swells in,
+  settling on an A-C-F bell chord.
+- Shutdown (2.7 s, stereo), in D minor (F major's relative minor): bells
+  falling F, D, A to a low D over a D-minor pad.
 - Error: two low inharmonic knocks, the second lower. Warning: one bell with
   a small downward bend. Information: two light mallet notes rising.
   Question: three soft notes rising like a voice asking. Notification: a
