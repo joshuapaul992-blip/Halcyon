@@ -2881,7 +2881,7 @@ static void s_format(void) {
     img_blank(&im, "fmt_refuse.img", 20, 1, 512);
     hdisk_t *h = disk_attach(&im, 512);
     EXPECT(vfs_format(&h->bd, "FAT", "X", 0), E_BUSY);           /* partitioned disk */
-    EXPECT(vfs_format(volume_bd(h), "NTFS", "X", 0), E_INVAL);
+    EXPECT(vfs_format(volume_bd(h), "HPFS", "X", 0), E_INVAL);   /* no such file system */
     EXPECT(vfs_format(volume_bd(h), "FAT32", "X", 0), E_INVAL);  /* 19 MB: too small for FAT32 */
     EXPECT(vfs_format(volume_bd(h), "FAT16", "X", 0), 0);
     char L = letter_of(h);

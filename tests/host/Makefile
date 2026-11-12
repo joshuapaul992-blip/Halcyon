@@ -6,12 +6,17 @@
 # keymap.c and keylayouts.c), the USB HID report descriptor parser and report
 # decoder (kernel/usb/hidparse.c, hidtest.c), and the EDID parser and the
 # loaders' video mode choice (displaytest.c), and the HD Audio codec layer
-# (kernel/sound/drivers/hda_codec.c against synthetic codecs, hdatest.c).
+# (kernel/sound/drivers/hda_codec.c against synthetic codecs, hdatest.c),
+# and the NTFS formatter (kernel/fs/ntfs_mkfs.c, ntfsfmt.c): volumes of many
+# sizes, sector and cluster sizes checked with ntfsfix, ntfsinfo, the
+# independent reader ntfs_tool.py and the ntfs-3g FUSE driver
+# (ntfs_fuse.py), and compared with mkntfs's layout.
 #
 #   tests/host/run.sh            (== make -C tests/host kbd test)
 #   make -C tests/host kbd       keyboard layouts only
 #   make -C tests/host hid       only the HID tests (HIDARGS=-v lists every report)
 #   make -C tests/host hda       only the HD Audio codec tests (HDAARGS=-v dumps the codecs)
+#   make -C tests/host ntfsfmt   only the NTFS formatter tests (NTFSARGS="-v quick")
 #                                includes the "hostile" scenario: corrupted
 #                                partition tables / FAT / exFAT volumes and the
 #                                minimized fuzzer crash inputs (fuzz_regress/)
@@ -34,7 +39,9 @@
 #   make -C tests/host fuzz-net-regress
 #
 # Needs: gcc, mkfs.fat, fsck.fat, mtools, exfatprogs (mkfs.exfat, fsck.exfat),
-# sfdisk, truncate, dd, gzip, python3, xorriso;
+# sfdisk, truncate, dd, gzip, python3, xorriso, ntfs-3g (ntfsfix, ntfsinfo,
+# mkntfs, ntfsls, ntfscat, the ntfs-3g FUSE driver and fusermount, used as
+# root; the NTFS tests are skipped without them);
 # clang with the libFuzzer runtime (libclang-rt-18-dev) for fuzz / fuzz-run.
 ROOT    := ../..
 OUT     ?= $(ROOT)/build/hosttest
@@ -57,7 +64,7 @@ SEEDS   := $(OUT)/fuzz_seeds
 KBD_SRCS := kbdtest.c $(ROOT)/kernel/drivers/keymap.c $(ROOT)/kernel/drivers/keylayouts.c $(ROOT)/kernel/core/unicode.c
 
 all: $(OUT)/fstest $(OUT)/fuzz_replay $(OUT)/kbdtest $(OUT)/hidtest $(OUT)/displaytest $(OUT)/netsim $(OUT)/netstack.so \
-     $(OUT)/hdatest
+     $(OUT)/hdatest $(OUT)/ntfsfmt
 
 NETSRCS := $(addprefix $(ROOT)/kernel/net/,socket.c local.c inet.c eth.c ip.c udp.c tcp.c dhcp.c dns.c)
 NETHDRS := $(wildcard $(ROOT)/kernel/net/*.h) $(wildcard $(ROOT)/kernel/core/*.h) netsim.h
@@ -109,6 +116,18 @@ kbd: $(OUT)/kbdtest
 $(OUT)/fstest: $(SRCS) isotest.c $(HDRS) Makefile
 	@mkdir -p $(OUT)
 	gcc $(CFLAGS) $(SRCS) -o $@
+
+# the NTFS formatter (ntfsfmt.c): images checked with ntfs-3g's tools,
+# ntfs_tool.py and the ntfs-3g FUSE driver (ntfs_fuse.py)
+NTFSFMT_SRCS := $(KSRCS) $(ROOT)/kernel/fs/ntfs_mkfs.c $(ROOT)/kernel/fs/ntfs_upcase.c ntfsfmt.c
+
+$(OUT)/ntfsfmt: $(NTFSFMT_SRCS) $(HDRS) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) $(NTFSFMT_SRCS) -o $@
+
+ntfsfmt: $(OUT)/ntfsfmt
+	@rm -rf $(OUT)/ntfswork && mkdir -p $(OUT)/ntfswork
+	$(OUT)/ntfsfmt $(OUT)/ntfswork $(NTFSARGS)
 
 HIDSRCS := $(ROOT)/kernel/usb/hidparse.c hidtest.c
 HIDHDRS := $(ROOT)/kernel/usb/hidparse.h $(ROOT)/kernel/drivers/input.h $(wildcard $(ROOT)/kernel/core/*.h)
@@ -170,4 +189,4 @@ fuzz-run: $(OUT)/fuzz_fs seeds
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all kbd hid hda test seeds fuzz fuzz-run fuzz-regress net fuzz-net-run fuzz-net-regress clean
+.PHONY: all kbd hid hda ntfsfmt test seeds fuzz fuzz-run fuzz-regress net fuzz-net-run fuzz-net-regress clean
