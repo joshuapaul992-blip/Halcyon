@@ -998,6 +998,10 @@ static void compose(rect_t r) {
             if (i.x == r.x && i.y == r.y && i.w == r.w && i.h == r.h) { from = w; covered = 1; }
         }
     if (!covered) desktop_paint(&g, r);
+    /* windows hidden under it still get their client painted (render()
+     * would otherwise ask for them again on every step) */
+    for (window_t *w = windows; covered && w != from; w = w->next)
+        if (w->needs_paint && w->state != WS_MINIMIZED) paint_client(w);
     window_t *active = wm_active();
     int taskbar_drawn = covered;
     for (window_t *w = from; w; w = w->next) {
