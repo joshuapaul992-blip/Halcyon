@@ -285,12 +285,13 @@ void snd_mix(snddev_t *d, i16 *out, int frames) {
 /* ---------------- test hook: QEMU fw_cfg "opt/halcyon/soundtest" ----------------
  * The value is a length in ms (empty: 2000). Once the desktop is drawn, the
  * audio thread plays a 440 Hz sine at 44100 Hz (resampled to the device
- * rate) through an ordinary stream for that long; when it has drained, a
- * 1 kHz triangle at 22050 Hz, mono, as a static sound for 0.25 s; then it
- * logs a summary. boottest.py records QEMU's output to a WAV file and checks
- * both. Never active on real hardware (fw_cfg exists only under QEMU). */
+ * rate) through an ordinary stream for that long; 100 ms after it has
+ * drained, a 1 kHz triangle at 22050 Hz, mono, as a static sound for
+ * 0.25 s; then it logs a summary. boottest.py records QEMU's output to a
+ * WAV file and checks both. The value "beep" runs the beep test in beep.c
+ * instead. Never active on real hardware (fw_cfg exists only under QEMU). */
 extern volatile int gui_desktop_ready __attribute__((weak));
-enum { TS_OFF, TS_WAIT, TS_TONE, TS_BEEP, TS_DONE };
+enum { TS_OFF, TS_WAIT, TS_TONE, TS_GAP, TS_BEEP, TS_DONE };
 static int test_state;
 static u32 test_ms;
 static snd_stream_t *test_s;
@@ -335,6 +336,13 @@ static void test_poll(void) {
         test_tone_ms = time_ms() - test_t0;
         snd_stream_close(test_s, 0);
         test_s = NULL;
+        test_t0 = time_ms();
+        test_state = TS_GAP;
+        return;
+    case TS_GAP:
+        /* 100 ms of silence, so that the recording shows two sounds
+         * whatever the device's period and ring */
+        if (time_ms() - test_t0 < 100) return;
         test_beep = kmalloc(22050 / 4 * 2);
         if (test_beep) {
             for (int i = 0; i < 22050 / 4; i++) {
@@ -423,6 +431,7 @@ void sound_init(void) {
     if (es1370_init) es1370_init();
     if (virtio_snd_init) virtio_snd_init();
     if (sb16_init) sb16_init();
+    if (beep_init) beep_init();
     if (!ndevs) { kprintf("sound: no sound card\n"); return; }
     audio_thread = thread_create("audio", audio_main, NULL);
     if (!audio_thread) kprintf("sound: cannot start the audio thread\n");
