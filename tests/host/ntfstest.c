@@ -1381,6 +1381,11 @@ static void t_ntfs_formatted(const char *tag, u32 mb, u32 ss, u32 cluster) {
     disk_detach(h);
     ntfs_verify(tag, &im);
     t_ntfs_random(tag, &im, ss, 77, 400, 200000, "Random");
+    /* the formatter's own independent checker too (also: every security id
+     * in use exists in $Secure) */
+    static char out[8192];
+    int r = sh_out(out, sizeof out, "python3 ntfs_tool.py %s check", q(im.path));
+    CHECK(r == 0, "[%s] ntfs_tool.py check: %d\n%s", tag, r, out);
     unlink(im.path);
 }
 
