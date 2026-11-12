@@ -299,6 +299,53 @@ compatibility layers), so Xenithium runs the x86-64 build of the Android app.
   tampered package, but not against the site disappearing or being blocked.
 - Depends on M13, M14, M7 and M15.
 
-**Recommended order:** 5 → 9 → 6 → 7 → 7.5 → 8 → 10 → 11 → 12 → 13 → 14 → 15 → 16
+### M17: Release: Halcyon 1.0 RTM
+
+Everything after M16 that turns the milestones into a release people can
+install and keep using. No new big features: finishing, fixing and testing.
+
+- Stabilization: a bug bash over every app and driver; no known crash, hang,
+  data loss or file system corruption left open; every "written to spec,
+  untested" driver either tested on real hardware or listed in the release
+  notes as untested. Long-running tests (days of uptime, copying, playing
+  sound, browsing) under QEMU and on real PCs.
+- Hardware compatibility: a matrix of real machines (desktops and laptops,
+  Intel and AMD, BIOS and UEFI, NVIDIA/Intel/AMD graphics, common network
+  and sound chips) with results published in docs/HARDWARE.md; boot-log
+  reports from testers turned into fixes.
+- Performance: boot time, desktop responsiveness under load (audio must
+  not stutter while the GUI works), memory use, file copy and network
+  throughput measured and tuned; no regressions between release candidates.
+- Security: permissions between programs and for files (today any program
+  may do anything), user accounts or at least a protected system folder,
+  the network configuration and system settings behind the user's OK,
+  hardening of system calls (fuzzing every one), and a review of the
+  vendored libraries' versions (BearSSL, CA list, Mesa, Firefox) for known
+  vulnerabilities.
+- Install and update: the installer to an internal disk (from M8) finished
+  and tested next to Windows and Linux (dual boot, without touching their
+  partitions), an update mechanism for Halcyon itself (signed update
+  packages, rollback), and a recovery option in the F8 menu.
+- UEFI Secure Boot: Halcyon is not signed by Microsoft, so the release
+  documents turning Secure Boot off or enrolling Halcyon's own key, and the
+  loader says so clearly when Secure Boot blocks it.
+- Finish and consistency: every app's menus, shortcuts, dialogs, icons and
+  wording checked against one style guide; keyboard access everywhere;
+  high-contrast theme and larger text for accessibility; the help viewer
+  (M8) with a page for every app; error messages that say what to do.
+- Release engineering:
+  - Feature freeze, then release candidates (RC1, RC2, ...) built from a
+    release branch, each one through the full CI and the hardware matrix.
+  - The version stays 1.0.<build>: RTM is the build the last release
+    candidate is approved as, tagged `v1.0` in git, and later fixes are
+    1.0.<higher build> updates. Pre-release builds say "Pre-release" in
+    About and on the boot screen; the RTM build does not.
+  - Release images (USB stick image, ISO), checksums, release notes, known
+    issues, a changelog generated from the milestones, and a final license
+    audit (THIRD_PARTY_NOTICES.md for everything shipped, including
+    Firefox, Mesa and the Android runtime pieces).
+- Depends on M16 and every milestone before it.
+
+**Recommended order:** 5 → 9 → 6 → 7 → 7.5 → 8 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17
 (Mesa, M15, comes after the Linux layer, M13, which it runs on; Firefox, M14,
 does not need it.)
