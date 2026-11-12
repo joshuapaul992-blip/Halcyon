@@ -133,6 +133,16 @@ ntfsfmt: $(OUT)/ntfsfmt
 	@rm -rf $(OUT)/ntfswork && mkdir -p $(OUT)/ntfswork
 	$(OUT)/ntfsfmt $(OUT)/ntfswork $(NTFSARGS)
 
+# the installer's partition tables (kernel/fs/parttab.c, parttest.c): checked
+# with gpt_check.py (independent, zlib CRCs), sfdisk and sgdisk (if installed)
+$(OUT)/parttest: $(ROOT)/kernel/fs/parttab.c $(ROOT)/kernel/fs/parttab.h parttest.c shim.c $(wildcard $(ROOT)/kernel/core/*.h) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) $(ROOT)/kernel/fs/parttab.c parttest.c shim.c -o $@
+
+parttab: $(OUT)/parttest
+	@rm -rf $(OUT)/partwork && mkdir -p $(OUT)/partwork
+	$(OUT)/parttest $(OUT)/partwork $(PARTARGS)
+
 HIDSRCS := $(ROOT)/kernel/usb/hidparse.c hidtest.c
 HIDHDRS := $(ROOT)/kernel/usb/hidparse.h $(ROOT)/kernel/drivers/input.h $(wildcard $(ROOT)/kernel/core/*.h)
 

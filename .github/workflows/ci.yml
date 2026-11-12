@@ -16,7 +16,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential nasm clang lld python3-pil fonts-dejavu-core \
-            qemu-system-x86 ovmf mtools dosfstools fdisk zip exfatprogs xorriso openssl
+            qemu-system-x86 ovmf mtools dosfstools fdisk gdisk zip exfatprogs xorriso openssl
 
       - name: Build, host tests, QEMU boot matrix
         run: sh tools/ci.sh

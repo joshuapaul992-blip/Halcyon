@@ -21,4 +21,7 @@ tail -1 $out/fuzz_net.log
 # the NTFS formatter: images checked with ntfs-3g (skipped without it)
 make --no-print-directory ntfsfmt NTFSARGS="$NTFSARGS" > $out/ntfsfmt.log 2>&1 || { cat $out/ntfsfmt.log; exit 1; }
 tail -1 $out/ntfsfmt.log
+# the installer's partition tables (MBR / GPT writer), checked with sfdisk, sgdisk and gpt_check.py
+make --no-print-directory parttab > $out/parttest.log 2>&1 || { cat $out/parttest.log; exit 1; }
+tail -1 $out/parttest.log
 exec make --no-print-directory test ARGS="$*"
