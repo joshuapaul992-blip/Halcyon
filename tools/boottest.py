@@ -886,7 +886,7 @@ def installed_disk_failures(disk, gpt, windows, ss=512):
     env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
     for src, dst in (("KERNEL.BIN", "::/HALCYON/KERNEL.BIN"), ("efi/BOOTX64.EFI", "::/EFI/BOOT/BOOTX64.EFI"),
                      ("boot/stage2.bin", "::/HALCYON/BOOT/STAGE2.BIN"), ("user/notepad.exe", "::/PROGRAMS/NOTEPAD.EXE"),
-                     ("media/STARTUP.WAV", "::/HALCYON/MEDIA/STARTUP.WAV")):
+                     ("media/STARTUP.WAV", "::/HALCYON/MEDIA/STARTUP.WAV"), ("help/install.htm", "::/HALCYON/HELP/install.htm")):
         out = os.path.join(BUILD, "ci_install_file.bin")
         if os.path.exists(out):
             os.remove(out)
