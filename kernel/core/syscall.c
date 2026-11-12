@@ -13,6 +13,7 @@
 #include "gui/wm.h"
 #include "apps/fileops.h"
 #include "version.h"
+#include "settings.h"
 
 struct sysframe {
     u64 r15, r14, r13, r12, rbp, rbx, r9, r8, r10, rdx, rsi, rdi, rax, rip, rflags, rsp;
@@ -382,6 +383,32 @@ static long sys_stat_ex(proc_t *p, u64 upath, u64 ubuf) {
     return copyout(ubuf, &x, sizeof x) ? E_INVAL : 0;
 }
 
+/* ---- settings of programs (SETTINGS.INI) ---- */
+
+static long sys_setting_get(u64 ukey, u64 ubuf, u64 n) {
+    char key[SETTINGS_KEY_MAX];
+    int r = copyin_str(key, ukey, sizeof key);
+    if (r) return r == E_NAMETOOLONG ? E_INVAL : r;
+    const char *v = settings_get(key, NULL);
+    if (!v) return E_NOENT;
+    u64 len = strlen(v);
+    if (n) {
+        u64 k = MIN(len, n - 1);
+        char z = 0;
+        if (copyout(ubuf, v, k) || copyout(ubuf + k, &z, 1)) return E_INVAL;
+    }
+    return (long)len;
+}
+
+static long sys_setting_set(proc_t *p, u64 ukey, u64 uval) {
+    char key[SETTINGS_KEY_MAX];
+    static char val[SETTINGS_VAL_MAX];          /* (system calls do not block until settings_user_set returns) */
+    int r = copyin_str(key, ukey, sizeof key);
+    if (r) return r == E_NAMETOOLONG ? E_INVAL : r;
+    if (uval && (r = copyin_str(val, uval, sizeof val))) return r == E_NAMETOOLONG ? E_INVAL : r;
+    return settings_user_set(p->name, key, uval ? val : NULL);
+}
+
 /* ---- dispatcher ---- */
 
 void syscall_dispatch(struct sysframe *f) {
@@ -466,6 +493,9 @@ void syscall_dispatch(struct sysframe *f) {
     }
     case SYS_SHELL_APP: r = sys_shell_app(p, a1, a2); break;
     case SYS_STAT_EX: r = sys_stat_ex(p, a1, a2); break;
+    case SYS_SETTING_GET: r = sys_setting_get(a1, a2, a3); break;
+    case SYS_SETTING_SET: r = sys_setting_set(p, a1, a2); break;
+    case SYS_KEEP_AWAKE: r = saver_keep_awake(p->pid, a1 != 0); break;
     case SYS_PROCLIST: r = sys_proclist(a1, (int)MIN(a2, 256)); break;
     case SYS_SYSINFO: r = sys_sysinfo(a1); break;
 

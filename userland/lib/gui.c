@@ -3,6 +3,7 @@
 #include "hal.h"
 
 int  win_create(const char *t, int w, int h, int flags) { return (int)SC4(SYS_WIN_CREATE, t, w, h, flags); }
+int  win_create_preview(const char *t, int handle) { return (int)SC5(SYS_WIN_CREATE, t, 0, 0, WIN_PREVIEW, handle); }
 void win_destroy(int win) { SC1(SYS_WIN_DESTROY, win); }
 void win_set_title(int win, const char *t) { SC2(SYS_WIN_SET_TITLE, win, t); }
 void win_invalidate(int win) { SC1(SYS_WIN_INVALIDATE, win); }

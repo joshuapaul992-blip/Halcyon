@@ -127,6 +127,23 @@ static inline int eject(char drive) { return (int)SC1(SYS_EJECT, drive); }      
  * with file arg, System Information, Control Panel, About); does not wait */
 static inline int shell_app(int app, const char *arg) { return (int)SC2(SYS_SHELL_APP, app, arg); }
 
+/* ---- settings kept in C:\HALCYON\SETTINGS.INI. Any key can be read; a
+ * program writes only keys named after it: "paint.*" for PAINT.EXE,
+ * "marquee.*" for MARQUEE.SCR (else E_PERM), of letters, digits, '.', '-',
+ * '_', with one-line values up to 599 bytes, at most 64 keys per program.
+ * Changes are written to the file a moment later, coalesced, and survive
+ * the program ending at once. ---- */
+/* the value's length (the value, NUL-terminated, in buf), or E_NOENT */
+static inline int setting_get(const char *key, char *buf, int n) { return (int)SC3(SYS_SETTING_GET, key, buf, n); }
+static inline int setting_set(const char *key, const char *value) { return (int)SC2(SYS_SETTING_SET, key, value); }   /* NULL removes */
+int  setting_get_int(const char *key, int def);
+int  setting_set_int(const char *key, int value);
+
+/* ---- the screen saver: while on (and the program runs), it does not
+ * start (Media Player while it plays). A WIN_FULLSCREEN window keeps it
+ * away too. ---- */
+static inline int keep_awake(int on) { return (int)SC1(SYS_KEEP_AWAKE, on); }
+
 /* ---- files (fd 0/1/2: console) ---- */
 static inline int open(const char *p, int flags) { return (int)SC2(SYS_OPEN, p, flags); }
 static inline int close(int fd) { return (int)SC1(SYS_CLOSE, fd); }
@@ -190,6 +207,7 @@ int getline(char *buf, int n);
 typedef struct { int x, y, w, h; } hal_rect_t;
 #define RGB(r, g, b) ((unsigned)(((r) << 16) | ((g) << 8) | (b)))
 int  win_create(const char *title, int w, int h, int flags);   /* client size; window handle */
+int  win_create_preview(const char *title, int handle);           /* a screen saver's "/p <handle>" window (WIN_PREVIEW) */
 void win_destroy(int win);
 void win_set_title(int win, const char *title);
 void win_invalidate(int win);                                    /* repaint the client area */

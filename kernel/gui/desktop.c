@@ -814,6 +814,7 @@ int bootlog_save(const char *reason);
 static void restart_now(void) {
     final_screen("Halcyon is restarting...");
     sound_shutdown_begin();             /* plays while the log is saved; heard in full before the reset */
+    settings_flush();                   /* a save still waiting (window places...) */
     bootlog_save("restart");
     vfs_sync_all();
     sound_shutdown_wait(4000);
@@ -870,6 +871,7 @@ void shutdown_dialog(void) {
     if (sd_choice == 2) {
         final_screen("Halcyon is shutting down...");
         sound_shutdown_begin();
+        settings_flush();
         bootlog_save("shutdown");
         vfs_sync_all();
         sound_shutdown_wait(4000);
@@ -899,6 +901,7 @@ void shell_open(const char *path) {
     const char *dot = strrchr(vfs_basename(path), '.');
     const char *ext = dot ? dot + 1 : "";
     if (!strcasecmp(ext, "exe")) { shell_run(path, NULL); return; }
+    if (!strcasecmp(ext, "scr")) { saver_start(path); return; }    /* a screen saver: full screen until input */
     static const char *text_ext[] = { "txt", "log", "ini", "cfg", "c", "h", "md", "bat", "asm", "s", "py", "csv",
                                       "json", "xml", "inf", "conf", "sh", "nfo", "diz", "me", "1st", "rtf" };
     if (!strcasecmp(ext, "htm") || !strcasecmp(ext, "html")) { shell_browser(path, 1); return; }

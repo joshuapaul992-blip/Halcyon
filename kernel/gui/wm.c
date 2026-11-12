@@ -8,6 +8,7 @@
 #include "core/mm.h"
 #include "core/kernel.h"
 #include "core/io.h"
+#include "core/settings.h"
 
 volatile int gui_desktop_ready;      /* the desktop is drawn (system sounds, test hooks wait for it) */
 /* the volume UI (gui/volume.c) */
@@ -72,6 +73,7 @@ static int capture_taskbar, capture_desktop;
 static window_t *hover_win;
 static int busy;
 static int mouse_speed = 10;
+static int dblclick_ms = 450, mouse_swap;
 
 enum { DRAG_NONE, DRAG_MOVE, DRAG_RESIZE, DRAG_BUTTON };
 static int drag_mode, drag_dx, drag_dy, drag_edge;
@@ -112,9 +114,19 @@ void gui_full_redraw(void) {
 }
 
 /* ---------------- geometry ---------------- */
-static int framed(window_t *w) { return !(w->flags & WF_POPUP); }
+static int framed(window_t *w) { return !(w->flags & (WF_POPUP | WF_FULLSCREEN | WF_EMBED)); }
+
+/* a preview drawn in its owner: its place follows the owner's client area */
+static void embed_sync(window_t *w) {
+    window_t *o = w->owner;
+    if (!o || !wm_alive(o)) return;
+    rect_t c = wm_client_rect(o);
+    w->frame.x = c.x + w->restore.x;
+    w->frame.y = c.y + w->restore.y;
+}
 
 rect_t wm_client_rect(window_t *w) {
+    if (w->flags & WF_EMBED) embed_sync(w);
     if (!framed(w)) return w->frame;
     return mkrect(w->frame.x + BORDER, w->frame.y + TITLE_H, w->frame.w - 2 * BORDER, w->frame.h - TITLE_H - BORDER);
 }
@@ -145,7 +157,7 @@ int wm_alive(window_t *w) {
 window_t *wm_active(void) {
     window_t *a = NULL;
     for (window_t *w = windows; w; w = w->next)
-        if (w->state != WS_MINIMIZED && !(w->flags & WF_POPUP)) a = w;
+        if (w->state != WS_MINIMIZED && !(w->flags & (WF_POPUP | WF_EMBED | WF_SAVER))) a = w;
     return a;
 }
 
@@ -160,6 +172,9 @@ static void link_top(window_t *w) {
     window_t **pp = &windows;
     if (!(w->flags & (WF_TOPMOST | WF_POPUP))) {
         while (*pp && !((*pp)->flags & (WF_TOPMOST | WF_POPUP))) pp = &(*pp)->next;
+    } else if (!(w->flags & WF_SAVER)) {
+        /* the screen saver stays above every other topmost window */
+        while (*pp && !((*pp)->flags & WF_SAVER)) pp = &(*pp)->next;
     } else {
         while (*pp) pp = &(*pp)->next;
     }
@@ -198,12 +213,15 @@ window_t *wm_create(const char *title, int icon, int x, int y, int cw, int ch, u
     w->icon = icon;
     w->flags = flags;
     if (flags & (WF_DIALOG)) w->flags |= WF_NO_MAXIMIZE | WF_NO_MINIMIZE;
-    int fw = (flags & WF_POPUP) ? cw : cw + 2 * BORDER;
-    int fh = (flags & WF_POPUP) ? ch : ch + TITLE_H + BORDER;
+    int bare = (flags & (WF_POPUP | WF_FULLSCREEN | WF_EMBED)) != 0;
+    int fw = bare ? cw : cw + 2 * BORDER;
+    int fh = bare ? ch : ch + TITLE_H + BORDER;
     int sw = screen_w(), sh = screen_h() - TASKBAR_H;
     if (fw > sw) fw = sw;
-    if (fh > sh) fh = sh;
-    if (flags & WF_CENTER) { x = (sw - fw) / 2; y = (sh - fh) / 2; }
+    if (fh > sh && !(flags & WF_FULLSCREEN)) fh = sh;
+    if (flags & WF_FULLSCREEN) { x = y = 0; fw = sw; fh = screen_h(); }
+    else if (flags & WF_EMBED) { if (x < 0) x = 0; if (y < 0) y = 0; }
+    else if (flags & WF_CENTER) { x = (sw - fw) / 2; y = (sh - fh) / 2; }
     else if (x < 0 || y < 0) {
         x = 60 + (auto_pos % 8) * 28;
         y = 40 + (auto_pos % 8) * 24;
@@ -285,6 +303,59 @@ void wm_invalidate(window_t *w) {
     wm_invalidate_rect(wm_client_rect(w));
 }
 
+/* ---------------- places that survive a reboot ----------------
+ * "window.<key>=x,y,w,h,maximized": the normal (restored) frame; h without
+ * place_top. Written to the table on every change, to the file a moment
+ * later (settings_save_later coalesces a drag into one write). */
+static void place_record(window_t *w) {
+    if (!w->place_key[0] || (w->flags & (WF_POPUP | WF_FULLSCREEN | WF_EMBED))) return;
+    rect_t r = w->state == WS_NORMAL ? w->frame : w->restore;
+    if (r.w <= 0 || r.h <= 0) return;
+    char v[64];
+    snprintf(v, sizeof v, "%d,%d,%d,%d,%d", r.x, r.y, r.w, r.h - w->place_top, w->state == WS_MAXIMIZED);
+    const char *old = settings_get(w->place_key, NULL);
+    if (old && !strcmp(old, v)) return;
+    settings_set(w->place_key, v);
+    settings_save_later();
+}
+
+static void set_frame(window_t *w, rect_t f);
+void wm_place_restore(window_t *w, const char *key) {
+    if (!w || !key || !*key) return;
+    int o = snprintf(w->place_key, sizeof w->place_key, "window.");
+    for (const char *c = key; *c && o < (int)sizeof w->place_key - 1; c++)
+        if (isalnum((u8)*c) || *c == '.' || *c == '-' || *c == '_') w->place_key[o++] = (char)tolower((u8)*c);
+    w->place_key[o] = 0;
+    const char *v = settings_get(w->place_key, NULL);
+    int n[5] = { 0 }, k = 0;
+    for (const char *c = v; c && *c && k < 5; k++) {
+        char *end;
+        n[k] = (int)strtol(c, &end, 10);
+        if (end == c) break;
+        c = *end == ',' ? end + 1 : end;
+    }
+    if (k < 4) return;
+    int sw = screen_w(), work = screen_h() - TASKBAR_H;
+    rect_t f = w->frame;
+    if (w->flags & WF_RESIZABLE) {
+        f.w = CLAMP(n[2], w->min_w, sw);
+        f.h = CLAMP(n[3] + w->place_top, w->min_h, work);
+    }
+    f.x = n[0]; f.y = n[1];
+    /* another window of the same kind at that place: cascade */
+    for (int tries = 0; tries < 8; tries++) {
+        int clash = 0;
+        for (window_t *x = windows; x; x = x->next)
+            if (x != w && !strcmp(x->place_key, w->place_key) && x->frame.x == f.x && x->frame.y == f.y) clash = 1;
+        if (!clash) break;
+        f.x += 28; f.y += 24;
+    }
+    f.x = CLAMP(f.x, 0, MAX(0, sw - f.w));
+    f.y = CLAMP(f.y, 0, MAX(0, work - f.h));
+    set_frame(w, f);
+    if (k >= 5 && n[4] && (w->flags & WF_RESIZABLE) && !(w->flags & WF_NO_MAXIMIZE)) wm_maximize(w, 1);
+}
+
 static void set_frame(window_t *w, rect_t f) {
     wm_invalidate_rect(vis_rect(w));
     int resized = f.w != w->frame.w || f.h != w->frame.h;
@@ -295,6 +366,7 @@ static void set_frame(window_t *w, rect_t f) {
         w->needs_paint = 1;
     }
     wm_invalidate_rect(vis_rect(w));
+    place_record(w);
 }
 
 void wm_resize_client(window_t *w, int cw, int ch) {
@@ -311,6 +383,7 @@ void wm_minimize(window_t *w) {
     wm_invalidate_rect(vis_rect(w));
     activation_changed();
     taskbar_invalidate();
+    place_record(w);
 }
 
 void wm_maximize(window_t *w, int on) {
@@ -322,6 +395,7 @@ void wm_maximize(window_t *w, int on) {
         w->state = WS_NORMAL;
         set_frame(w, w->restore);
     }
+    place_record(w);
 }
 
 void wm_show(window_t *w) {
@@ -496,6 +570,7 @@ static rect_t cursor_rect(int kind, int x, int y) {
     return mkrect(x - hx - 1, y - hy - 1, 20, 24);
 }
 static void draw_cursor(gc_t *g) {
+    if (saver_active()) return;             /* hidden while the screen saver runs */
     int kind = cursor_kind();
     const char **img; int hx, hy;
     cursor_info(kind, &img, &hx, &hy);
@@ -524,7 +599,7 @@ static void draw_cursor(gc_t *g) {
 static window_t *window_at(int x, int y) {
     window_t *hit = NULL;
     for (window_t *w = windows; w; w = w->next)
-        if (w->state != WS_MINIMIZED && rect_contains(w->frame, x, y)) hit = w;
+        if (w->state != WS_MINIMIZED && !(w->flags & (WF_EMBED | WF_SAVER)) && rect_contains(w->frame, x, y)) hit = w;
     return hit;
 }
 static int is_overlay(window_t *w) { return (w->flags & (WF_TOPMOST | WF_POPUP)) != 0; }
@@ -605,7 +680,7 @@ static int alt_tap;             /* the left Alt key is down and nothing else hap
 static void mouse_down(int button) {
     u64 now = time_ms();
     alt_tap = 0;
-    int dbl = button == last_click_btn && now - last_click_ms < 450 &&
+    int dbl = button == last_click_btn && now - last_click_ms < (u64)dblclick_ms &&
               ABS_DIFF_OK(mx, last_click_x) && ABS_DIFF_OK(my, last_click_y);
     last_click_ms = dbl ? 0 : now; last_click_x = mx; last_click_y = my; last_click_btn = button;
 
@@ -826,6 +901,10 @@ static void key_event(input_event_t *k) {
 static void handle_input(void) {
     input_event_t ev;
     while (input_get(&ev)) {
+        /* the screen saver: idle time, and the input that ends it goes no further */
+        if (saver_input(&ev)) continue;
+        if (ev.type == EV_MOUSE && mouse_swap)
+            ev.buttons = (u8)((ev.buttons & ~3) | ((ev.buttons & 1) << 1) | ((ev.buttons & 2) >> 1));
         if (ev.type == EV_KEY) {
             /* Ctrl+Alt+Del: Task Manager */
             if (ev.pressed && ev.key == KEY_DELETE && (ev.mods & MOD_CTRL) && (ev.mods & MOD_ALT)) {
@@ -883,7 +962,7 @@ static void compose(rect_t r) {
     window_t *active = wm_active();
     int taskbar_drawn = 0;
     for (window_t *w = windows; w; w = w->next) {
-        if (w->state == WS_MINIMIZED) continue;
+        if (w->state == WS_MINIMIZED || (w->flags & WF_EMBED)) continue;
         if (!taskbar_drawn && is_overlay(w)) { taskbar_paint(&g, r); taskbar_drawn = 1; }
         rect_t vr = vis_rect(w);
         if (rect_empty(rect_intersect(vr, r))) continue;
@@ -892,6 +971,16 @@ static void compose(rect_t r) {
         if (w->needs_paint) paint_client(w);
         rect_t c = wm_client_rect(w);
         if (w->client) gfx_blit(&g, c.x, c.y, w->client, mkrect(0, 0, w->client->w, w->client->h));
+        /* previews drawn inside this window (clipped to its client area) */
+        for (window_t *e = windows; e; e = e->next) {
+            if (!(e->flags & WF_EMBED) || e->owner != w || e->state == WS_MINIMIZED || !e->client) continue;
+            rect_t ec = wm_client_rect(e);
+            gc_t eg = g;
+            eg.clip = rect_intersect(g.clip, c);
+            if (rect_empty(rect_intersect(ec, eg.clip))) continue;
+            if (e->needs_paint) paint_client(e);
+            gfx_blit(&eg, ec.x, ec.y, e->client, mkrect(0, 0, e->client->w, e->client->h));
+        }
     }
     if (!taskbar_drawn) taskbar_paint(&g, r);
     if (gui_overlay_paint) gui_overlay_paint(&g, r);     /* the volume indicator, tray tooltips */
@@ -992,7 +1081,9 @@ void gui_step(void) {
             }
         }
         shell_tick();
+        settings_tick();
     }
+    saver_tick();
     if (render()) busy = 1;
     u64 deadline = idle_take_deadline();
     if (busy) return;
@@ -1022,7 +1113,8 @@ static int screen_changed(void) {
     int sw = screen_w(), sh = screen_h(), work = sh - TASKBAR_H;
     menu_close_all();
     for (window_t *w = windows; w; w = w->next) {
-        if (w->flags & WF_POPUP) continue;
+        if (w->flags & (WF_POPUP | WF_EMBED)) continue;
+        if (w->flags & WF_FULLSCREEN) { set_frame(w, mkrect(0, 0, sw, sh)); continue; }
         if (w->state == WS_MAXIMIZED) {
             set_frame(w, mkrect(-BORDER, -0, sw + 2 * BORDER, work + BORDER));
             continue;
@@ -1056,7 +1148,9 @@ void gui_main(void) {
     screen_init();
     display_changed_hook = screen_changed;
     mx = screen_w() / 2; my = screen_h() / 2;
+    wm_mouse_load();
     desktop_init();
+    saver_init();
     gui_full_redraw();
     kprintf("gui: desktop ready (%dx%d)\n", screen_w(), screen_h());
     gui_desktop_ready = 1;
@@ -1079,6 +1173,22 @@ void gui_main(void) {
     }
     format_test_hook();
     for (;;) gui_step();
+}
+
+/* ---------------- the mouse ---------------- */
+void wm_mouse_config(int speed, int dbl, int swap) {
+    mouse_speed = CLAMP(speed, 1, 20);
+    dblclick_ms = CLAMP(dbl, 200, 900);
+    mouse_swap = swap != 0;
+}
+void wm_mouse_get(int *speed, int *dbl, int *swap) {
+    if (speed) *speed = mouse_speed;
+    if (dbl) *dbl = dblclick_ms;
+    if (swap) *swap = mouse_swap;
+}
+void wm_mouse_load(void) {
+    wm_mouse_config(settings_get_int("mouse.speed", 10), settings_get_int("mouse.doubleclick", 450),
+                    settings_get_int("mouse.swap", 0));
 }
 
 /* ---------------- clipboard ---------------- */
