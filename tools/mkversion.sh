@@ -1,17 +1,48 @@
 #!/bin/sh
-# Write the version header: OS_VERSION is "1.0.<build>", the build number
-# being the number of commits in the history being built (0 without git, or
-# in a shallow clone, where the count would be wrong). The file is rewritten
-# only when it changes, so only the files that show the version recompile.
+# Write the version header: OS_VERSION is "<major.minor>.<build>". The file is
+# rewritten only when it changes, so only the files that show the version
+# recompile.
+#
+# Build numbers (docs/ROADMAP.md, "Release schedule"): one number per release
+# line, and every build of a later line is numbered above every build of an
+# earlier one (1.0.1415 < 1.1.2362). So each line has a starting point:
+#   line_base_commit  the commit the line counts from ("" = the start of the
+#                     history: the build is the number of commits, as for 1.0)
+#   line_base_build   the build number of that commit
+# build = line_base_build + commits since line_base_commit.
+# When a new line begins (at the previous line's RTM): on the main branch set
+# major_minor to the new line, line_base_commit to the branch point, and
+# line_base_build to a number well above the RTM build (the next thousand
+# above RTM + 1000, e.g. 1415 -> 3000); on the old line's maintenance branch
+# set line_build_limit to that number, so its service packs can never reach
+# the new line's numbers (the build fails instead).
+# Without git, or in a shallow clone (where the count would be wrong), the
+# build number is 0.
 out=$1
 major_minor="1.0"
+line_base_commit=""
+line_base_build=0
+line_build_limit=0          # 0 = no limit
 # 1 until the release build (M17, 1.0 RTM): the desktop shows the
 # "For testing purposes only" watermark and About says "Pre-release"
 prerelease=1
 if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = "false" ]; then
-    build=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+    if [ -n "$line_base_commit" ]; then
+        n=$(git rev-list --count "$line_base_commit..HEAD" 2>/dev/null) || n=""
+        if [ -z "$n" ]; then
+            echo "mkversion: line_base_commit $line_base_commit is not in this history" >&2
+            exit 1
+        fi
+        build=$((line_base_build + n))
+    else
+        build=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+    fi
 else
     build=0
+fi
+if [ "$line_build_limit" -gt 0 ] && [ "$build" -ge "$line_build_limit" ]; then
+    echo "mkversion: build $build reached $line_build_limit, where the next release line's numbers begin" >&2
+    exit 1
 fi
 tmp="$out.tmp"
 cat > "$tmp" <<EOH

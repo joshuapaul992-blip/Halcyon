@@ -553,14 +553,19 @@ slips and the bar stays where it is.
 ### Versions and build numbers
 
 - Every build is `major.minor.build`: 1.0.<build>, 1.1.<build>, and so on, one
-  build number per release line. The build number is the number of commits
-  in the history the build comes from (tools/mkversion.sh).
+  build number per release line, counted from commits (tools/mkversion.sh).
+- Every build of a later line is numbered above every build of an earlier
+  line, service packs included: 1.0.1415 is older than 1.1.2362, always.
+  1.0 counts commits from the start of the history. When 1.1 begins (at 1.0
+  RTM), its builds start at a fixed number well above the RTM build (the next
+  thousand above RTM + 1000: RTM 1.0.1415 means 1.1 starts at 1.1.3000) and
+  count the commits since the branch point; the same again for 1.2 and later.
 - Service packs are built on the release's maintenance branch (`release/1.0`
-  from the RTM commit), so their build numbers keep rising within the line:
-  1.0 RTM might be 1.0.4210 and 1.0 SP1 1.0.4267. A 1.0 build and a 1.1 build
-  can share a number; the version as a whole stays unique, and About and the
-  boot screen name the service pack ("Halcyon 1.0, Service Pack 1, build
-  4267").
+  from the RTM commit), so their build numbers keep rising within the line
+  (1.0 RTM 1.0.1415, SP1 1.0.1472, ...) but stay below the next line's start:
+  the version generator refuses to build a number that reaches it. About and
+  the boot screen name the service pack ("Halcyon 1.0, Service Pack 1, build
+  1472").
 - Pre-release builds (everything except an RTM or a service pack's final
   build) show the desktop watermark; finals do not.
 
