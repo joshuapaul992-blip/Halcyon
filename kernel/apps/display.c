@@ -10,9 +10,13 @@
  * Settings (docs/DESIGN-M10-DISPLAY.md): a picture of the monitors as they
  * are arranged, numbered; drag one to put it elsewhere (it snaps to an edge
  * of the others), click one (or pick it in the Display list) to choose its
- * resolution from its own list (its EDID and the adapter's limits), make it
- * the primary monitor (the taskbar and the desktop icons) or extend the
- * desktop onto it. Identify shows each monitor's number on it. Apply sets
+ * resolution from its own list (its EDID and the adapter's limits) and its
+ * refresh rate (the Refresh rate drop-down: the rates the monitor lists at
+ * that resolution and the adapter can drive; a new resolution takes the
+ * monitor's preferred rate if it is offered there, else the highest; on
+ * adapters that cannot change it the drop-down says "Default", disabled),
+ * make it the primary monitor (the taskbar and the desktop icons) or extend
+ * the desktop onto it. Identify shows each monitor's number on it. Apply sets
  * everything at once on adapters that switch live and asks "Do you want to
  * keep these settings?" for 15 seconds, going back if nobody answers (a
  * mode the monitor cannot show leaves it black); the arrangement is kept in
@@ -48,6 +52,8 @@
 #define MON_Y (TY + 12)            /* the monitor's top */
 #define MENU_MON 100               /* Display list: 100 + monitor */
 #define MAXMON (DISPLAY_MAX_ADAPTERS * DISPLAY_MAX_CONNECTORS)
+#define MENU_RATE (MENU_MON + MAXMON)   /* Refresh rate list: + the rate's index */
+#define MAXRATES 16
 
 enum { TAB_SAVER = 0, TAB_SETTINGS, NTABS };
 static const char *const tab_names[NTABS] = { "Screen Saver", "Settings" };
@@ -55,7 +61,7 @@ static const char *const tab_names[NTABS] = { "Screen Saver", "Settings" };
 /* a monitor as Display Properties shows it: the settings it would get */
 typedef struct dmon {
     display_connector_t *conn;
-    int attach, w, h, x, y;        /* pending */
+    int attach, w, h, hz, x, y;    /* pending */
     rect_t box;                    /* in the arrangement picture (client coordinates) */
     surface_t *thumb;              /* its wallpaper, box sized */
 } dmon_t;
@@ -67,6 +73,8 @@ typedef struct disp {
     int nmon;                      /* the connected (or attached) ones come first */
     int npic;                      /* how many are in the picture */
     int msel;                      /* the selected one */
+    int size_mode[DISPLAY_MAX_MODES];   /* the resolution list's rows: a mode of each size */
+    int nsizes;
     display_connector_t *primary;  /* pending */
     display_conf_t applied;        /* in use (or saved for the next start) */
     int scale256, offx, offy;      /* desktop -> picture: x * scale / 256 + off */
@@ -96,6 +104,7 @@ static rect_t spin_rect(int up) { return mkrect(108, MON_Y + 218 + (up ? 0 : 11)
 /* the settings tab */
 static rect_t arr_rect(void) { return mkrect(16, TY + 34, DW - 32, 136); }
 static rect_t dcombo_rect(void) { return mkrect(16, TY + 202, DW - 32, 22); }
+static rect_t rate_rect(void) { return mkrect(104, TY + 332, 112, 22); }
 
 /* the monitor around the preview screen (the screen saver tab) */
 static void draw_monitor(gc_t *g) {
@@ -209,7 +218,7 @@ static void load_monitors(disp_t *d, const display_conf_t *cf) {
             memset(m, 0, sizeof *m);
             m->conn = o->conn;
             m->attach = o->attach;
-            m->w = o->w; m->h = o->h;
+            m->w = o->w; m->h = o->h; m->hz = o->hz;
             m->x = o->x; m->y = o->y;
             if (pass == 0) d->npic = d->nmon;
         }
@@ -224,7 +233,7 @@ static void conf_from(disp_t *d, display_conf_t *cf) {
         if (k < 0) continue;
         dmon_t *m = &d->mon[k];
         cf->out[i].attach = m->attach;
-        cf->out[i].w = m->w; cf->out[i].h = m->h;
+        cf->out[i].w = m->w; cf->out[i].h = m->h; cf->out[i].hz = m->hz;
         cf->out[i].x = m->x; cf->out[i].y = m->y;
     }
     cf->primary = d->primary;
@@ -236,9 +245,20 @@ static int conf_differs(const display_conf_t *a, const display_conf_t *b) {
         for (int k = 0; k < b->n; k++) {
             if (a->out[i].conn != b->out[k].conn) continue;
             const display_conf_out_t *p = &a->out[i], *q = &b->out[k];
-            if (p->attach != q->attach || (p->attach && (p->w != q->w || p->h != q->h || p->x != q->x || p->y != q->y))) return 1;
+            if (p->attach != q->attach ||
+                (p->attach && (p->w != q->w || p->h != q->h || p->hz != q->hz || p->x != q->x || p->y != q->y))) return 1;
         }
     return 0;
+}
+
+/* the refresh rates of a monitor's pending resolution; whether it offers a
+ * choice (an adapter that programs the timing and switches at once) */
+static int mon_rates(const dmon_t *m, int *hz, int max) {
+    return modes_rates(m->conn->modes, m->conn->nmodes, m->w, m->h, hz, max);
+}
+static int rate_choice(const dmon_t *m) {
+    int hz[MAXRATES];
+    return m && m->conn->adapter->rates && m->conn->adapter->live && mon_rates(m, hz, MAXRATES) > 0;
 }
 
 /* the attached monitors in a valid arrangement (they touch, nothing
@@ -350,10 +370,20 @@ static void paint_settings_tab(window_t *w, gc_t *g, disp_t *d) {
 
     draw_group(g, mkrect(12, TY + 232, DW - 24, 128), "Screen resolution");
     dmon_t *m = d->msel < d->nmon ? &d->mon[d->msel] : NULL;
-    char cq[96] = "Color quality: Highest (32 bit)";
-    if (m && m->conn->head && m->conn->head->mode.hz)
-        snprintf(cq, sizeof cq, "Color quality: Highest (32 bit), %d Hertz", m->conn->head->mode.hz);
-    gfx_text(g, &font_ui, 24, TY + 338, cq, HEX(0x000000));
+    /* Refresh rate: [120 Hertz v]   (disabled "Default" where the adapter cannot change it) */
+    int on = rate_choice(m);
+    rect_t rr = rate_rect();
+    gfx_text(g, &font_ui, 24, rr.y + 4, "Refresh rate:", on ? HEX(0x000000) : HEX(0x8C8A82));
+    gfx_sunken_field(g, rr, on ? HEX(0xFFFFFF) : color_lighten(g_theme->face, 12));
+    char rt[24] = "Default";
+    if (on && m->hz) snprintf(rt, sizeof rt, "%d Hertz", m->hz);
+    gfx_text_box(g, &font_ui, mkrect(rr.x + 5, rr.y, rr.w - 26, rr.h), rt, on ? HEX(0x000000) : HEX(0x8C8A82), 0);
+    rect_t rb = mkrect(rr.x + rr.w - 19, rr.y + 2, 17, rr.h - 4);
+    gfx_rounded(g, rb, 2, 15, color_lighten(g_theme->sidebar_top, on ? 140 : 160), color_lighten(g_theme->sidebar_bottom, on ? 60 : 100));
+    gfx_rounded_outline(g, rb, 2, 15, color_lighten(g_theme->sidebar_bottom, on ? 20 : 80));
+    for (int i = 0; i < 4; i++)
+        gfx_hline(g, rb.x + rb.w / 2 - 3 + i, rb.y + rb.h / 2 - 1 + i, 7 - 2 * i, on ? HEX(0x4D6185) : HEX(0xA8A8A8));
+    gfx_text(g, &font_ui, rr.x + rr.w + 14, rr.y + 4, "Colors: Highest (32 bit)", HEX(0x000000));
     const char *note = "The new settings are used as soon as you click Apply.";
     if (m && !m->conn->adapter->live) note = "This display adapter takes a new resolution when Halcyon starts.";
     gfx_text_box(g, &font_small, mkrect(16, TY + 414, DW - 32, 14), note, HEX(0x6A6A6A), 0);
@@ -483,7 +513,9 @@ static void combo_open(window_t *w) {
 }
 
 
+static void select_rate(window_t *w, int k);
 static void dp_menu(window_t *w, int id) {
+    if (id >= MENU_RATE) { select_rate(w, id - MENU_RATE); return; }
     if (id >= MENU_MON) { select_monitor(w, id - MENU_MON); return; }
     if (id == 1) select_saver(w, -1);
     else if (id >= 2) select_saver(w, id - 2);
@@ -548,10 +580,17 @@ static void keep_click(window_t *w, widget_t *wd) {
     k->done = 1;
 }
 static int keep_close(window_t *w) { keep_t *k = w->data; k->done = 1; return 0; }
+static int keep_auto_ms;               /* the test hook answers Yes after this long */
 static void keep_tick(window_t *w) {
     keep_t *k = w->data;
     u64 now = time_ms();
     if (now >= k->deadline) { k->done = 1; return; }
+    if (keep_auto_ms && now + 15000 >= k->deadline + (u64)keep_auto_ms) {
+        kprintf("display test: \"keep these settings?\" answered Yes\n");
+        k->keep = 1;
+        k->done = 1;
+        return;
+    }
     widget_t *l = widget_find(w, 20);
     char t[64];
     snprintf(t, sizeof t, "Reverting in %d seconds.", (int)((k->deadline - now + 999) / 1000));
@@ -652,8 +691,11 @@ static void update_buttons(window_t *w) {
     wm_invalidate(w);
 }
 
-static void mode_text(const display_mode_t *m, char *out, int n) {
-    snprintf(out, (size_t)n, "%d by %d pixels%s", m->w, m->h, (m->flags & DT_PREFERRED) ? "  (recommended)" : "");
+/* a row of the resolution list: a size ("recommended": the preferred mode's) */
+static void size_text(const display_connector_t *c, const display_mode_t *m, char *out, int n) {
+    int p = modes_preferred(c->modes, c->nmodes);
+    int rec = p >= 0 && c->modes[p].w == m->w && c->modes[p].h == m->h;
+    snprintf(out, (size_t)n, "%d by %d pixels%s", m->w, m->h, rec ? "  (recommended)" : "");
 }
 
 /* the widgets show the selected monitor */
@@ -663,20 +705,25 @@ static void select_monitor(window_t *w, int i) {
     d->msel = i;
     dmon_t *m = &d->mon[i];
     display_connector_t *c = m->conn;
+    /* one row per size (the list has a mode per size and refresh rate) */
+    d->nsizes = 0;
+    for (int k = 0; k < c->nmodes && d->nsizes < DISPLAY_MAX_MODES; k++)
+        if (!k || c->modes[k - 1].w != c->modes[k].w || c->modes[k - 1].h != c->modes[k].h) d->size_mode[d->nsizes++] = k;
     widget_t *lb = widget_find(w, DP_LIST);
     if (lb) {
-        char **items = kzalloc(sizeof(char *) * (size_t)(c->nmodes + 1));
+        char **items = kzalloc(sizeof(char *) * (size_t)(d->nsizes + 1));
         int sel = 0;
-        for (int k = 0; k < c->nmodes && items; k++) {
+        for (int k = 0; k < d->nsizes && items; k++) {
+            const display_mode_t *md = &c->modes[d->size_mode[k]];
             items[k] = kmalloc(64);
-            if (items[k]) mode_text(&c->modes[k], items[k], 64);
-            if (c->modes[k].w == m->w && c->modes[k].h == m->h) sel = k;
+            if (items[k]) size_text(c, md, items[k], 64);
+            if (md->w == m->w && md->h == m->h) sel = k;
         }
-        if (items) widget_list_set(w, lb, items, c->nmodes);
-        for (int k = 0; k < c->nmodes && items; k++) kfree(items[k]);
+        if (items) widget_list_set(w, lb, items, d->nsizes);
+        for (int k = 0; k < d->nsizes && items; k++) kfree(items[k]);
         kfree(items);
         lb->value = sel;
-        lb->top = MAX(0, MIN(sel - 2, c->nmodes - 4));      /* the mode in use in view */
+        lb->top = MAX(0, MIN(sel - 2, d->nsizes - 4));      /* the mode in use in view */
     }
     widget_t *p = widget_find(w, DP_PRIMARY), *x = widget_find(w, DP_EXTEND);
     int is_primary = c == d->primary, gone = c->status == CONN_DISCONNECTED && !m->attach;
@@ -691,15 +738,49 @@ static void select_monitor(window_t *w, int i) {
     update_buttons(w);
 }
 
+/* a resolution chosen: the monitor's preferred refresh rate if it is
+ * offered at that size, else the highest there (modes_find) */
 static void on_select(window_t *w, widget_t *lb) {
     disp_t *d = w->data;
     if (d->msel >= d->nmon) return;
     dmon_t *m = &d->mon[d->msel];
-    if (lb->value < 0 || lb->value >= m->conn->nmodes) return;
-    m->w = m->conn->modes[lb->value].w;
-    m->h = m->conn->modes[lb->value].h;
+    if (lb->value < 0 || lb->value >= d->nsizes) return;
+    const display_mode_t *md = &m->conn->modes[d->size_mode[lb->value]];
+    int same = m->w == md->w && m->h == md->h;
+    m->w = md->w;
+    m->h = md->h;
+    int k = modes_find(m->conn->modes, m->conn->nmodes, m->w, m->h);
+    if (!same && k >= 0) m->hz = m->conn->modes[k].hz;
     arrange(d);
     refresh_picture(d);
+    update_buttons(w);
+}
+
+/* the Refresh rate drop-down */
+static menu_item_t rate_items[MAXRATES];
+static menu_t rate_menu = { "Refresh rate", rate_items, 0 };
+static char rate_text[MAXRATES][24];
+static void rate_open(window_t *w) {
+    disp_t *d = w->data;
+    dmon_t *m = d->msel < d->nmon ? &d->mon[d->msel] : NULL;
+    if (!rate_choice(m)) return;
+    int hz[MAXRATES], n = mon_rates(m, hz, MAXRATES);
+    for (int i = 0; i < n; i++) {
+        snprintf(rate_text[i], sizeof rate_text[i], "%d Hertz", hz[i]);
+        rate_items[i] = (menu_item_t){ rate_text[i], NULL, MENU_RATE + i, hz[i] == m->hz ? MI_CHECKED : 0, 0 };
+    }
+    rate_menu.count = n;
+    rect_t r = rate_rect(), cl = wm_client_rect(w);
+    menu_popup(w, &rate_menu, cl.x + r.x, cl.y + r.y + r.h);
+}
+
+static void select_rate(window_t *w, int k) {
+    disp_t *d = w->data;
+    if (d->msel >= d->nmon) return;
+    dmon_t *m = &d->mon[d->msel];
+    int hz[MAXRATES], n = mon_rates(m, hz, MAXRATES);
+    if (k < 0 || k >= n || !rate_choice(m)) return;
+    m->hz = hz[k];
     update_buttons(w);
 }
 
@@ -828,6 +909,7 @@ static int settings_event(window_t *w, gui_event_t *e) {
     disp_t *d = w->data;
     if (e->type == GE_MOUSE_DOWN && e->button == MOUSE_LEFT) {
         if (rect_contains(dcombo_rect(), e->x, e->y)) { dcombo_open(w); return 1; }
+        if (rect_contains(rate_rect(), e->x, e->y)) { rate_open(w); return 1; }
         int i = pic_hit(d, e->x, e->y);
         if (i >= 0) {
             select_monitor(w, i);
@@ -971,7 +1053,7 @@ void app_display(void) {
     refresh_picture(d);
     d->msel = MAX(0, mon_index(d, d->primary));
 
-    widget_t *lb = widget_add(w, W_LISTBOX, mkrect(24, TY + 250, DW - 48, 82), "", DP_LIST);
+    widget_t *lb = widget_add(w, W_LISTBOX, mkrect(24, TY + 250, DW - 48, 76), "", DP_LIST);
     lb->on_change = on_select;
     widget_t *idb = widget_add(w, W_BUTTON, mkrect(DW - 16 - 75, TY + 175, 75, 23), "Identify", DP_IDENTIFY);
     idb->on_click = on_identify;
@@ -1021,4 +1103,75 @@ void app_display(void) {
 void app_display_saver(void) {
     app_display();
     if (dp_win && wm_alive(dp_win)) show_tab(dp_win, TAB_SAVER);
+}
+
+/* ---- test hook: QEMU fw_cfg "opt/halcyon/displaytest" = "WxH[@HZ],..." ----
+ * Opens Display Properties on the primary monitor, picks each resolution
+ * through the list's handler (the refresh rate it then takes is logged)
+ * and a rate through the drop-down menu's, logs what the drop-down offers,
+ * waits 2 seconds (a screendump), applies, and answers "Do you want to keep
+ * these settings?" with Yes after 3 seconds (tools/boottest.py rates). */
+static void test_log(disp_t *d, const char *what) {
+    dmon_t *m = d->msel < d->nmon ? &d->mon[d->msel] : NULL;
+    if (!m) return;
+    int hz[MAXRATES], n = mon_rates(m, hz, MAXRATES);
+    char r[96] = "";
+    for (int i = 0; i < n; i++) snprintf(r + strlen(r), sizeof r - strlen(r), "%s%d", i ? ", " : "", hz[i]);
+    kprintf("display test: %s: %s %dx%d, refresh rate %d Hertz (offered: %s Hertz), drop-down %s, %d resolutions\n", what, m->conn->name,
+            m->w, m->h, m->hz, r, rate_choice(m) ? "enabled" : "disabled (Default)", d->nsizes);
+}
+
+static void test_pause(int ms) {
+    for (u64 end = time_ms() + (u64)ms; time_ms() < end;) gui_step();
+}
+
+void display_test_hook(void) {
+    char spec[96];
+    if (!qemu_fw_file("opt/halcyon/displaytest", spec, sizeof spec) || !spec[0]) return;
+    app_display();
+    window_t *w = dp_win;
+    if (!w || !wm_alive(w)) return;
+    disp_t *d = w->data;
+    show_tab(w, TAB_SETTINGS);
+    test_log(d, "opened");
+    for (char *tok = spec; tok && *tok;) {
+        char *next = strchr(tok, ',');
+        if (next) *next++ = 0;
+        char *x = strchr(tok, 'x'), *at = strchr(tok, '@');
+        int tw = (int)strtol(tok, NULL, 10), th = x ? (int)strtol(x + 1, NULL, 10) : 0, thz = at ? (int)strtol(at + 1, NULL, 10) : 0;
+        dmon_t *m = &d->mon[d->msel];
+        widget_t *lb = widget_find(w, DP_LIST);
+        int row = -1;
+        for (int k = 0; k < d->nsizes; k++)
+            if (m->conn->modes[d->size_mode[k]].w == tw && m->conn->modes[d->size_mode[k]].h == th) row = k;
+        if (row < 0 || !lb) { kprintf("display test: %dx%d is not in the list\n", tw, th); return; }
+        lb->value = row;
+        lb->top = MAX(0, MIN(row - 2, d->nsizes - 4));
+        on_select(w, lb);
+        test_log(d, "resolution chosen");
+        if (thz) {
+            int hz[MAXRATES], n = mon_rates(m, hz, MAXRATES), k = -1;
+            for (int i = 0; i < n; i++) if (hz[i] == thz) k = i;
+            if (k < 0) { kprintf("display test: %d Hertz is not offered at %dx%d\n", thz, tw, th); return; }
+            dp_menu(w, MENU_RATE + k);
+            test_log(d, "refresh rate chosen");
+        }
+        tok = next;
+    }
+    test_pause(2000);
+    keep_auto_ms = 3000;
+    int ok = apply(w);
+    keep_auto_ms = 0;
+    if (!wm_alive(w)) return;
+    dmon_t *m = &d->mon[d->msel];
+    display_head_t *h = m->conn->head;
+    char k[SETTINGS_KEY_MAX], key[SETTINGS_KEY_MAX] = "display.";
+    for (const char *s = m->conn->name; *s && strlen(key) < sizeof key - 4; s++) {
+        size_t l = strlen(key);
+        key[l] = (char)tolower((u8)*s);
+        key[l + 1] = 0;
+    }
+    snprintf(k, sizeof k, "%s.hz", key);
+    kprintf("display test: applied (%s): %s %dx%d at %d Hz, %s=%s\n", ok ? "kept" : "not kept", m->conn->name, h ? h->mode.w : 0,
+            h ? h->mode.h : 0, h ? h->mode.hz : 0, k, settings_get(k, "(none)"));
 }

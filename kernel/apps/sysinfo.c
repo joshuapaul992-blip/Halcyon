@@ -158,14 +158,23 @@ static void display_rows(si_t *s, char *d) {
             } else if (c->status != CONN_DISCONNECTED) {
                 o += snprintf(d + o, 2048 - o, "\nMonitor: %s (no EDID)\n", mon);
             }
-            o += snprintf(d + o, 2048 - o, "Modes: %d\n", c->nmodes);
+            int sizes = 0;
+            for (int i = 0; i < c->nmodes; i++) sizes += !i || c->modes[i - 1].w != c->modes[i].w || c->modes[i - 1].h != c->modes[i].h;
+            o += snprintf(d + o, 2048 - o, "Modes: %d (%d resolutions%s)\n", c->nmodes, sizes,
+                          a->rates ? ", each refresh rate the monitor lists" : "");
             display_head_t *h = c->head;
             if (h && o < 2048) {
-                char md[128];
+                char md[128], rate[112] = "default (the adapter does not change it)";
                 mode_describe(&h->mode, md, sizeof md);
-                o += snprintf(d + o, 2048 - o, "\nOn the desktop: monitor %d%s at %d,%d\nMode: %s\nHead: %d, %d buffer%s\n"
+                if (a->rates && h->mode.hz) {
+                    int hz[16], n = modes_rates(c->modes, c->nmodes, h->mode.w, h->mode.h, hz, 16);
+                    int l = snprintf(rate, sizeof rate, "%d Hz (offered at %dx%d:", h->mode.hz, h->mode.w, h->mode.h);
+                    for (int i = 0; i < n && l < (int)sizeof rate; i++) l += snprintf(rate + l, sizeof rate - (size_t)l, " %d", hz[i]);
+                    if (l < (int)sizeof rate) snprintf(rate + l, sizeof rate - (size_t)l, " Hz)");
+                }
+                o += snprintf(d + o, 2048 - o, "\nOn the desktop: monitor %d%s at %d,%d\nMode: %s\nRefresh rate: %s\nHead: %d, %d buffer%s\n"
                               "Frames: %u, page flips: %u (longest wait %u ms)\nHardware cursor: %s\n",
-                              c->number, c == display_primary() ? " (primary)" : "", h->x, h->y, md, h->index, h->nfb,
+                              c->number, c == display_primary() ? " (primary)" : "", h->x, h->y, md, rate, h->index, h->nfb,
                               h->nfb == 1 ? "" : "s", h->frames, h->flips, h->flip_wait_max_ms,
                               display_hw_cursor() ? "in use" : (h->caps & HEAD_CAP_CURSOR) ? "available" : "no");
             } else if (o < 2048) {
