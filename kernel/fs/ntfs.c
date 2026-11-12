@@ -1833,13 +1833,13 @@ static int has_windows(ntfs_t *fs) {
     return yes;
 }
 
-void ntfs_write_key(u64 serial, char *out, int outsz) {
+void ntfs_setting_key(u64 serial, char *out, int outsz) {
     snprintf(out, (size_t)outsz, "ntfs.write.%016llX", (unsigned long long)serial);
 }
 
 static int internal_allowed(ntfs_t *fs) {
     char key[40];
-    ntfs_write_key(fs->serial, key, sizeof key);
+    ntfs_setting_key(fs->serial, key, sizeof key);
     return settings_get_int(key, 0) == 1;
 }
 

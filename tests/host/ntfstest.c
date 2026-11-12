@@ -876,7 +876,7 @@ static void s_ntfssafe(void) {
         volume_t *v = vfs_volume_by_letter(L);
         CHECK(v->ro_policy, "[internal] ro_policy not set");
         char key[40];
-        ntfs_write_key(v->serial, key, sizeof key);
+        ntfs_setting_key(v->serial, key, sizeof key);
         CHECK(strlen(key) == 27 && !strncmp(key, "ntfs.write.", 11), "key %s", key);
         settings_set(key, "1");
         ntfs_settings_changed();

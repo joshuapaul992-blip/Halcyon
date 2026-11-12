@@ -237,6 +237,7 @@ def profile_boot(m):
         f.write(b"Hello from NTFS!\r\n")
     os.mkdir(os.path.join(m, "Folder"))
     put(os.path.join(m, "Folder", "data.bin"), 100000)
+    os.makedirs(os.path.join(m, "Windows", "System32"))
 
 
 def main():

@@ -19,6 +19,6 @@ void ntfs_settings_changed(void);
 
 /* the settings key that allows writing to the internal NTFS volume with
  * this serial number: "ntfs.write.<16 uppercase hex digits>" */
-void ntfs_write_key(u64 serial, char *out, int outsz);
+void ntfs_setting_key(u64 serial, char *out, int outsz);
 
 #endif
