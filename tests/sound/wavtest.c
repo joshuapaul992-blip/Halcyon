@@ -450,10 +450,11 @@ static void check_file(const char *path) {
     fclose(fp);
     wav_t w;
     int r = wav_open(&w, buf, n);
-    /* the system sounds: 16-bit PCM, short; the demo piece: IMA ADPCM made by mksounds.py's own encoder */
+    /* the system sounds: 16-bit PCM, short (the Dusk and Tide schemes' startups take up to 8 s);
+     * the demo piece: IMA ADPCM made by mksounds.py's own encoder */
     int adpcm = strstr(path, "/music/") != NULL;
     CHECK(r == WAV_OK && w.format == (adpcm ? WAV_IMA_ADPCM : WAV_PCM) && w.bits == (adpcm ? 4 : 16) && w.rate == 22050 &&
-          !w.truncated && w.frames >= 22050 / 10 && w.frames <= 22050 * (adpcm ? 14 : 6), "%s: %s, %d Hz, %d bits, %llu frames",
+          !w.truncated && w.frames >= 22050 / 10 && w.frames <= 22050 * (adpcm ? 14 : 9), "%s: %s, %d Hz, %d bits, %llu frames",
           path, wav_error(r), w.rate, w.bits, (unsigned long long)w.frames);
     /* not clipped, not silent; and smooth (a broken encoder or decoder gives noise: large sample-to-sample steps) */
     int16_t out[2 * 4096];
