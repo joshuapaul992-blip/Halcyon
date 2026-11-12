@@ -1234,6 +1234,11 @@ static void handle(const hal_event_t *e) {
     case EVT_FOCUS:
         if (!e->pressed && drawing) end_draw(lx, ly);
         break;
+    case EVT_DRAG: {                            /* a .bmp file dropped on the window opens */
+        char p[PATH_MAX];
+        if (!drawing && dnd_open_target(e, "bmp", p, sizeof p) && confirm_discard()) { load(p); need |= N_ALL; }
+        break;
+    }
     }
 }
 

@@ -448,14 +448,14 @@ def ic_recycle(full=False):
     """a glass wastebasket with a curved rim; full: crumpled paper in it"""
     img = new()
     if full:
-        # paper behind the rim: a page and crumpled sheets
-        fill(img, poly([(10, 2.5), (19, 1.5), (20.5, 9), (11, 10)]), "#FFFFFF", "#DCE4EE", outline="#7A8698")
-        line(img, [(12, 4.5), (18, 3.8)], "#9AA6B8", 0.6)
-        line(img, [(12.3, 6.3), (18.4, 5.6)], "#9AA6B8", 0.6)
-        fill(img, ellipse((6, 4.5, 15, 11.5)), "#FFFDF2", "#D8D2BC", outline="#8C8670")
-        line(img, [(8, 7), (10.5, 8.5), (12.5, 6.5)], "#A8A08A", 0.7)
-        fill(img, ellipse((16, 4, 26, 11)), "#F4F8FF", "#C6D2E4", outline="#7A8698")
-        line(img, [(18, 7.5), (21, 6), (23.5, 8)], "#98A4B8", 0.7)
+        # paper behind the rim, well above it: a page and crumpled sheets
+        fill(img, poly([(9.5, 0.5), (20, 0), (21, 9), (10.5, 10)]), "#FFFFFF", "#E2E8F2", outline="#5E6A80")
+        line(img, [(12, 3), (18.5, 2.6)], "#8A96AA", 0.7)
+        line(img, [(12.2, 5), (18.7, 4.6)], "#8A96AA", 0.7)
+        fill(img, ellipse((4.5, 2.5, 15, 11.5)), "#FFF6CC", "#E0C870", outline="#8A7020")
+        line(img, [(7, 6), (10, 8.5), (12.5, 5.5)], "#A8903A", 0.8)
+        fill(img, ellipse((16.5, 2, 27.5, 11)), "#FFFFFF", "#C8D4E6", outline="#5E6A80")
+        line(img, [(18.5, 6.5), (21.5, 4.5), (25, 7)], "#8A96AA", 0.8)
     # body: slightly tapered, bluish glass
     body = fill(img, poly([(6, 9), (26, 9), (23.6, 29.4), (8.4, 29.4)]), "#E8F2FC", "#8FA9CC", outline="#41557E")
     gloss(img, body, 0.55, 90)
@@ -468,7 +468,7 @@ def ic_recycle(full=False):
     fill(img, rrect((8.2, 28.2, 23.8, 30.2), 1), "#9AB0D0", "#5C7096", outline="#41557E")
     if full:
         # a sheet hanging over the rim
-        fill(img, poly([(20, 6), (25.5, 5.5), (25, 13), (22.5, 12)]), "#FFFFFF", "#E0E6F0", outline="#7A8698")
+        fill(img, poly([(20.5, 6), (26.5, 5.5), (25.5, 14), (22.5, 12.5)]), "#FFFFFF", "#E0E6F0", outline="#5E6A80")
     return finish(img)
 
 

@@ -418,6 +418,11 @@ static void handle(hal_event_t *ev) {
     case EVT_PAINT: paint_all(); break;
     case EVT_MENU: command(ev->id); break;
     case EVT_COMMAND: command(ev->id); ctl_focus(win, 0); break;
+    case EVT_DRAG: {                            /* a .wav file dropped on the window plays */
+        char p[PATHN];
+        if (dnd_open_target(ev, "wav;wave", p, sizeof p)) open_file(p, 1);
+        break;
+    }
     case EVT_MOUSE_DOWN:
         if (ev->button != MOUSE_LEFT) break;
         if (state != ST_NONE && in_rect(R_SEEK, ev->x, ev->y)) { seek_drag = (int)seek_frame_at(ev->x); paint_seek(); paint_display(); }

@@ -42,7 +42,7 @@ const char *dnd_paths(u32 serial, int *len, int *count) {
     return D.paths;
 }
 
-static rect_t image_rect(int x, int y) { return mkrect(x - 8, y + 6, 64, 52); }
+static rect_t image_rect(int x, int y) { return mkrect(x - 2, y + 4, 76, 60); }
 
 static void redraw(void) {
     wm_invalidate_rect(D.drawn);
@@ -323,17 +323,17 @@ static void badge_none(gc_t *g, int cx, int cy) {
 void dnd_paint(gc_t *g, rect_t clip) {
     if (!D.active || rect_empty(rect_intersect(clip, D.drawn))) return;
     int x = D.x, y = D.y;
-    /* the first item's icon, half transparent, below the pointer */
-    gfx_icon_alpha(g, x + 2, y + 18, &icons32[D.icon], D.effect ? 170 : 110);
+    /* the first item's icon, half transparent, below and right of the pointer */
+    gfx_icon_alpha(g, x + 14, y + 22, &icons32[D.icon], D.effect ? 180 : 110);
     if (D.count > 1) {
         char n[12];
         snprintf(n, sizeof n, "%d", D.count);
         int tw = gfx_text_width(&font_ui_bold, n);
-        rect_t b = mkrect(x + 26, y + 14, MAX(18, tw + 10), 16);
+        rect_t b = mkrect(x + 38, y + 16, MAX(18, tw + 10), 16);
         gfx_rounded(g, b, 7, 15, HEX(0x5C9AF0), HEX(0x1E58C0));
         gfx_rounded_outline(g, b, 7, 15, HEX(0xFFFFFF));
         gfx_text_box(g, &font_ui_bold, b, n, HEX(0xFFFFFF), 1);
     }
-    if (!D.effect) badge_none(g, x + 15, y + 22);
-    else if (D.effect == DND_COPY) badge_copy(g, x + 10, y + 17);
+    if (!D.effect) badge_none(g, x + 16, y + 20);
+    else if (D.effect == DND_COPY) badge_copy(g, x + 11, y + 14);
 }

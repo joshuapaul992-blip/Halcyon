@@ -7,7 +7,11 @@ usage: qemu_ctl.py SOCK cmd [cmd ...]
   "png:PATH" takes a screendump and converts it to PNG.
   "move:X,Y" / "click:X,Y" / "rclick:X,Y" / "dclick:X,Y" / "drag:X1,Y1,X2,Y2"
   send absolute pointer events through QMP (needs a usb-tablet and the
-  QMP socket next to the monitor socket, screen assumed 1024x768).
+  QMP socket next to the monitor socket, screen assumed 1024x768, or
+  SCREEN=WxH in the environment).
+  "press:X,Y" / "release:X,Y" (",right" for the right button) hold and let go
+  of a button, e.g. to take a screenshot in the middle of a drag;
+  "keydown:ctrl" / "keyup:ctrl" hold a key (QEMU qcode) for Ctrl+click.
   "type:TEXT" types text with sendkey.
 """
 import json
@@ -39,8 +43,9 @@ class QMP:
                 return r
 
     def abs(self, x, y, btn=None, down=None):
-        ev = [{"type": "abs", "data": {"axis": "x", "value": int(x * 32767 / 1023)}},
-              {"type": "abs", "data": {"axis": "y", "value": int(y * 32767 / 767)}}]
+        sw, sh = (int(v) for v in os.environ.get("SCREEN", "1024x768").split("x"))
+        ev = [{"type": "abs", "data": {"axis": "x", "value": int(x * 32767 / (sw - 1))}},
+              {"type": "abs", "data": {"axis": "y", "value": int(y * 32767 / (sh - 1))}}]
         if btn:
             ev.append({"type": "btn", "data": {"down": down, "button": btn}})
         self.cmd("input-send-event", events=ev)
@@ -81,12 +86,24 @@ def main():
         if cmd.startswith("sleep:"):
             time.sleep(float(cmd[6:]))
             continue
-        if cmd.split(":")[0] in ("move", "click", "rclick", "dclick", "drag"):
+        if cmd.split(":")[0] in ("keydown", "keyup"):
+            if qmp is None:
+                qmp = QMP(sock_path.replace("mon.sock", "qmp.sock"))
+            kind, key = cmd.split(":", 1)
+            qmp.cmd("input-send-event", events=[{"type": "key", "data": {"down": kind == "keydown",
+                                                                          "key": {"type": "qcode", "data": key}}}])
+            time.sleep(0.1)
+            continue
+        if cmd.split(":")[0] in ("move", "click", "rclick", "dclick", "drag", "press", "release"):
             if qmp is None:
                 qmp = QMP(sock_path.replace("mon.sock", "qmp.sock"))
             kind, arg = cmd.split(":", 1)
-            v = [int(a) for a in arg.split(",")]
-            if kind == "move":
+            right = arg.endswith(",right")
+            v = [int(a) for a in arg.replace(",right", "").split(",")]
+            if kind in ("press", "release"):
+                qmp.abs(v[0], v[1]); time.sleep(0.1)
+                qmp.abs(v[0], v[1], "right" if right else "left", kind == "press")
+            elif kind == "move":
                 qmp.abs(v[0], v[1])
             elif kind == "drag":
                 qmp.abs(v[0], v[1]); time.sleep(0.15)

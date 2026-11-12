@@ -842,6 +842,15 @@ static void handle(const hal_event_t *ev) {
     case EVT_KEY: on_key(ev); break;
     case EVT_MOUSE_DOWN: case EVT_DBLCLICK: case EVT_MOUSE_MOVE: case EVT_MOUSE_UP: on_mouse(ev); break;
     case EVT_MOUSE_LEAVE: if (!mouse_sel) set_cursor(CUR_ARROW); break;
+    case EVT_DRAG: {                            /* a file dropped on the window opens */
+        char p[PATHN];
+        if (dnd_open_target(ev, NULL, p, sizeof p) && confirm_discard()) {
+            int r = load_file(p);
+            set_cursor(CUR_IBEAM);
+            if (r < 0) error_box("open", p, r);
+        }
+        break;
+    }
     }
 }
 
