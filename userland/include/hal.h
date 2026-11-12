@@ -127,6 +127,18 @@ static inline int eject(char drive) { return (int)SC1(SYS_EJECT, drive); }      
  * with file arg, System Information, Control Panel, About); does not wait */
 static inline int shell_app(int app, const char *arg) { return (int)SC2(SYS_SHELL_APP, app, arg); }
 
+/* ---- settings kept in C:\HALCYON\SETTINGS.INI ("program.name" keys of
+ * letters, digits, '.', '-', '_'; values of one line, up to 127 bytes) ---- */
+/* the value's length (the value, NUL-terminated, in buf), or E_NOENT */
+static inline int setting_get(const char *key, char *buf, int n) { return (int)SC3(SYS_SETTING_GET, key, buf, n); }
+static inline int setting_set(const char *key, const char *value) { return (int)SC2(SYS_SETTING_SET, key, value); }   /* NULL removes; saved at once */
+int  setting_get_int(const char *key, int def);
+int  setting_set_int(const char *key, int value);
+
+/* ---- help: opens HELP.EXE (Help and Support) on a page of
+ * C:\HALCYON\HELP, e.g. help_open("notepad"), or the contents (NULL) ---- */
+int  help_open(const char *page);
+
 /* ---- files (fd 0/1/2: console) ---- */
 static inline int open(const char *p, int flags) { return (int)SC2(SYS_OPEN, p, flags); }
 static inline int close(int fd) { return (int)SC1(SYS_CLOSE, fd); }

@@ -2,59 +2,71 @@
  * kernel/apps/notepad.c, which stays as the fallback).
  *
  * The text is UTF-8 (bytes that are not show as Latin-1, as the kernel draws
- * them, and are saved unchanged). It lives in a gap buffer, so typing costs
- * the same anywhere in a file of several megabytes. The display lines are a
- * second gap array: entries before the gap hold their offset, entries after
- * it their distance from the end of the text, so an edit renumbers nothing
- * after it. A line longer than LINE_BYTES bytes continues on the next display
- * line (as Windows Notepad does past 1024 characters), which bounds the work
- * of drawing and measuring a line. Widths come from the font metrics
- * cached in the program; only the visible lines are drawn. */
+ * them, and are saved unchanged). The text and its display rows live in
+ * notepad/doc.c (a gap buffer and a gap array of row starts, so typing costs
+ * the same anywhere in a file of several megabytes), with word wrap that is
+ * rebuilt a slice at a time when the window is resized; undo and redo in
+ * notepad/undo.c. Both are tested on the host (tests/host/notepadtest.c).
+ * Widths come from the font metrics cached in the program; only the
+ * visible rows are drawn. Word wrap, the font and the status bar are kept
+ * in SETTINGS.INI (notepad.wrap, notepad.font, notepad.statusbar). See
+ * docs/DESIGN-M8-NOTEPAD-HELP.md. */
 #include "hal.h"
+#include "notepad/doc.h"
+#include "notepad/undo.h"
 
 #define STATUS_H 20
 #define SB_W 17
-#define MAX_TEXT (16 * 1024 * 1024)     /* bytes (the kernel's Notepad: 4 MiB) */
-#ifndef LINE_BYTES
-#define LINE_BYTES 2048                 /* bytes per display line */
-#endif
-#define SOFT 0x40000000                 /* line entry flag: continues the line before (no newline) */
-#define OFFM 0x3FFFFFFF
 #define PATHN 520
-#define FONT FONT_MONO
 #define X0 4                            /* text origin in the client area */
 #define Y0 3
 #define BLINK_MS 530
-#define E_TOOBIG (-1000)
+#define UNDO_LIMIT (4u << 20)           /* bytes of text kept for undo */
+#define REWRAP_SLICE (64 << 10)         /* bytes of text rewrapped between events */
 #define N(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
 enum { NP_NEW = 1, NP_OPEN, NP_SAVE, NP_SAVEAS, NP_EXIT, NP_CUT, NP_COPY, NP_PASTE, NP_DEL, NP_SELALL, NP_TIME,
-       NP_ABOUT, NP_FIND, NP_FINDNEXT };
-enum { C_VSCROLL = 100, C_STATUS };
+       NP_ABOUT, NP_FIND, NP_FINDNEXT, NP_UNDO, NP_REDO, NP_REPLACE, NP_GOTO, NP_WRAP, NP_FONT, NP_STATUSBAR,
+       NP_HELP };
+enum { C_VSCROLL = 100, C_HSCROLL, C_STATUS };
 
 static const hal_menu_item_t bar[] = {
     { "&File", 0, 0, MENU_TITLE, 0, 0 },
     { "&New", "Ctrl+N", NP_NEW, 0, 0, 0 },
-    { "&Open...", "Ctrl+O", NP_OPEN, 0, 0, 0 },
+    { "&Open...", "Ctrl+O", NP_OPEN, 0, HICON_FOLDER_OPEN, 0 },
     { "&Save", "Ctrl+S", NP_SAVE, 0, 0, 0 },
     { "Save &As...", 0, NP_SAVEAS, 0, 0, 0 },
     { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
     { "E&xit", 0, NP_EXIT, 0, 0, 0 },
     { "&Edit", 0, 0, MENU_TITLE, 0, 0 },
-    { "Cu&t", "Ctrl+X", NP_CUT, 0, 0, 0 },
-    { "&Copy", "Ctrl+C", NP_COPY, 0, 0, 0 },
+    { "&Undo", "Ctrl+Z", NP_UNDO, MENU_DISABLED, 0, 0 },
+    { "&Redo", "Ctrl+Y", NP_REDO, MENU_DISABLED, 0, 0 },
+    { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
+    { "Cu&t", "Ctrl+X", NP_CUT, MENU_DISABLED, 0, 0 },
+    { "&Copy", "Ctrl+C", NP_COPY, MENU_DISABLED, 0, 0 },
     { "&Paste", "Ctrl+V", NP_PASTE, 0, 0, 0 },
-    { "De&lete", "Del", NP_DEL, 0, 0, 0 },
+    { "De&lete", "Del", NP_DEL, MENU_DISABLED, 0, 0 },
     { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
     { "&Find...", "Ctrl+F", NP_FIND, 0, 0, 0 },
     { "Find &Next", "F3", NP_FINDNEXT, 0, 0, 0 },
+    { "R&eplace...", "Ctrl+H", NP_REPLACE, 0, 0, 0 },
+    { "&Go To...", "Ctrl+G", NP_GOTO, 0, 0, 0 },
     { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
     { "Select &All", "Ctrl+A", NP_SELALL, 0, 0, 0 },
     { "Time/&Date", "F5", NP_TIME, 0, 0, 0 },
+    { "F&ormat", 0, 0, MENU_TITLE, 0, 0 },
+    { "&Word Wrap", 0, NP_WRAP, 0, 0, 0 },
+    { "&Font...", 0, NP_FONT, 0, 0, 0 },
+    { "&View", 0, 0, MENU_TITLE, 0, 0 },
+    { "&Status Bar", 0, NP_STATUSBAR, MENU_CHECKED, 0, 0 },
     { "&Help", 0, 0, MENU_TITLE, 0, 0 },
+    { "&Help Topics", "F1", NP_HELP, 0, HICON_HELP, 0 },
+    { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
     { "&About Notepad", 0, NP_ABOUT, 0, HICON_NOTEPAD, 0 },
 };
-static const hal_menu_item_t ctx_menu[] = {
+static hal_menu_item_t ctx_menu[] = {
+    { "&Undo", 0, NP_UNDO, 0, 0, 0 },
+    { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
     { "Cu&t", 0, NP_CUT, 0, 0, 0 },
     { "&Copy", 0, NP_COPY, 0, 0, 0 },
     { "&Paste", 0, NP_PASTE, 0, 0, 0 },
@@ -63,36 +75,34 @@ static const hal_menu_item_t ctx_menu[] = {
     { "Select &All", 0, NP_SELALL, 0, 0, 0 },
 };
 
+/* the fonts Notepad offers (Format > Font...), by their SETTINGS.INI name */
+static const struct { const char *key, *label; int font; } fonts[] = {
+    { "mono", "Monospace, 12 pixels", FONT_MONO },
+    { "sans9", "Sans Serif, 9 pixels", FONT_SMALL },
+    { "sans", "Sans Serif, 11 pixels", FONT_UI },
+    { "sansbold", "Sans Serif Bold, 11 pixels", FONT_UI_BOLD },
+    { "sansbold12", "Sans Serif Bold, 12 pixels", FONT_TITLE },
+    { "sans20", "Sans Serif Bold, 20 pixels (Latin-1 only)", FONT_LARGE },
+};
+
 /* ---------------- state ---------------- */
 static int win, cw0 = 620, ch0 = 420;     /* client size */
-static char *tb;                          /* text: [0, gs) gap [ge, tcap) */
-static int tcap, gs, ge;
-static int *la;                           /* display line starts: [0, lg) gap [lge, lcap) */
-static int lcap, lg, lge, nsoft;
-static int cur, anchor, top, left, pref_x;
+static int cur, anchor, top, left, pref_x, eol;   /* eol: the caret shows at the end of the row before */
 static int modified, crlf = 1;
 static char path[PATHN];
-static char find_text[128];
+static char find_text[128], repl_text[128];
+static int match_case;
 static int caret_on = 1, active = 1, mouse_sel, dirty = 1, cursor_shape = -1;
 static uint64_t caret_t;
+static int font = FONT_MONO, wrap, status_on = 1;
 static int lh, cwm, tabw;                 /* line height, width of 'M', tab stop */
+static int hs_max;                        /* widest row seen (horizontal scroll range) */
 static hal_theme_t th;
-static int sb_total = -1, sb_page = -1, sb_pos = -1;
+static int sb_total = -1, sb_page = -1, sb_pos = -1, hb_total = -1, hb_page = -1, hb_pos = -1;
+static int menu_state_shown = -1;
 static char shown_status[160], shown_title[100];
-static char lbuf[LINE_BYTES + 8];         /* one display line, contiguous */
-
-/* ---------------- memory ---------------- */
-/* overlapping copy with the string instructions (the C library's memmove goes byte by byte) */
-static void mmove(void *d, const void *s, size_t n) {
-    if (!n || d == s) return;
-    if ((char *)d < (const char *)s || (char *)d >= (const char *)s + n) {
-        __asm__ volatile("rep movsb" : "+D"(d), "+S"(s), "+c"(n) : : "memory");
-    } else {
-        char *de = (char *)d + n - 1;
-        const char *se = (const char *)s + n - 1;
-        __asm__ volatile("std; rep movsb; cld" : "+D"(de), "+S"(se), "+c"(n) : : "memory");
-    }
-}
+static char lbuf[LINE_BYTES + 8];         /* one row, contiguous */
+static undo_t U;
 
 /* ---------------- character widths (all of Unicode, cached per 256) ---------------- */
 static unsigned char *wpage[0x1100];
@@ -102,173 +112,34 @@ static int cwidth(unsigned cp) {
     if (!pg) {
         pg = malloc(256);
         if (!pg) return cwm;
-        if (gfx_font_metrics(FONT, cp & ~0xFFu, 256, pg, NULL) < 0) memset(pg, cwm, 256);
+        if (gfx_font_metrics(font, cp & ~0xFFu, 256, pg, NULL) < 0) memset(pg, cwm, 256);
         wpage[cp >> 8] = pg;
     }
     return pg[cp & 0xFF];
 }
 static int adv(unsigned cp, int x) { return cp == '\t' ? (x / tabw + 1) * tabw - x : cwidth(cp); }
-
-/* ---------------- text gap buffer ---------------- */
-static inline int tlen(void) { return tcap - (ge - gs); }
-static inline unsigned char at(int p) { return (unsigned char)tb[p < gs ? p : p + (ge - gs)]; }
-
-static void move_gap(int p) {
-    if (p < gs) { int n = gs - p; mmove(tb + ge - n, tb + p, (size_t)n); gs = p; ge -= n; }
-    else if (p > gs) { int n = p - gs; mmove(tb + gs, tb + ge, (size_t)n); gs += n; ge += n; }
-}
-static int text_reserve(int n) {
-    if (ge - gs >= n) return 0;
-    int len = tlen();
-    long nc = (long)len + n + len / 2 + 65536;
-    char *nb = malloc((size_t)nc);
-    if (!nb) return -1;
-    int after = tcap - ge;
-    mmove(nb, tb, (size_t)gs);
-    mmove(nb + nc - after, tb + ge, (size_t)after);
-    free(tb);
-    tb = nb; ge = (int)nc - after; tcap = (int)nc;
-    return 0;
-}
-/* n bytes from a into out */
-static void text_get(int a, int n, char *out) {
-    if (n <= 0) return;
-    if (a < gs) {
-        int k = gs - a < n ? gs - a : n;
-        mmove(out, tb + a, (size_t)k);
-        out += k; a += k; n -= k;
-    }
-    if (n > 0) mmove(out, tb + a + (ge - gs), (size_t)n);
-}
-/* [a, b) as one piece of memory (moves the gap out of it if needed) */
-static const char *text_span(int a, int b) {
-    if (a < gs && b > gs) move_gap(gs - a < b - gs ? a : b);
-    return b <= gs ? tb + a : tb + a + (ge - gs);
-}
-static int next_ch(int p) {
-    char t[4];
-    int n = tlen() - p < 4 ? tlen() - p : 4, q = 0;
-    if (n <= 0) return p;
-    text_get(p, n, t);
-    utf8_get(t, n, &q);
-    return p + q;
-}
-static int prev_ch(int p) {
-    if (p <= 0) return 0;
-    char t[4];
-    int s = p - 4 < 0 ? 0 : p - 4;
-    text_get(s, p - s, t);
-    return s + utf8_prev(t, p - s);
+static void set_metrics(void) {
+    for (int i = 0; i < N(wpage); i++) { free(wpage[i]); wpage[i] = NULL; }
+    lh = text_height(font) + 1;
+    cwm = text_char_width('M', font);
+    if (cwm <= 0) cwm = 7;
+    tabw = 4 * cwm;
+    D.tabw = tabw;
+    D.cwidth = cwidth;
+    hs_max = 0;
 }
 
-/* ---------------- display lines ---------------- */
-static inline int nlines(void) { return lcap - (lge - lg); }
-static inline int lraw(int i) { return i < lg ? la[i] : la[i + (lge - lg)]; }
-static inline int ls(int i) { return i < lg ? (la[i] & OFFM) : tlen() - (la[i + (lge - lg)] & OFFM); }
-static inline int lsoft(int i) { return lraw(i) & SOFT; }
+/* ---------------- rows on screen ---------------- */
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+/* the row the caret is drawn in: at a soft break it may belong to the row before */
+static int caret_row(void) {
+    int l = line_of(cur);
+    return eol && l > 0 && lsoft(l) && ls(l) == cur ? l - 1 : l;
+}
+/* after placing the caret at the end of row l */
+static void set_eol(int l) { eol = l + 1 < nlines() && lsoft(l + 1) && cur == ls(l + 1); }
 
-static int line_of(int off) {
-    int lo = 0, hi = nlines() - 1;
-    while (lo < hi) {
-        int mid = (lo + hi + 1) / 2;
-        if (ls(mid) <= off) lo = mid; else hi = mid - 1;
-    }
-    return lo;
-}
-/* end of line l's text (before its newline) */
-static int line_end(int l) {
-    if (l + 1 >= nlines()) return tlen();
-    return lsoft(l + 1) ? ls(l + 1) : ls(l + 1) - 1;
-}
-static int hard_newline_after(int l) { return l + 1 < nlines() && !lsoft(l + 1); }
-
-/* move the line gap to index k (entries change between the two forms) */
-static void lgap_move(int k) {
-    int len = tlen();
-    while (lg > k) { int v = la[--lg]; la[--lge] = (len - (v & OFFM)) | (v & SOFT); }
-    while (lg < k) { int v = la[lge++]; la[lg++] = (len - (v & OFFM)) | (v & SOFT); }
-}
-static int lreserve(int n) {
-    if (lge - lg >= n) return 0;
-    long nc = (long)lcap + n + lcap / 2 + 1024;
-    int *na = malloc((size_t)nc * sizeof(int));
-    if (!na) return -1;
-    int after = lcap - lge;
-    mmove(na, la, (size_t)lg * sizeof(int));
-    mmove(na + nc - after, la + lge, (size_t)after * sizeof(int));
-    free(la);
-    la = na; lge = (int)nc - after; lcap = (int)nc;
-    return 0;
-}
-static void ladd(int pos, int flag) {
-    if (lg >= lge) return;              /* never: reserved by the caller */
-    la[lg++] = pos | flag;
-    if (flag) nsoft++;
-}
-/* display lines for the text [s, ce) of one line (no newline inside) */
-static void break_span(int s, int ce) {
-    while (ce - s > LINE_BYTES) {
-        int q = s + LINE_BYTES;
-        for (int k = 0; k < 3 && (at(q) & 0xC0) == 0x80; k++) q--;    /* not inside a character */
-        ladd(q, SOFT);
-        s = q;
-    }
-}
-
-/* Replace [a, b) with n bytes of s (which must not point into the text).
- * Only the lines from the start of a's line to the end of b's are built
- * again; s is scanned for newlines, the rest of the text is not. */
-static int replace(int a, int b, const char *s, int n) {
-    int len = tlen();
-    if (len - (b - a) + n > MAX_TEXT) return E_TOOBIG;
-    int L0 = line_of(a);
-    while (L0 > 0 && lsoft(L0)) L0--;
-    int H = ls(L0);
-    int L2 = line_of(b) + 1;
-    while (L2 < nlines() && lsoft(L2)) L2++;
-    int has_next = L2 < nlines();
-    int H2 = has_next ? ls(L2) : len;
-    int region = H2 + n - (b - a) - H;
-    int nl = 0;
-    for (int i = 0; i < n; i++) if (s[i] == '\n') nl++;
-    if (text_reserve(n) || lreserve(nl + region / (LINE_BYTES - 3) + 4)) return E_NOMEM;
-    /* drop the old entries [L0, L2) */
-    lgap_move(L2);
-    for (int i = L0; i < L2; i++) if (la[i] & SOFT) nsoft--;
-    lg = L0;
-    /* the text */
-    move_gap(b);
-    gs = a;
-    mmove(tb + gs, s, (size_t)n);
-    gs += n;
-    /* new entries */
-    int len2 = tlen();
-    int E = has_next ? len2 - (la[lge] & OFFM) : len2;
-    int s0 = H;
-    ladd(H, 0);
-    for (int i = 0; i < n; i++) {
-        if (s[i] != '\n') continue;
-        break_span(s0, a + i);
-        s0 = a + i + 1;
-        ladd(s0, 0);
-    }
-    break_span(s0, has_next ? E - 1 : E);
-    modified = 1;
-    return 0;
-}
-
-static void reset_text(void) {
-    /* give the memory of a large document back to the heap */
-    char *t = tcap > (1 << 20) ? malloc(65536) : NULL;
-    if (t) { free(tb); tb = t; tcap = 65536; }
-    int *l = lcap > (1 << 16) ? malloc(1024 * sizeof(int)) : NULL;
-    if (l) { free(la); la = l; lcap = 1024; }
-    gs = 0; ge = tcap;
-    la[0] = 0; lg = 1; lge = lcap; nsoft = 0;
-    cur = anchor = top = left = pref_x = 0;
-}
-
-/* line l into lbuf; returns its length, *a = its offset */
+/* row l into lbuf; returns its length, *a = its offset */
 static int fetch(int l, int *a) {
     *a = ls(l);
     int n = line_end(l) - *a;
@@ -282,7 +153,7 @@ static int x_in_line(int l, int off) {
     while (pos < n && a + pos < off) x += adv(utf8_get(lbuf, n, &pos), x);
     return x;
 }
-static int x_of(int off) { return x_in_line(line_of(off), off); }
+static int caret_x(void) { return x_in_line(caret_row(), cur); }
 static int off_at_x(int l, int px) {
     int a, n = fetch(l, &a), x = 0, pos = 0;
     while (pos < n) {
@@ -294,26 +165,56 @@ static int off_at_x(int l, int px) {
     }
     return a + n;
 }
+/* put the caret in row l at x (Up, Down, clicks) */
+static void caret_to(int l, int px) { cur = off_at_x(l, px); set_eol(l); }
 
-/* ---------------- editing ---------------- */
+/* ---------------- editing (every change goes through edit()) ---------------- */
 static int is_word(unsigned char c) { return isalnum(c) || c == '_' || c >= 0x80; }   /* non-ASCII: letters */
 static int sel_lo(void) { return cur < anchor ? cur : anchor; }
 static int sel_hi(void) { return cur < anchor ? anchor : cur; }
+static void update_modified(void) { modified = !undo_is_saved(&U); }
 
-static void del_range(int a, int b) {
-    if (a > b) { int t = a; a = b; b = t; }
-    if (a == b) return;
-    if (replace(a, b, "", 0) == 0) cur = anchor = a;
+static void too_big(void) { msgbox(win, "Notepad", "The text is too large for Notepad.", MBX_ICON_WARNING, MBX_OK); }
+
+/* replace [a, b) with s (n bytes), as one undo kind (UNDO_*); the caret goes after it */
+static int edit(int kind, int a, int b, const char *s, int n) {
+    if (tlen() - (b - a) + n > MAX_TEXT) { too_big(); return E_TOOBIG; }
+    int c1 = a + n;
+    int r = undo_record(&U, kind, a, b > a ? text_span(a, b) : "", b - a, s, n, cur, anchor, c1, c1, time_ms());
+    int r2 = doc_replace(a, b, s, n);
+    if (r2 < 0) {                        /* (no memory) the history no longer matches the text */
+        undo_clear(&U);
+        U.saved = -1;
+        if (r2 == E_TOOBIG) too_big();
+        else msgbox(win, "Notepad", "Not enough memory for this change.", MBX_ICON_ERROR, MBX_OK);
+        update_modified();
+        return r2;
+    }
+    if (r < 0) msgbox(win, "Notepad", "Not enough memory to keep this change for Undo.\n\nUndo starts again from here.",
+                      MBX_ICON_WARNING, MBX_OK);
+    cur = anchor = c1;
+    eol = 0;
+    update_modified();
+    return 0;
 }
 static int del_sel(void) {
     if (cur == anchor) return 0;
-    del_range(cur, anchor);
+    edit(UNDO_OTHER, sel_lo(), sel_hi(), "", 0);
     return 1;
 }
-static int insert(const char *s, int n) {
-    int a = sel_lo(), r = replace(a, sel_hi(), s, n);
-    if (r == 0) cur = anchor = a + n;
-    return r;
+static int insert(int kind, const char *s, int n) { return edit(kind, sel_lo(), sel_hi(), s, n); }
+
+static int undo_fn(void *ctx, int a, int b, const char *s, int n) { (void)ctx; return doc_replace(a, b, s, n); }
+static void do_undo(int redo) {
+    int c, an, r = redo ? undo_redo(&U, undo_fn, NULL, &c, &an) : undo_undo(&U, undo_fn, NULL, &c, &an);
+    if (r < 0) msgbox(win, "Notepad", "Not enough memory to undo this change.", MBX_ICON_ERROR, MBX_OK);
+    if (r == 1) {
+        int len = tlen();
+        cur = clampi(c, 0, len);
+        anchor = clampi(an, 0, len);
+        eol = 0;
+    }
+    update_modified();
 }
 
 /* ---------------- paths and the title ---------------- */
@@ -347,29 +248,66 @@ static void set_cursor(int c) {
 }
 
 /* ---------------- view ---------------- */
+static int status_h(void) { return status_on ? STATUS_H : 0; }
 static int text_w(void) { return cw0 - SB_W > 8 ? cw0 - SB_W : 8; }
-static int text_h(void) { return ch0 - STATUS_H > 8 ? ch0 - STATUS_H : 8; }
+static int text_h(void) { int h = ch0 - status_h() - (wrap ? 0 : SB_W); return h > 8 ? h : 8; }
 static int vis_lines(void) { int v = (text_h() - 4) / lh; return v < 1 ? 1 : v; }
-static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+static int wrap_width(void) { int w = text_w() - X0 - 6; return w > 8 ? w : 8; }
 
 static void scroll_to_caret(void) {
-    int l = line_of(cur), vl = vis_lines();
+    int l = caret_row(), vl = vis_lines();
     if (l < top) top = l;
     if (l >= top + vl) top = l - vl + 1;
-    int x = x_of(cur), tw = text_w() - 8;
-    if (x < left) left = x - tw / 3 > 0 ? x - tw / 3 : 0;
-    if (x > left + tw - cwm) left = x - tw + tw / 3;
+    if (wrap) left = 0;
+    else {
+        int x = caret_x(), tw = text_w() - 8;
+        if (x < left) left = x - tw / 3 > 0 ? x - tw / 3 : 0;
+        if (x > left + tw - cwm) left = x - tw + tw / 3;
+    }
     caret_on = 1;
     caret_t = time_ms();
 }
 
+/* stale rows (after a resize): rebuild those in view now, the rest between events */
+static void rewrap_slice(int budget) {
+    int top_off = ls(top);
+    doc_rewrap(budget);
+    top = clampi(line_of(top_off), 0, nlines() - 1);
+}
+static void sync_view(void) {
+    if (doc_stale_at() < 0) return;
+    int bottom = clampi(top + vis_lines() + 1, 0, nlines() - 1);
+    int st = doc_stale_at();
+    if (st > line_end(bottom)) {
+        /* the next stale rows are below the view: are any in it? */
+        for (int i = 0; i < D.npend; i++) if (D.pa[i] <= line_end(bottom) && D.pb[i] > ls(top)) st = -2;
+        if (st != -2) return;
+    }
+    doc_rewrap_prefer(ls(top));
+    for (int i = 0; i < 400; i++) {
+        st = doc_stale_at();
+        if (st < 0 || st < ls(logical_start(top)) || st > line_end(clampi(top + vis_lines() + 1, 0, nlines() - 1))) break;
+        rewrap_slice(16 << 10);
+    }
+}
+static void apply_wrap(void) {
+    int w = wrap ? wrap_width() : 0;
+    if (w == D.wrap) return;
+    doc_set_wrap(w, ls(top));
+    sync_view();
+}
+
 static void layout(void) {
     ctl_move(win, C_VSCROLL, cw0 - SB_W, 0, SB_W, text_h());
-    sb_total = -1;
+    ctl_move(win, C_HSCROLL, 0, text_h(), text_w(), SB_W);
+    ctl_set_style(win, C_HSCROLL, wrap ? CTL_HIDDEN : 0);
+    ctl_set_style(win, C_STATUS, status_on ? 0 : CTL_HIDDEN);
+    sb_total = hb_total = -1;
+    apply_wrap();
     top = clampi(top, 0, nlines() - 1);
 }
 
-/* one display line at row; selection, then the text in runs of one colour */
+/* one row at screen row `row`: selection, then the text in runs of one colour */
 static void paint_line(int l, int row) {
     int y = Y0 + row * lh, vw = text_w() - 2;
     int a, n = fetch(l, &a);
@@ -380,6 +318,7 @@ static void paint_line(int l, int row) {
         int xa = s0 > a ? x_in_line(l, s0) : 0, xb = s1 < a + n ? x_in_line(l, s1) : x_in_line(l, a + n);
         if (s1 > a + n && hard_newline_after(l)) xb += cwm;      /* the newline is selected too */
         if (xb > xa) gfx_fill(win, X0 + xa - left, y, xb - xa, lh, selc);
+        fetch(l, &a);
     }
     int x = 0, pos = 0, run = -1, run_x = 0, run_sel = 0;
     while (pos <= n) {
@@ -390,20 +329,46 @@ static void paint_line(int l, int row) {
         int sel = a + pos >= s0 && a + pos < s1;
         int visible = pos < n && cp != '\t' && sx + w > 0 && sx < vw;
         if (run >= 0 && (!visible || sel != run_sel || pos - run >= 1024)) {
-            gfx_text_n(win, run_x, y, lbuf + run, pos - run, run_sel ? tsel : 0x000000, FONT);
+            gfx_text_n(win, run_x, y, lbuf + run, pos - run, run_sel ? tsel : 0x000000, font);
             run = -1;
         }
-        if (pos >= n || sx >= vw) break;
+        if (pos >= n) break;
+        if (sx >= vw) { x += row_width(lbuf + pos, n - pos); break; }     /* (the rest: for the scroll range) */
         if (visible && run < 0) { run = pos; run_x = sx; run_sel = sel; }
         x += w;
         pos = p2;
     }
+    if (x > hs_max) hs_max = x;
 }
 static void paint_caret(void) {
     if (!active || !caret_on) return;
-    int l = line_of(cur);
+    int l = caret_row();
     if (l < top || l > top + vis_lines()) return;
     gfx_fill(win, X0 + x_in_line(l, cur) - left, Y0 + (l - top) * lh, 2, lh, 0x000000);
+}
+
+/* Ln and Col of the line as in the file (wrapped and continued rows count as one) */
+static void line_col(int *ln, int *col) {
+    int l = caret_row(), h = logical_start(l);
+    *ln = logical_line(l) + 1;
+    int c = 1;
+    for (int i = h; i <= l; i++) {
+        int a, len = fetch(i, &a), pos = 0;
+        while (pos < len && a + pos < cur) { utf8_get(lbuf, len, &pos); c++; }
+    }
+    *col = c;
+}
+
+static void update_menus(void) {
+    int st = undo_can_undo(&U) | undo_can_redo(&U) << 1 | (cur != anchor) << 2 | wrap << 3 | status_on << 4;
+    if (st == menu_state_shown) return;
+    int ch = st ^ (menu_state_shown < 0 ? ~0 : menu_state_shown);
+    menu_state_shown = st;
+    if (ch & 1) menu_enable(win, NP_UNDO, st & 1);
+    if (ch & 2) menu_enable(win, NP_REDO, (st >> 1) & 1);
+    if (ch & 4) { menu_enable(win, NP_CUT, cur != anchor); menu_enable(win, NP_COPY, cur != anchor); menu_enable(win, NP_DEL, cur != anchor); }
+    if (ch & 8) menu_check(win, NP_WRAP, wrap);
+    if (ch & 16) menu_check(win, NP_STATUSBAR, status_on);
 }
 
 static void update_bars(void) {
@@ -412,27 +377,31 @@ static void update_bars(void) {
         sb_total = total; sb_page = vl; sb_pos = top;
         ctl_scroll_set(win, C_VSCROLL, total, vl, top, 1);
     }
-    /* Ln and Col of the line as in the file (continued display lines count as one) */
-    int l = line_of(cur), h = l;
-    while (h > 0 && lsoft(h)) h--;
-    int ln = h + 1;
-    if (nsoft) for (int i = 1; i <= h; i++) if (lsoft(i)) ln--;
-    int col = 1;
-    for (int i = h; i <= l; i++) {
-        int a, len = fetch(i, &a), pos = 0;
-        while (pos < len && a + pos < cur) { utf8_get(lbuf, len, &pos); col++; }
+    if (!wrap) {
+        int tw = text_w() - X0, ht = (hs_max + cwm * 4 > left + tw ? hs_max + cwm * 4 : left + tw);
+        if (ht != hb_total || tw != hb_page || left != hb_pos) {
+            hb_total = ht; hb_page = tw; hb_pos = left;
+            ctl_scroll_set(win, C_HSCROLL, ht, tw, left, cwm * 2);
+        }
     }
-    char st[160];
-    snprintf(st, sizeof st, "%d bytes, %d lines%s\tLn %d, Col %d", tlen(), nlines() - nsoft, crlf ? ", CR/LF" : "", ln, col);
-    if (strcmp(st, shown_status)) { strlcpy(shown_status, st, sizeof shown_status); ctl_set_text(win, C_STATUS, st); }
+    if (status_on) {
+        int ln, col;
+        line_col(&ln, &col);
+        char st[160];
+        snprintf(st, sizeof st, "%d bytes, %d lines%s\tLn %d, Col %d", tlen(), nlines() - D.nsoft, crlf ? ", CR/LF" : "", ln, col);
+        if (strcmp(st, shown_status)) { strlcpy(shown_status, st, sizeof shown_status); ctl_set_text(win, C_STATUS, st); }
+    }
+    update_menus();
 }
 
 static void paint(void) {
     gfx_theme(&th);
+    sync_view();
     int tw = text_w(), tht = text_h(), vl = vis_lines() + 1;
     gfx_clip_reset(win);
     gfx_fill(win, 0, 0, tw, tht, 0xFFFFFF);
     gfx_rect(win, 0, 0, tw, tht, 0x7F9DB9);
+    if (!wrap) gfx_fill(win, tw, tht, SB_W, SB_W, th.face);         /* the corner between the scroll bars */
     gfx_clip(win, 2, 2, tw - 4, tht - 4);
     for (int i = 0; i < vl && top + i < nlines(); i++) paint_line(top + i, i);
     paint_caret();
@@ -441,9 +410,9 @@ static void paint(void) {
     win_invalidate(win);
     dirty = 0;
 }
-/* the caret's line only (blinking) */
+/* the caret's row only (blinking) */
 static void paint_caret_line(void) {
-    int l = line_of(cur), tw = text_w(), tht = text_h();
+    int l = caret_row(), tw = text_w(), tht = text_h();
     if (l < top || l > top + vis_lines()) return;
     gfx_clip(win, 2, 2, tw - 4, tht - 4);
     gfx_fill(win, 2, Y0 + (l - top) * lh, tw - 4, lh, 0xFFFFFF);
@@ -453,12 +422,32 @@ static void paint_caret_line(void) {
     win_invalidate(win);
 }
 
+/* ---------------- settings ---------------- */
+static void load_settings(void) {
+    wrap = setting_get_int("notepad.wrap", 0) != 0;
+    status_on = setting_get_int("notepad.statusbar", 1) != 0;
+    char f[32];
+    if (setting_get("notepad.font", f, sizeof f) > 0)
+        for (int i = 0; i < N(fonts); i++) if (!strcmp(f, fonts[i].key)) font = fonts[i].font;
+}
+static void save_font(void) {
+    for (int i = 0; i < N(fonts); i++) if (fonts[i].font == font) setting_set("notepad.font", fonts[i].key);
+}
+
 /* ---------------- files ---------------- */
 static void error_box(const char *what, const char *p, int r) {
     char msg[PATHN + 120];
     if (r == E_TOOBIG) snprintf(msg, sizeof msg, "The file %s is too large for Notepad.\n\nNotepad opens files of up to %d MB.", base_name(p), MAX_TEXT >> 20);
     else snprintf(msg, sizeof msg, "Cannot %s %s.\n\n%s", what, p, hal_strerror(r));
     msgbox(win, "Notepad", msg, MBX_ICON_ERROR, MBX_OK);
+}
+
+static void new_text(void) {
+    doc_reset();
+    undo_clear(&U);
+    cur = anchor = top = left = pref_x = eol = 0;
+    hs_max = 0;
+    modified = 0;
 }
 
 static int load_file(const char *p) {
@@ -481,12 +470,11 @@ static int load_file(const char *p) {
         if (c == 0) c = ' ';
         data[o++] = c;
     }
-    reset_text();
-    int r = replace(0, 0, data, o);
+    new_text();
+    int r = doc_replace(0, 0, data, o);
     free(data);
-    if (r < 0) { reset_text(); path[0] = 0; modified = 0; update_title(); dirty = 1; return r; }
+    if (r < 0) { new_text(); path[0] = 0; update_title(); dirty = 1; return r; }
     crlf = cr || got == 0;
-    modified = 0;
     strlcpy(path, p, sizeof path);
     update_title();
     dirty = 1;
@@ -515,8 +503,8 @@ static int save_to(const char *p) {
     long r = open(p, O_WRITE | O_CREATE | O_TRUNC);
     if (r >= 0) {
         int fd = (int)r, o = 0;
-        r = put_text(fd, tb, gs, out, &o);
-        if (!r) r = put_text(fd, tb + ge, tcap - ge, out, &o);
+        r = put_text(fd, D.tb, D.gs, out, &o);
+        if (!r) r = put_text(fd, D.tb + D.ge, D.tcap - D.ge, out, &o);
         if (!r && o) { long w = write(fd, out, (size_t)o); if (w != o) r = w < 0 ? w : E_NOSPC; }
         close(fd);
     }
@@ -524,7 +512,8 @@ static int save_to(const char *p) {
     set_cursor(prev);
     if (r < 0) { error_box("save", p, (int)r); return (int)r; }
     strlcpy(path, p, sizeof path);
-    modified = 0;
+    undo_mark_saved(&U);
+    update_modified();
     update_title();
     dirty = 1;
     return 0;
@@ -579,7 +568,7 @@ static void open_initial(const char *p) {
     }
 }
 
-/* ---------------- clipboard and find ---------------- */
+/* ---------------- clipboard ---------------- */
 static int copy_sel(void) {
     int s0 = sel_lo(), s1 = sel_hi();
     if (s1 <= s0) return 0;
@@ -604,35 +593,233 @@ static void paste(void) {
         if (c == 0) c = ' ';
         b[o++] = c;
     }
-    int r = o ? insert(b, o) : 0;
+    if (o) insert(UNDO_OTHER, b, o);
     free(b);
-    if (r == E_TOOBIG) msgbox(win, "Notepad", "The text is too large for Notepad.", MBX_ICON_WARNING, MBX_OK);
-    else if (r < 0) msgbox(win, "Notepad", "Not enough memory to paste the text.", MBX_ICON_ERROR, MBX_OK);
 }
 
+/* ---------------- find, replace, go to ---------------- */
 static int lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
-static void do_find(int ask) {
-    if ((ask || !find_text[0]) && (!inputbox(win, "Find", "Find what:", find_text, sizeof find_text) || !find_text[0])) return;
+/* the next match of find_text at or after start (wrapping around), or -1 */
+static int find_from(int start, int around) {
     int fl = (int)strlen(find_text), len = tlen();
-    move_gap(len);
-    const char *t = tb;
-    int f0 = lower((unsigned char)find_text[0]);
-    int start = sel_hi();
+    if (!fl || fl > len) return -1;
+    const char *t = text_span(0, len);
+    int f0 = match_case ? (unsigned char)find_text[0] : lower((unsigned char)find_text[0]);
     for (int k = 0; k < len; k++) {
         int i = start + k;
-        if (i >= len) i -= len;
-        if (i + fl > len || lower((unsigned char)t[i]) != f0) continue;
+        if (i >= len) { if (!around) return -1; i -= len; }
+        if (i + fl > len) continue;
+        int c = (unsigned char)t[i];
+        if ((match_case ? c : lower(c)) != f0) continue;
         int j = 1;
-        while (j < fl && lower((unsigned char)t[i + j]) == lower((unsigned char)find_text[j])) j++;
-        if (j == fl) {
-            anchor = i; cur = i + fl;
-            pref_x = x_of(cur);
-            scroll_to_caret();
+        if (match_case) while (j < fl && t[i + j] == find_text[j]) j++;
+        else while (j < fl && lower((unsigned char)t[i + j]) == lower((unsigned char)find_text[j])) j++;
+        if (j == fl) return i;
+    }
+    return -1;
+}
+static void select_range(int a, int b) {
+    anchor = a; cur = b; eol = 0;
+    undo_break(&U);
+    pref_x = caret_x();
+    scroll_to_caret();
+    dirty = 1;
+}
+static int find_next(int quiet) {
+    int i = find_from(sel_hi(), 1);
+    if (i < 0) {
+        if (!quiet) {
+            char msg[180];
+            snprintf(msg, sizeof msg, "Cannot find \"%s\"", find_text);
+            msgbox(win, "Notepad", msg, MBX_ICON_INFO, MBX_OK);
+        }
+        return 0;
+    }
+    select_range(i, i + (int)strlen(find_text));
+    return 1;
+}
+/* the selection is a match */
+static int sel_matches(void) {
+    int fl = (int)strlen(find_text), a = sel_lo();
+    if (!fl || sel_hi() - a != fl) return 0;
+    const char *t = text_span(a, a + fl);
+    for (int j = 0; j < fl; j++)
+        if (match_case ? t[j] != find_text[j] : lower((unsigned char)t[j]) != lower((unsigned char)find_text[j])) return 0;
+    return 1;
+}
+/* every match between the first and the last replaced in one edit (one undo step) */
+static int replace_all(void) {
+    int fl = (int)strlen(find_text), rl = (int)strlen(repl_text), len = tlen();
+    int first = find_from(0, 0);
+    if (first < 0) return 0;
+    long cap = 4096;
+    char *out = malloc((size_t)cap);
+    if (!out) return 0;
+    int o = 0, pos = first, count = 0, last = first;
+    for (int i = first; i >= 0; i = find_from(pos, 0)) {
+        const char *t = text_span(0, len);
+        long need = (long)o + (i - pos) + rl + 1;
+        if (need > cap) {
+            while (cap < need) cap *= 2;
+            char *n = realloc(out, (size_t)cap);
+            if (!n) { free(out); msgbox(win, "Notepad", "Not enough memory to replace the text.", MBX_ICON_ERROR, MBX_OK); return 0; }
+            out = n;
+        }
+        memcpy(out + o, t + pos, (size_t)(i - pos)); o += i - pos;
+        memcpy(out + o, repl_text, (size_t)rl); o += rl;
+        pos = i + fl;
+        last = pos;
+        count++;
+        if (pos >= len) break;
+    }
+    anchor = cur = first;
+    edit(UNDO_OTHER, first, last, out, o);        /* (the caret after the last replacement) */
+    free(out);
+    undo_break(&U);
+    scroll_to_caret();
+    return count;
+}
+
+static void main_window_event(const hal_event_t *ev);
+
+/* the Find and Replace dialogs (modal) */
+static void find_dialog(int replace) {
+    enum { D_FIND = 10, D_REPL, D_CASE, D_NEXT, D_ONE, D_ALL, D_CANCEL };
+    int h = replace ? 132 : 92;
+    int d = win_create(replace ? "Replace" : "Find", 380, h, WIN_DIALOG);
+    if (d < 0) return;
+    win_set_owner(d, win, 1);
+    if (sel_hi() > sel_lo() && sel_hi() - sel_lo() < (int)sizeof find_text) {      /* the selection as the text to find */
+        int a = sel_lo(), n = sel_hi() - a, nl = 0;
+        const char *t = text_span(a, a + n);
+        for (int i = 0; i < n; i++) if (t[i] == '\n') nl = 1;
+        if (!nl) { memcpy(find_text, t, (size_t)n); find_text[n] = 0; }
+    }
+    ctl_create(d, CTL_LABEL, 10, 14, 80, 16, "Find what:", 1, 0);
+    ctl_create(d, CTL_TEXTBOX, 92, 10, 186, 22, find_text, D_FIND, 0);
+    int y = 42;
+    if (replace) {
+        ctl_create(d, CTL_LABEL, 10, 46, 80, 16, "Replace with:", 2, 0);
+        ctl_create(d, CTL_TEXTBOX, 92, 42, 186, 22, repl_text, D_REPL, 0);
+        y = 74;
+    }
+    ctl_create(d, CTL_CHECKBOX, 10, h - 28, 120, 20, "Match case", D_CASE, 0);
+    ctl_set_value(d, D_CASE, match_case);
+    ctl_create(d, CTL_BUTTON, 290, 10, 80, 23, "Find Next", D_NEXT, CTL_DEFAULT);
+    if (replace) {
+        ctl_create(d, CTL_BUTTON, 290, 38, 80, 23, "Replace", D_ONE, 0);
+        ctl_create(d, CTL_BUTTON, 290, 66, 80, 23, "Replace All", D_ALL, 0);
+    }
+    ctl_create(d, CTL_BUTTON, 290, replace ? 94 : 38, 80, 23, "Cancel", D_CANCEL, CTL_CANCEL);
+    (void)y;
+    ctl_focus(d, D_FIND);
+    for (;;) {
+        hal_event_t ev;
+        if (dirty) paint();
+        if (!win_get_event(&ev, -1)) continue;
+        if (ev.win != d) { main_window_event(&ev); continue; }
+        if (ev.type == EVT_CLOSE) break;
+        if (ev.type != EVT_COMMAND) continue;
+        if (ev.id == D_CANCEL) break;
+        ctl_get_text(d, D_FIND, find_text, sizeof find_text);
+        if (replace) ctl_get_text(d, D_REPL, repl_text, sizeof repl_text);
+        match_case = ctl_get_value(d, D_CASE);
+        if (!find_text[0] || ev.id == D_CASE) continue;
+        if (ev.id == D_NEXT) find_next(0);
+        else if (ev.id == D_ONE) {
+            if (sel_matches()) {
+                int a = sel_lo();
+                edit(UNDO_OTHER, a, sel_hi(), repl_text, (int)strlen(repl_text));
+                undo_break(&U);
+                scroll_to_caret();
+            }
+            find_next(0);
+        } else if (ev.id == D_ALL) {
+            int n = replace_all();
+            char msg[64];
+            snprintf(msg, sizeof msg, n ? "Replaced %d occurrence%s." : "Cannot find the text.", n, n == 1 ? "" : "s");
             dirty = 1;
-            return;
+            paint();
+            msgbox(d, "Replace", msg, MBX_ICON_INFO, MBX_OK);
         }
     }
-    msgbox(win, "Notepad", "Cannot find the text.", MBX_ICON_INFO, MBX_OK);
+    win_destroy(d);
+    dirty = 1;
+}
+
+static void go_to(void) {
+    int ln0, col;
+    line_col(&ln0, &col);
+    char b[24];
+    snprintf(b, sizeof b, "%d", ln0);
+    if (!inputbox(win, "Go To Line", "Line number:", b, sizeof b)) return;
+    int want = atoi(b), lines = nlines() - D.nsoft;
+    if (want < 1 || want > lines) {
+        msgbox(win, "Notepad - Goto Line", "The line number is beyond the total number of lines.", MBX_ICON_INFO, MBX_OK);
+        return;
+    }
+    /* the offset after want - 1 newlines */
+    int len = tlen(), off = 0, k = want - 1;
+    const char *t = text_span(0, len);
+    for (int i = 0; i < len && k; i++) if (t[i] == '\n') { k--; off = i + 1; }
+    select_range(off, off);
+}
+
+/* ---------------- the Font dialog ---------------- */
+static void font_dialog(void) {
+    enum { F_LIST = 10, F_SAMPLE_LABEL };
+    int d = win_create("Font", 380, 236, WIN_DIALOG);
+    if (d < 0) return;
+    win_set_owner(d, win, 1);
+    const char *names[N(fonts)];
+    int sel = 0;
+    for (int i = 0; i < N(fonts); i++) { names[i] = fonts[i].label; if (fonts[i].font == font) sel = i; }
+    ctl_create(d, CTL_LABEL, 12, 10, 200, 16, "Font:", 1, 0);
+    ctl_create(d, CTL_LISTBOX, 12, 28, 262, 110, NULL, F_LIST, CTL_NOTIFY);
+    ctl_list_set(d, F_LIST, names, N(fonts));
+    ctl_set_value(d, F_LIST, sel);
+    ctl_create(d, CTL_LABEL, 12, 146, 200, 16, "Sample", F_SAMPLE_LABEL, 0);
+    ctl_create(d, CTL_BUTTON, 288, 28, 80, 23, "OK", IDR_OK, CTL_DEFAULT);
+    ctl_create(d, CTL_BUTTON, 288, 56, 80, 23, "Cancel", IDR_CANCEL, CTL_CANCEL);
+    ctl_focus(d, F_LIST);
+    int ok = -1, shown = -1;
+    while (ok < 0) {
+        int s = clampi(ctl_get_value(d, F_LIST), 0, N(fonts) - 1);
+        if (s != shown) {
+            hal_theme_t t;
+            gfx_theme(&t);
+            gfx_fill(d, 0, 0, 380, 236, t.face);
+            gfx_shade(d, 12, 164, 262, 60, 0xFFFFFF, 0, SHADE_SUNKEN, 0);
+            gfx_clip(d, 14, 166, 258, 56);
+            const char *sample = "AaBbYyZz 0123";
+            int f = fonts[s].font, tw = text_width(sample, f);
+            gfx_text(d, 12 + (262 - tw) / 2, 164 + (60 - text_height(f)) / 2, sample, 0x000000, f);
+            gfx_clip_reset(d);
+            win_invalidate(d);
+            shown = s;
+        }
+        hal_event_t ev;
+        if (dirty) paint();
+        if (!win_get_event(&ev, -1)) continue;
+        if (ev.win != d) { main_window_event(&ev); continue; }
+        if (ev.type == EVT_CLOSE) ok = 0;
+        else if (ev.type == EVT_PAINT) shown = -1;
+        else if (ev.type == EVT_COMMAND && (ev.id == IDR_OK || (ev.id == F_LIST && ev.button == CMD_ACTIVATE))) ok = 1;
+        else if (ev.type == EVT_COMMAND && ev.id == IDR_CANCEL) ok = 0;
+    }
+    int s = clampi(ctl_get_value(d, F_LIST), 0, N(fonts) - 1);
+    win_destroy(d);
+    if (ok && fonts[s].font != font) {
+        font = fonts[s].font;
+        set_metrics();
+        save_font();
+        doc_set_wrap(wrap ? wrap_width() : 0, ls(top));   /* rows break by width: build them again */
+        if (!wrap) D.npend = 0;                            /* (without wrap they break by bytes: unchanged) */
+        layout();
+        sync_view();
+        scroll_to_caret();
+    }
+    dirty = 1;
 }
 
 /* ---------------- commands ---------------- */
@@ -641,12 +828,20 @@ static void quit(void) {
     exit(0);
 }
 
+static void set_wrap(int on) {
+    wrap = on;
+    left = 0;
+    setting_set_int("notepad.wrap", wrap);
+    layout();
+    scroll_to_caret();
+}
+
 static void command(int id) {
     switch (id) {
     case NP_NEW:
         if (!confirm_discard()) return;
-        reset_text();
-        path[0] = 0; modified = 0; crlf = 1;
+        new_text();
+        path[0] = 0; crlf = 1;
         break;
     case NP_OPEN: {
         if (!confirm_discard()) return;
@@ -662,29 +857,43 @@ static void command(int id) {
     case NP_SAVE: save(); break;
     case NP_SAVEAS: save_as(); break;
     case NP_EXIT: if (confirm_discard()) quit(); return;
+    case NP_UNDO: do_undo(0); break;
+    case NP_REDO: do_undo(1); break;
     case NP_CUT: if (copy_sel()) del_sel(); break;
     case NP_COPY: copy_sel(); break;
     case NP_PASTE: paste(); break;
-    case NP_DEL: if (!del_sel() && cur < tlen()) del_range(cur, next_ch(cur)); break;
-    case NP_SELALL: anchor = 0; cur = tlen(); break;
-    case NP_FIND: do_find(1); return;
-    case NP_FINDNEXT: do_find(0); return;
+    case NP_DEL: if (!del_sel() && cur < tlen()) edit(UNDO_OTHER, cur, next_ch(cur), "", 0); break;
+    case NP_SELALL: anchor = 0; cur = tlen(); eol = 0; undo_break(&U); break;
+    case NP_FIND: find_dialog(0); return;
+    case NP_FINDNEXT: if (find_text[0]) find_next(0); else find_dialog(0); return;
+    case NP_REPLACE: find_dialog(1); return;
+    case NP_GOTO: go_to(); return;
     case NP_TIME: {
         hal_datetime_t d;
         if (datetime(&d) < 0) return;
         char s[48];
         snprintf(s, sizeof s, "%d:%02d %s %d/%d/%d", d.hour % 12 ? d.hour % 12 : 12, d.minute, d.hour < 12 ? "AM" : "PM",
                  d.month, d.day, d.year);
-        insert(s, (int)strlen(s));
+        insert(UNDO_OTHER, s, (int)strlen(s));
+        undo_break(&U);
         break;
     }
+    case NP_WRAP: set_wrap(!wrap); break;
+    case NP_FONT: font_dialog(); return;
+    case NP_STATUSBAR:
+        status_on = !status_on;
+        setting_set_int("notepad.statusbar", status_on);
+        shown_status[0] = 0;
+        layout();
+        break;
+    case NP_HELP: help_open("notepad"); return;
     case NP_ABOUT:
         msgbox(win, "About Notepad", "Halcyon Notepad\nA simple text editor.\n\nFiles are saved with Windows-style line endings.",
                MBX_ICON_INFO, MBX_OK);
         return;
     default: return;
     }
-    pref_x = x_of(cur);
+    pref_x = caret_x();
     scroll_to_caret();
     update_title();
     dirty = 1;
@@ -693,11 +902,9 @@ static void command(int id) {
 /* ---------------- input ---------------- */
 static int in_text(int x, int y) { return x >= 0 && y >= 0 && x < text_w() && y < text_h(); }
 
-static int pos_at(int x, int y) {
+static int row_at(int y) {
     int dy = y - Y0;
-    int l = top + (dy >= 0 ? dy / lh : -1 - (-dy - 1) / lh);
-    l = clampi(l, 0, nlines() - 1);
-    return off_at_x(l, x - X0 + left);
+    return clampi(top + (dy >= 0 ? dy / lh : -1 - (-dy - 1) / lh), 0, nlines() - 1);
 }
 
 static void on_mouse(const hal_event_t *ev) {
@@ -705,26 +912,35 @@ static void on_mouse(const hal_event_t *ev) {
     case EVT_MOUSE_DOWN:
     case EVT_DBLCLICK:
         if (!in_text(ev->x, ev->y)) return;
-        if (ev->button == MOUSE_RIGHT) { menu_popup(win, ctx_menu, N(ctx_menu), ev->x, ev->y); return; }
+        if (ev->button == MOUSE_RIGHT) {
+            ctx_menu[0].flags = undo_can_undo(&U) ? 0 : MENU_DISABLED;
+            for (int i = 2; i < N(ctx_menu); i++)
+                if (ctx_menu[i].id == NP_CUT || ctx_menu[i].id == NP_COPY || ctx_menu[i].id == NP_DEL)
+                    ctx_menu[i].flags = cur != anchor ? 0 : MENU_DISABLED;
+            menu_popup(win, ctx_menu, N(ctx_menu), ev->x, ev->y);
+            return;
+        }
         if (ev->button != MOUSE_LEFT) return;
-        cur = pos_at(ev->x, ev->y);
+        undo_break(&U);
+        caret_to(row_at(ev->y), ev->x - X0 + left);
         if (ev->type == EVT_DBLCLICK) {
             int a = cur, b = cur, len = tlen();
             while (a > 0 && is_word(at(a - 1))) a--;
             while (b < len && is_word(at(b))) b++;
-            anchor = a; cur = b;
+            anchor = a; cur = b; eol = 0;
         } else if (!(ev->mods & MOD_SHIFT)) {
             anchor = cur;
         }
         mouse_sel = 1;
-        pref_x = x_of(cur);
+        pref_x = caret_x();
         scroll_to_caret();
         dirty = 1;
         return;
     case EVT_MOUSE_MOVE:
         if (mouse_sel && (ev->buttons & MOUSE_LEFT)) {
-            int c = pos_at(ev->x, ev->y);
-            if (c != cur) { cur = c; pref_x = x_of(cur); scroll_to_caret(); dirty = 1; }
+            int c0 = cur, e0 = eol;
+            caret_to(row_at(ev->y), ev->x - X0 + left);
+            if (cur != c0 || eol != e0) { pref_x = caret_x(); scroll_to_caret(); dirty = 1; }
         }
         set_cursor(in_text(ev->x, ev->y) || mouse_sel ? CUR_IBEAM : CUR_ARROW);
         return;
@@ -739,13 +955,17 @@ static void on_key(const hal_event_t *ev) {
     /* Ctrl+Alt is AltGr when the key types a character */
     int text = ev->ch >= 32 && ev->ch != 127;
     int shift = ev->mods & MOD_SHIFT, ctrl = (ev->mods & MOD_CTRL) && !text;
-    int len = tlen(), l = line_of(cur), vl = vis_lines();
-    int moved = 1, keep_pref = 0;
+    int len = tlen(), l = caret_row(), vl = vis_lines();
+    int moved = 1, keep_pref = 0, keep_eol = 0;
+    if (ev->id == KEY_F1 && !(ev->mods & (MOD_CTRL | MOD_ALT))) { command(NP_HELP); return; }
+    if ((ev->mods & MOD_ALT) && !(ev->mods & MOD_CTRL) && ev->id == KEY_BACKSPACE) { command(shift ? NP_REDO : NP_UNDO); return; }
     if (ctrl) {
         static const struct { char letter; int id; } keys[] = {
             { 'N', NP_NEW }, { 'O', NP_OPEN }, { 'S', NP_SAVE }, { 'F', NP_FIND }, { 'A', NP_SELALL },
-            { 'C', NP_COPY }, { 'X', NP_CUT }, { 'V', NP_PASTE },
+            { 'C', NP_COPY }, { 'X', NP_CUT }, { 'V', NP_PASTE }, { 'Z', NP_UNDO }, { 'Y', NP_REDO },
+            { 'H', NP_REPLACE }, { 'G', NP_GOTO },
         };
+        if (shift && key_shortcut(ev, 'Z')) { command(NP_REDO); return; }
         for (int i = 0; i < N(keys); i++) if (key_shortcut(ev, keys[i].letter)) { command(keys[i].id); return; }
         switch (ev->id) {
         case KEY_HOME: cur = 0; break;
@@ -759,6 +979,15 @@ static void on_key(const hal_event_t *ev) {
             while (cur < len && !is_word(at(cur))) cur++;
             break;
         case KEY_INSERT: command(NP_COPY); return;
+        case KEY_BACKSPACE: {          /* the word before */
+            if (del_sel()) { moved = 0; break; }
+            int a = cur;
+            while (a > 0 && !is_word(at(a - 1))) a--;
+            while (a > 0 && is_word(at(a - 1))) a--;
+            if (a < cur) edit(UNDO_OTHER, a, cur, "", 0);
+            moved = 0;
+            break;
+        }
         default: return;
         }
     } else {
@@ -769,33 +998,33 @@ static void on_key(const hal_event_t *ev) {
         case KEY_RIGHT:
             if (!shift && cur != anchor) cur = sel_hi(); else cur = next_ch(cur);
             break;
-        case KEY_UP: if (l > 0) cur = off_at_x(l - 1, pref_x); keep_pref = 1; break;
-        case KEY_DOWN: if (l + 1 < nlines()) cur = off_at_x(l + 1, pref_x); keep_pref = 1; break;
+        case KEY_UP: if (l > 0) caret_to(l - 1, pref_x); keep_pref = keep_eol = 1; break;
+        case KEY_DOWN: if (l + 1 < nlines()) caret_to(l + 1, pref_x); keep_pref = keep_eol = 1; break;
         case KEY_PAGEUP:
-            cur = off_at_x(l - vl > 0 ? l - vl : 0, pref_x);
+            caret_to(l - vl > 0 ? l - vl : 0, pref_x);
             top = top - vl > 0 ? top - vl : 0;
-            keep_pref = 1;
+            keep_pref = keep_eol = 1;
             break;
         case KEY_PAGEDOWN:
-            cur = off_at_x(l + vl < nlines() - 1 ? l + vl : nlines() - 1, pref_x);
+            caret_to(l + vl < nlines() - 1 ? l + vl : nlines() - 1, pref_x);
             top = clampi(top + vl, 0, nlines() - 1);
-            keep_pref = 1;
+            keep_pref = keep_eol = 1;
             break;
         case KEY_HOME: {
-            /* smart home: first non-blank, then column 0 */
+            /* smart home: first non-blank, then column 0 (of the row on screen) */
             int s = ls(l), e = line_end(l), fnb = s;
             while (fnb < e && (at(fnb) == ' ' || at(fnb) == '\t')) fnb++;
             cur = cur == fnb ? s : fnb;
             break;
         }
-        case KEY_END: cur = line_end(l); break;
+        case KEY_END: cur = line_end(l); set_eol(l); keep_eol = 1; break;
         case KEY_BACKSPACE:
-            if (!del_sel() && cur > 0) del_range(prev_ch(cur), cur);
+            if (!del_sel() && cur > 0) edit(UNDO_BACKSPACE, prev_ch(cur), cur, "", 0);
             moved = 0;
             break;
         case KEY_DELETE:
             if (shift) { command(NP_CUT); return; }
-            if (!del_sel() && cur < len) del_range(cur, next_ch(cur));
+            if (!del_sel() && cur < len) edit(UNDO_DELETE, cur, next_ch(cur), "", 0);
             moved = 0;
             break;
         case KEY_INSERT:
@@ -806,23 +1035,25 @@ static void on_key(const hal_event_t *ev) {
             char ind[64];
             int ni = 0;
             ind[ni++] = '\n';
-            for (int i = ls(l); i < cur && ni < 63 && (at(i) == ' ' || at(i) == '\t'); i++) ind[ni++] = (char)at(i);
-            insert(ind, ni);
+            for (int i = ls(logical_start(l)); i < cur && ni < 63 && (at(i) == ' ' || at(i) == '\t'); i++) ind[ni++] = (char)at(i);
+            insert(UNDO_TYPE, ind, ni);
             moved = 0;
             break;
         }
-        case KEY_TAB: insert("\t", 1); moved = 0; break;
+        case KEY_TAB: insert(UNDO_TYPE, "\t", 1); moved = 0; break;
         case KEY_F3: command(NP_FINDNEXT); return;
         case KEY_F5: command(NP_TIME); return;
         case KEY_ESC: return;
         default:
-            if (text) { char u[4]; insert(u, utf8_put(ev->ch, u)); moved = 0; }
+            if (text) { char u[4]; insert(UNDO_TYPE, u, utf8_put(ev->ch, u)); moved = 0; }
             else return;
         }
     }
+    if (moved) undo_break(&U);
     if (moved && !shift) anchor = cur;
     if (!moved) anchor = cur;
-    if (!keep_pref) pref_x = x_of(cur);
+    if (!keep_eol) eol = 0;
+    if (!keep_pref) pref_x = caret_x();
     scroll_to_caret();
     update_title();
     dirty = 1;
@@ -837,6 +1068,7 @@ static void handle(const hal_event_t *ev) {
     case EVT_MENU: command(ev->id); break;
     case EVT_SCROLL:
         if (ev->id == C_VSCROLL) { top = clampi(ev->x, 0, nlines() - 1); sb_pos = ev->x; dirty = 1; }
+        if (ev->id == C_HSCROLL && !wrap) { left = ev->x > 0 ? ev->x : 0; hb_pos = ev->x; dirty = 1; }
         break;
     case EVT_WHEEL: top = clampi(top - ev->dz * 3, 0, nlines() - 1); dirty = 1; break;
     case EVT_KEY: on_key(ev); break;
@@ -844,18 +1076,16 @@ static void handle(const hal_event_t *ev) {
     case EVT_MOUSE_LEAVE: if (!mouse_sel) set_cursor(CUR_ARROW); break;
     }
 }
+/* events of the main window while a dialog of Notepad is open: only drawing */
+static void main_window_event(const hal_event_t *ev) {
+    if (ev->type == EVT_PAINT || ev->type == EVT_RESIZE || ev->type == EVT_FOCUS) handle(ev);
+}
 
 int main(int argc, char **argv) {
-    tcap = 65536;
-    tb = malloc((size_t)tcap);
-    lcap = 1024;
-    la = malloc((size_t)lcap * sizeof(int));
-    if (!tb || !la) return 1;
-    lh = text_height(FONT) + 1;
-    cwm = text_char_width('M', FONT);
-    if (cwm <= 0) cwm = 7;
-    tabw = 4 * cwm;
-    reset_text();
+    load_settings();
+    set_metrics();
+    if (doc_init()) return 1;
+    undo_init(&U, UNDO_LIMIT);
 
     win = win_create("Untitled - Notepad", cw0, ch0, WIN_RESIZABLE);
     if (win < 0) return 1;
@@ -863,6 +1093,7 @@ int main(int argc, char **argv) {
     win_set_min_size(win, 200, 100);
     menu_set(win, bar, N(bar));
     ctl_create(win, CTL_VSCROLL, cw0 - SB_W, 0, SB_W, text_h(), 0, C_VSCROLL, 0);
+    ctl_create(win, CTL_HSCROLL, 0, text_h(), text_w(), SB_W, 0, C_HSCROLL, 0);
     ctl_create(win, CTL_STATUSBAR, 0, 0, 0, STATUS_H, "", C_STATUS, 0);
     ctl_set_value(win, C_STATUS, 160);
     ctl_focus(win, 0);
@@ -891,6 +1122,13 @@ int main(int argc, char **argv) {
             uint64_t t0 = time_ms();
             while (n < 64 && time_ms() - t0 < 40 && win_get_event(&ev, 0)) { handle(&ev); n++; }
             if (dirty) paint();
+            continue;
+        }
+        if (doc_stale_at() >= 0) {
+            /* rows still to rewrap: a slice between events (the scroll bar follows) */
+            if (win_get_event(&ev, 0)) { handle(&ev); continue; }
+            rewrap_slice(REWRAP_SLICE);
+            update_bars();
             continue;
         }
         int timeout = -1;

@@ -48,7 +48,8 @@ enum {
      *           128 SYS_GETRANDOM, 129-139 free
      *   160     SYS_WIN_CANVAS: the window's pixels mapped into the program
      *   164     SYS_VOLUME_SET_WRITE: drive properties (core/syscall.c)
-     *   168-169 Explorer: built-in shell tools, file details (core/syscall.c) */
+     *   168-169 Explorer: built-in shell tools, file details (core/syscall.c)
+     *   170-171 settings of programs in SETTINGS.INI (core/syscall.c) */
     SYS_WIN_CANVAS = 160,
     SYS_DATETIME = 161, SYS_VOLUME_INFO, SYS_VFS_GENERATION,
     SYS_VOLUME_SET_WRITE = 164, /* (drive, allow): allow Halcyon to write to an NTFS volume on an
@@ -56,8 +57,10 @@ enum {
                                    and the volume is mounted again (E_BUSY while files are open on it) */
     SYS_GETRANDOM = 128,        /* (buf, len <= 65536): cryptographically strong bytes */
     SYS_SHELL_APP = 168, SYS_STAT_EX,
+    SYS_SETTING_GET = 170,      /* (key, buf, n): the value's length (NUL-terminated in buf), E_NOENT */
+    SYS_SETTING_SET = 171,      /* (key, value or NULL to remove): set and save SETTINGS.INI */
     SYS_SOUND_FIRST = 140, SYS_SOUND_LAST = 151,
-    SYS_COUNT = 170
+    SYS_COUNT = 172
 };
 
 /* SYS_SHM_OPEN flags */

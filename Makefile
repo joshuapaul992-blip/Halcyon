@@ -120,6 +120,14 @@ $(BUILD)/user/mplayer.exe $(BUILD)/user/play.exe: $(BUILD)/user/%.exe: userland/
 	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(WAVLIB)
 	strip $@
 
+# programs in several files: NAME.c plus NAME/*.c (explicit rules replace the pattern rule)
+NOTEPAD_SRC := $(wildcard userland/programs/notepad/*.c)
+$(BUILD)/user/notepad.exe: userland/programs/notepad.c $(NOTEPAD_SRC) $(wildcard userland/programs/notepad/*.h) $(ULIB) \
+                           userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(NOTEPAD_SRC)
+	strip $@
+
 IMG_DEPS += $(UPROGS)
 .SECONDARY: $(ULIB) $(WAVLIB)
 
