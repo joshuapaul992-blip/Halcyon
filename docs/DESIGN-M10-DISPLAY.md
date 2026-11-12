@@ -57,9 +57,11 @@ int  display_test_fail(a, step);  /* fw_cfg test hook for the fallback tests */
 
 and sets the adapter's limits: `live` (modes switch at once), `max_w`,
 `max_h`, `max_clock_khz`, `vram` (bytes a head's buffers may use),
-`virtual_sizes` (virtual hardware: offer the common sizes too),
-`owns_fw_fb` (the device shows the firmware frame buffer; the core also
-works it out from the BARs).
+`virtual_sizes` (virtual hardware: offer the common sizes too), `rates`
+(`set_mode` programs each mode's own timing: every refresh rate the
+monitor lists is offered, see "Refresh rates"), `owns_fw_fb` (the device
+shows the firmware frame buffer; the core also works it out from the
+BARs).
 
 The operations (all called on the GUI thread, never from an interrupt):
 
@@ -91,38 +93,83 @@ timing (`clock_khz == 0`).
 limits:
 
 - every timing the monitor lists: the detailed timing descriptors of the
-  base block (the first is the preferred one) and of CTA-861 extension
-  blocks, CTA short video descriptors (a table of the common progressive
-  VICs), standard timings (also from 0xFA descriptors) and established
-  timings, these two through a VESA DMT table or, for sizes it lacks, the
-  CVT reduced blanking formula;
+  base block (the first is the preferred one), of CTA-861 extension blocks
+  and of DisplayID extension blocks (type I and type VII detailed timings;
+  their own "preferred" flag counts only when nothing before was
+  preferred), CTA short video descriptors (a table of the common
+  progressive VICs), standard timings (also from 0xFA descriptors) and
+  established timings, these two through a VESA DMT table or, for sizes
+  it lacks, the CVT reduced blanking formula;
 - with `virtual_sizes`, the common sizes from 640 x 480 to 3840 x 2160
-  (DMT or CVT-RB timings), and the hardware's size hint (virtio's display
-  info) as the preferred mode when the EDID has none;
+  (DMT or CVT-RB timings, 60 Hz where DMT has it), and the hardware's size
+  hint (virtio's display info) as the preferred mode when the EDID has
+  none;
 - filtered by the limits: at least 640 x 480, at most `max_w` x `max_h`,
   pixel clock up to `max_clock_khz`, `w * h * 4 * buffers <= vram` (two
-  buffers with page flips), no interlaced modes, and the driver's
-  `mode_valid` (Bochs: widths divisible by 8);
-- one entry per size (the preferred timing, else the monitor's timing
-  nearest to 60 Hz, else DMT, else CVT), sorted by width, then height.
+  buffers with page flips), no interlaced modes (none are listed), no
+  timing below half a frame per second, and the driver's `mode_valid`
+  (Bochs: widths divisible by 8; NVIDIA: the head's pixel clock, TMDS
+  clocks, the DisplayPort link) — called for each timing, so for each
+  refresh rate separately;
+- without `rates`: one entry per size (the preferred timing, else the
+  monitor's timing nearest to 60 Hz, else DMT, else CVT);
+- with `rates`: one entry per size and refresh rate, the rate rounded to
+  whole Hertz; timings that round to the same rate are one entry: the
+  preferred timing, else the monitor's detailed timing (its exact clock:
+  a CEA DTD at 59.94 Hz beats VIC 4's 60 Hz, the EDID's 2560 x 1440 at 60
+  Hz beats DMT's identical one), else another timing it lists, else DMT,
+  else CVT. A preferred timing the limits leave out (a DisplayPort link
+  too slow for it) leaves its size recommended at the highest rate left
+  there;
+- sorted by width, height, then rate.
 
-`modes_default()` picks the mode to start with when nothing was chosen: the
-preferred one up to 2560 x 1600 (the UI has no scaling), else an exact
-fraction of it (a 4K panel gets 1920 x 1080), else the largest of its shape,
-else the largest up to 1024 x 768 — the loaders' policy (`boot/modesel.h`).
+`modes_find(w, h)` is the mode to use at a size: the one at the preferred
+mode's refresh rate if the size has it, else the highest rate there.
+`modes_find_rate(w, h, hz)` the exact one, `modes_rates(w, h)` the rates
+at a size, `modes_saved(w, h, hz)` a saved one or `modes_find`'s with a
+flag that it fell back. `modes_default()` picks the mode to start with
+when nothing was chosen: the preferred one up to 2560 x 1600 (the UI has no
+scaling), else an exact fraction of it (a 4K panel gets 1920 x 1080), else
+the largest of its shape, else the largest up to 1024 x 768 — the loaders'
+policy (`boot/modesel.h`) — at `modes_find`'s rate.
+
+### Refresh rates
+
+Today only native drivers that program the mode's timing themselves set
+`a->rates`: the NVIDIA driver (each head's own video PLL at the timing's
+exact clock: 679.30 MHz for 2560 x 1440 at 165 Hz on the user's LG
+UltraGear). The firmware frame buffer cannot change the rate (the loader
+chose the mode), and Bochs and the virtio GPU have no real refresh (QEMU
+shows the picture whenever it is flushed; virtio's emulated vertical
+blank only paces page flips): their lists keep one mode per size, and
+Display Properties shows their rate as "Default". The virtio GPU offers
+rates only with the QEMU test hook `opt/halcyon/vgpuedid` (an EDID with
+several rates for its first output; the rate then sets the emulated
+vertical blank's period), for the boot tests.
+
+On the NVIDIA driver `mode_valid` checks every rate on its own: the head's
+pixel clock limit (1080 MHz on Pascal), TMDS limits, and for DisplayPort
+the most the link can carry — the lanes and rate both ends support (the
+sink's DPCD, capped by the DCB entry and the generation, read at detect),
+24 bits per pixel through 8b/10b. A mode set retrains the link for the
+mode's own clock, the widest and fastest configuration first, so a rate
+change on a lit head (165 Hz after 120 Hz) trains again; 165 Hz (2037.9
+MB/s) fits 4 lanes at 5.4 or 8.1 GHz, not 2 lanes.
 
 ### Configurations
 
 A `display_conf_t` says, for every connector of the started adapters,
-whether it is on the desktop (`attach`), its mode (`w` x `h`), its place
-(`x`, `y`) and which one is the primary monitor. `display_get_conf()`
-returns the one in use; `display_set_conf()` applies another one live:
+whether it is on the desktop (`attach`), its mode (`w` x `h` and the
+refresh rate `hz`, 0 for `modes_find`'s), its place (`x`, `y`) and which
+one is the primary monitor. `display_conf_mode()` finds the mode an entry
+means. `display_get_conf()` returns the one in use; `display_set_conf()`
+applies another one live:
 
 1. heads are assigned (the primary's first; a connector keeps its head),
 2. the places are normalized (`layout_normalize`, below),
 3. heads that go off or change connector are switched off first,
-4. each changed head gets new buffers (black), `set_mode`, and the old
-   buffers are freed,
+4. each changed head (another size, rate or timing) gets new buffers
+   (black), `set_mode`, and the old buffers are freed,
 5. `display_changed_hook` lets the GUI follow (a new desktop surface,
    wallpaper, windows moved, the pointer kept on a monitor).
 
@@ -140,9 +187,19 @@ display.virtual-1.y=0
 display.virtual-2.attach=1
 display.virtual-2.width=1024
 ...
+display.dp-1.hz=165         (the refresh rate: only where the adapter offers a choice)
 display.width=1280          (the primary's mode: the loaders read these)
 display.height=800
 ```
+
+At the start (and when a monitor comes back by hotplug) a saved size and
+rate is used if the list has it. A saved rate it does not have any more
+(another monitor on the connector, a slower cable or link) gives
+`modes_find`'s rate at that size — the monitor's preferred one if it is
+offered there, else the highest — and the log says so ("display: DP-1:
+165 Hz at 2560x1440 is not offered any more: 120 Hz instead (the
+monitor's preferred rate)"); BOOT.LOG is saved again once the display has
+started, since it was last saved before.
 
 Other keys: `display.disable=virtio-gpu,bochs` (drivers not to start: safe
 mode for one driver), `display.flip=0` (no page flips),
@@ -178,10 +235,12 @@ mode for one driver), `display.flip=0` (no page flips),
 - **The start guard** (`display_guard_begin`, for drivers that set
   `a->guarded`: the NVIDIA one): right before the driver's first register
   write the core saves `display.<driver>.guard=start` in SETTINGS.INI and
-  BOOT.LOG. Once the desktop runs on the driver, a configuration (connectors
-  and modes, and whether each head flips pages and draws the hardware
-  cursor: `DP-1 2560x1440 fc;`) confirmed before clears the marker after 10
-  seconds; a new one
+  BOOT.LOG. Once the desktop runs on the driver, a configuration (connectors,
+  modes and refresh rates, and whether each head flips pages and draws the
+  hardware cursor: `DP-1 2560x1440@165 fc;`) confirmed before clears the
+  marker after 10 seconds; a new one (a rate never confirmed too; a
+  signature saved before rates were part of it does not match, so each
+  monitor is confirmed once more after the update)
   makes the GUI ask "Halcyon now uses its own driver for the ... Can you
   see this message?" (15 seconds, No is the default): Yes stores it in
   `display.<driver>.confirmed` and clears the marker, anything else gives
@@ -358,20 +417,47 @@ monitors scaled to fit, each showing the wallpaper, its number, the
 taskbar on the primary one; monitors that are connected but not part of
 the desktop are drawn hatched to the right. Click a monitor (or pick it in
 the Display list, "2. QEMU Monitor on Virtio GPU (2 outputs)") to choose its
-resolution from its own list, "Use this device as the primary monitor" or
-"Extend my desktop onto this monitor"; drag it to rearrange (it snaps to an
-edge; dropping a detached monitor next to the others extends onto it).
-Identify shows each monitor's big number on it for three seconds. Apply on
-adapters that switch live applies the whole configuration and asks "Do you
-want to keep these settings?", going back after 15 seconds; the result is
-saved (`display.<connector>.*`). With only the firmware frame buffer the
-choice is saved for the loader and a restart is offered.
+resolution from its own list (each size once, the preferred one
+"(recommended)"), its refresh rate, "Use this device as the primary
+monitor" or "Extend my desktop onto this monitor"; drag it to rearrange (it
+snaps to an edge; dropping a detached monitor next to the others extends
+onto it). Identify shows each monitor's big number on it for three seconds.
+Apply on adapters that switch live applies the whole configuration and
+asks "Do you want to keep these settings?", going back after 15 seconds;
+the result is saved (`display.<connector>.*`). With only the firmware frame
+buffer the choice is saved for the loader and a restart is offered.
+
+**Refresh rate.** Below the resolution list, in the Screen resolution
+group, a compact "Refresh rate" drop-down lists the rates of the selected
+monitor's list at the chosen resolution ("60 Hertz", "120 Hertz", the
+current one ticked); "Colors: Highest (32 bit)" stands beside it.
+Choosing another resolution takes the monitor's preferred rate if it is
+offered there, else the highest (`modes_find`); choosing the same one
+again keeps the rate. Each monitor has its own (the one selected in the
+arrangement). Apply goes through the same 15-second "keep these
+settings?". On adapters without `rates`, or that do not switch live, the
+drop-down is disabled and says "Default".
+
+Why not XP's way: XP put the rate under Settings, Advanced, Monitor tab
+("Screen refresh rate", with "Hide modes that this monitor cannot
+display"). Halcyon's Display Properties has two tabs and no Advanced
+button, adapter or monitor pages; an Advanced dialog with a Monitor tab
+would be a new property sheet for one control, two clicks away from the
+resolution it depends on. And the checkbox would have nothing to show:
+the lists hold only timings the monitor lists and the driver accepts, so
+it would always be checked. One drop-down where the "Color quality" line
+was keeps the rate next to its resolution.
 
 System Information lists each adapter (driver, state and why it failed or
 is off, heads and their capabilities) with its connectors below it (status,
-the monitor's EDID name, manufacturer, native mode, size, the mode in use
-with its full timing, frames and page flips, the hardware cursor), and PCI
-display devices that have no driver.
+the monitor's EDID name, manufacturer, native mode, size, how many modes
+and resolutions, the mode in use with its full timing, its refresh rate and
+the rates offered at that resolution, frames and page flips, the hardware
+cursor), and PCI display devices that have no driver. BOOT.LOG lists, per
+connector, the sizes with several rates ("display:   2560x1440 at 60, 120,
+144, 165 Hz"), each mode set with its timing, and each monitor's rate
+("display: monitor 1: DP-1 (LG ULTRAGEAR) 2560x1440@165 at 0,0 on ...",
+for adapters with `rates`).
 
 ## Writing a native display driver
 
@@ -390,7 +476,9 @@ EVO display engine) follows; the virtio driver is the worked example.
    HEAD_CAP_VBLANK, 64)` per head; one `display_add_connector` per DCB
    connector, named by type and number (`DP-1`, `HDMI-1`, `DVI-I-1`,
    `VGA-1`), with `possible_heads` from the DCB's head masks. Set
-   `pci->driver`.
+   `pci->driver`. Set `rates = 1` when `set_mode` programs `m->t` as it
+   is (every refresh rate the monitor lists is then offered and checked
+   with `mode_valid` one by one).
 2. **enable**: take the display engine over (on EVO: the core channel's
    push buffer, the notifier, the semaphores), without changing what is on
    screen if possible. Remember what is needed to give it back.
@@ -455,8 +543,25 @@ hotplug reconfiguration, Display Properties and System Information.
   standard from DMT and from CVT, a CTA extension with VICs, a detailed
   timing and an interlaced one), mode lists under pixel clock, memory
   (two buffers) and size limits and a driver's own check, virtual sizes
-  with a size hint, the default mode for a 4K panel, broken EDIDs, and
-  200,000 random EDIDs (no crash, every listed mode within the limits).
+  with a size hint, the default mode for a 4K panel, broken EDIDs; refresh
+  rates from an EDID like the LG UltraGear's (120 Hz preferred in the base
+  block, 60 and 144 Hz CEA DTDs, 165 Hz in DisplayID type I and type VII,
+  exact clocks and totals), one entry per rate, duplicates (59.94 / 60 Hz,
+  the EDID's 60 Hz against DMT's), the preferred mark, `modes_find`'s rule
+  (120 Hz at 1920 x 1080, the highest at 1024 x 768), the GTX 1070's
+  DisplayPort check for five link widths (a preferred timing too fast for
+  the link leaves 2560 x 1440 at 60 Hz recommended), a 600 MHz clock
+  limit, saved rates restored or replaced (`modes_saved`), the QEMU test
+  EDID (`--write-edid qemu`); and 200,000 random EDIDs with CEA and
+  DisplayID blocks and rates on and off (no crash, every listed mode
+  within the limits, sorted, no duplicates, a saved mode comes back).
+- `tests/host/evotest.c` (NVIDIA, see DESIGN-M10-NVIDIA.md): the GP104's
+  PLL table reconstructed from the coefficients NVREPORT logged for 497.75
+  MHz (N 54 fN 19c7 M 1 P 3), 241.50 / 604.25 / 679.30 MHz exact inside
+  the VCO range; 2560 x 1440 at 165, 144, 60 and 120 Hz set one after the
+  other on a lit head of the simulated GP104 (the link trained again at 4
+  x 8.1 GHz, the PLL's coefficients), a DCB capped at 5.4 GHz (165 Hz at
+  4 x 5.4), a 2-lane sink (120 Hz at most).
 - `tests/host/layouttest.c`: adjacency, the pointer between monitors of
   different heights, window places (on monitor 2, monitor 2 gone, larger
   than a monitor), snapping, normalizing saved arrangements (all at the
@@ -487,6 +592,22 @@ hotplug reconfiguration, Display Properties and System Information.
     device: reset, the firmware frame buffer in use, a screendump shows the
     desktop;
   - `gpuoff` (UEFI): `display.disable=virtio-gpu`;
+  - `rates` (BIOS): the virtio GPU with the test EDID (fw_cfg
+    `opt/halcyon/vgpuedid`, `modetest --write-edid qemu`: 1280 x 800 at 60
+    Hz preferred, 75 and 120 Hz CEA DTDs, 144 Hz DisplayID; 1024 x 768 at
+    60, 70 and 75; 1152 x 864 at 75 only): the rates logged, the loader's
+    1024 x 768 at the preferred 60 Hz; the Display Properties test hook
+    (fw_cfg `opt/halcyon/displaytest` = `1152x864,1280x800@75`) chooses
+    1152 x 864 (75 Hz, the only one), 1280 x 800 (60 Hz, the preferred)
+    and 75 Hz through the drop-down's menu handler, a screendump of the
+    dialog, Apply, "keep these settings?" answered Yes by the hook,
+    `display.virtual-1.hz=75` in SETTINGS.INI;
+  - `ratesave` (UEFI): `display.virtual-1.hz=120` saved: restored with its
+    timing; with the start guard (`displayguard` hook) and
+    `display.virtio-gpu.confirmed=Virtual-1 1280x800@60 fc;`, the new rate
+    is a new configuration that asks again;
+  - `ratefall` (BIOS): 85 Hz saved, not offered: 60 Hz (the monitor's
+    preferred rate) and the reason in BOOT.LOG (read from the image);
   - the existing `res`, `res+fwvideo`, `switch` and every other variant
     keep using the Bochs adapter or the firmware frame buffer (BIOS VBE and
     UEFI GOP).
@@ -498,6 +619,15 @@ six display variants `vgpu`, `dual`, `arrange`, `multi`, `gpufail`,
 `gpuoff`), `virtio+noirq` (flips and the cursor polled), `tools/ci.sh quick`,
 and the host tests (modetest 42 checks + 200,000 random EDIDs, layouttest
 24 checks + 20,000 random arrangements, displaytest 19).
+
+Refresh rates: last run 22/22 boot variants (`vgpu`, `dual`, `arrange`, `multi`,
+`gpufail`, `gpuoff`, `nvfake` BIOS and UEFI, `nvfake+nvoff`, `nvfake+nvset`,
+`guard`, `guardblock`, `res`, `switch`, `res+fwvideo`, `help`, and the new
+`rates`, `ratesave`, `ratefall` on BIOS and UEFI), `tools/ci.sh quick`,
+modetest 97 checks + 200,000 random EDIDs, layouttest 24, displaytest 19,
+evotest 45,580. The drop-down was looked at in screendumps (open with the
+rates at 1024 x 768, and disabled "Default" on a plain virtio GPU). Not run
+on the GTX 1070 yet.
 
 The NVIDIA driver (10b, 10d) implements the whole interface above:
 cursor, page flips, vertical blank and several heads (see
@@ -520,8 +650,17 @@ the documentation were looked at but are not in the repository.
   the pointer only lines up on the first; a relative mouse (PS/2) works
   everywhere. (QEMU can bind one tablet per head; the input layer does not
   tell devices apart yet.)
-- **Refresh rates** are not offered separately (one timing per size); no
-  rotation, no mirroring ("clone" mode), no color depths but 32 bit, no
+- **Refresh rates** only where the driver sets the timing (NVIDIA); the
+  firmware frame buffer keeps the loader's mode, and Bochs and the virtio
+  GPU have no real rate (one mode per size, "Default"). Not read from the
+  EDID: DisplayID 2.0's formula-based timings (types VIII to X), CTA VICs
+  outside the small progressive table (e.g. 1080p at 100 / 120 Hz, VICs 63
+  and 64), CTA-861's 4:2:0 and HDMI forum blocks; no variable refresh rate
+  (G-Sync, Adaptive-Sync), no deep color (a rate that needs fewer bits per
+  pixel is not offered), no DSC. No "Hide modes that this monitor cannot
+  display" (nothing is listed that the monitor does not list). Interlaced
+  timings stay out of the lists.
+- No rotation, no mirroring ("clone" mode), no color depths but 32 bit, no
   gamma tables, no DPI scaling.
 - **Bochs page flips**: the DISPI interface could flip with its Y offset,
   but it has no vertical blank to pace them; it stays single buffered.

@@ -451,6 +451,25 @@ block.
 scrambling); DisplayPort: the mode at 24 bits per pixel must fit lanes x
 rate after 8b/10b; DACs 400 MHz; the generation's raster limit.
 
+Refresh rates (after 10d): the driver sets `a->rates`, so the display core
+offers every refresh rate the EDID lists (base block, CEA-861 and
+DisplayID detailed timings, standard and established timings) and calls
+`mode_valid` for each timing on its own; Display Properties has a Refresh
+rate drop-down (DESIGN-M10-DISPLAY.md, "Refresh rates"). The head's limit
+is the generation's (1080 MHz on Pascal, `nv_evo_head_max_khz`); for
+DisplayPort the check uses the most the link can carry — `lanes_max` and
+`bw_max` from detect (the DPCD's, capped by the DCB entry and
+`dp_max_bw`), not the configuration a previous mode set trained, since
+`set_mode` retrains for each mode's clock with the widest and fastest
+configuration first (`nv_dp_configs`: 4 x 8.1, 4 x 5.4, ... GHz). The
+clock is the EDID's exactly (679.30 MHz for the LG UltraGear's 165 Hz);
+the GF100-style fractional PLL hits it exactly. The user's monitor: 60,
+120 (preferred), 144 and 165 Hz at 2560 x 1440; 165 Hz needs 2037.9 MB/s,
+which 4 lanes at 5.4 or 8.1 GHz carry and 2 lanes do not. evotest checks
+the GP104's PLL with tables reconstructed from NVREPORT's coefficients for
+497.75 MHz and the four mode sets on the simulated GP104 (see the
+HARDWARE.md steps for 144 and 165 Hz).
+
 **set_mode**: the output resource is the DCB output's own OR before GM200;
 from GM200 the SOR already routed to it, else a free one, else one only the
 firmware used (`nvkm_outp_acquire`). One update carries, in nouveau's
@@ -973,10 +992,13 @@ scanline read.
 
 ### What to check on the GTX 1070 (10d)
 
-The LG at 2560x1440 runs at 120 Hz, the EDID's preferred timing: the
-display core offers one timing per size. Its 144 and 165 Hz timings (604
-and 679 MHz) would fit DisplayPort at 4 x 8.1 GHz and the Pascal head
-limit, but cannot be chosen until the display core offers refresh rates.
+The LG at 2560x1440 runs at 120 Hz, the EDID's preferred timing. Its 144
+and 165 Hz timings (604 and 679 MHz) fit DisplayPort at 4 x 8.1 GHz and
+the Pascal head limit; since the display core offers refresh rates they
+can be chosen in Display Properties (steps in HARDWARE.md, "Then the
+refresh rates"). With rates the start guard's configuration names the
+rate (`DP-1 2560x1440@120 fc`), so the first start after that update asks
+"Can you see this message?" once more.
 
 1. Boot from the stick (UEFI). The desktop should come up as with 10b,
    and Halcyon asks "Can you see this message?" once more: the start

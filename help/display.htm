@@ -1,9 +1,9 @@
 <html><head><title>Display Properties</title>
-<meta name="keywords" content="Display Properties; screen resolution#res; resolution; monitor; keep these settings#res; screen saver#saver; graphics card#res; black screen after changing resolution#res; several monitors#monitors; second monitor#monitors; multiple monitors#monitors; extend the desktop#monitors; primary monitor#monitors; Identify#monitors; arrange monitors#monitors; display driver#driver; safe mode, display driver#driver; NVIDIA#driver; GeForce#driver; Can you see this message#driver; Turn on driver#driver">
+<meta name="keywords" content="Display Properties; screen resolution#res; resolution; monitor; keep these settings#res; refresh rate#rate; screen refresh rate#rate; Hertz#rate; 144 Hz#rate; 165 Hz#rate; flicker#rate; screen saver#saver; graphics card#res; black screen after changing resolution#res; several monitors#monitors; second monitor#monitors; multiple monitors#monitors; extend the desktop#monitors; primary monitor#monitors; Identify#monitors; arrange monitors#monitors; display driver#driver; safe mode, display driver#driver; NVIDIA#driver; GeForce#driver; Can you see this message#driver; Turn on driver#driver">
 </head><body>
 <h2 style="color:#1f4e9a">Display Properties</h2>
-<p>Display Properties sets the screen resolution, arranges your monitors and
-chooses the screen saver. Open it from the <b>Control Panel</b>
+<p>Display Properties sets the screen resolution and refresh rate, arranges
+your monitors and chooses the screen saver. Open it from the <b>Control Panel</b>
 (<b>Display...</b>), by right-clicking the desktop and choosing
 <b>Properties</b>, or by typing <code>DISPLAY</code> in the Command Prompt.</p>
 
@@ -32,6 +32,34 @@ restart now.</li>
 <a href="troubleshoot.htm">Solving startup problems</a>.
 </td></tr></table>
 
+<h3 id="rate">Refresh rate</h3>
+<p>The refresh rate is how many times a second the monitor draws the picture,
+in Hertz (Hz). Many monitors can show their resolution at several rates, for
+example 60, 120, 144 and 165 Hertz: a higher rate makes moving pictures and
+the mouse pointer smoother. To change it:</p>
+<ol>
+<li>On the <b>Settings</b> tab, click the monitor in the picture (or choose it
+in the <b>Display</b> list) and choose its resolution.</li>
+<li>Open the <b>Refresh rate</b> list below the resolutions and choose a rate.
+The list shows only the rates the monitor reports for that resolution and
+your display adapter can send it (over DisplayPort, a cable or port that
+carries less leaves the fastest rates out).</li>
+<li>Click <b>Apply</b>. The screen switches and Halcyon asks <b>"Do you want to
+keep these settings?"</b>; if the monitor shows nothing (or "out of range"),
+just wait 15 seconds and the old rate comes back.</li>
+</ol>
+<p>When you choose another resolution, Halcyon picks the monitor's own
+(recommended) rate if it is offered there, otherwise the highest one. Each
+monitor keeps its own rate, and the rate is remembered for the next start; if
+that monitor or its cable no longer offers the rate, Halcyon uses the
+monitor's own rate instead and notes it in <code>\HALCYON\BOOT.LOG</code>. With
+NVIDIA graphics cards, a rate shown for the first time asks <b>"Can you see
+this message?"</b> once more at the next start.</p>
+<p>The list says <b>Default</b> and cannot be opened when the display adapter
+does not set the rate itself: the firmware's picture (the rate the computer's
+firmware chose) and virtual machines' adapters, which have no real refresh
+rate. <a href="sysinfo.htm">System Information</a> shows each monitor's rate.</p>
+
 <h3 id="monitors">Several monitors</h3>
 <p>When more than one monitor is connected, the <b>Settings</b> tab shows them
 as numbered pictures, arranged as Halcyon uses them: the desktop stretches
@@ -48,8 +76,8 @@ check <b>Use this device as the primary monitor</b>.</li>
 <li><b>Extend my desktop onto this monitor</b> switches a monitor on or off
 for Halcyon. A monitor that is connected but not used is drawn grey next to
 the others; dragging it next to them extends the desktop onto it too.</li>
-<li>Each monitor has its own resolution: choose a monitor first, then its
-resolution.</li>
+<li>Each monitor has its own resolution and refresh rate: choose a monitor
+first, then its resolution and rate.</li>
 </ul>
 <p>Click <b>Apply</b> to use the new arrangement (Halcyon asks whether to keep
 it, as for a new resolution). It is remembered for the next start.

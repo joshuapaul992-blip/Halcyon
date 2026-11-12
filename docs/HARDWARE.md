@@ -348,9 +348,9 @@ first to run it, so expect surprises and please report them:
    Halcyon's own driver it asks **"Can you see this message?"**: click
    **Yes**. If the screen is dark, wait 15 seconds: the firmware's picture
    comes back by itself.
-2. In Display Properties (Settings) the monitor's own resolutions should be
-   offered; try one, and a second connector (DisplayPort, HDMI, DVI) if you
-   can.
+2. In Display Properties (Settings) the monitor's own resolutions and
+   refresh rates should be offered; try one, and a second connector
+   (DisplayPort, HDMI, DVI) if you can.
 3. If the screen stays dark or the PC stops, switch it off and on: Halcyon
    notices that the driver's start did not finish, leaves it off and says
    so in a balloon. Run `NVREPORT` again (its REPORT.TXT then holds the
@@ -379,6 +379,36 @@ while the desktop runs on the driver, since its REPORT.TXT then has a
 "Heads" section and each head's channel registers. The details are in
 [DESIGN-M10-NVIDIA.md](DESIGN-M10-NVIDIA.md) ("What to check on the GTX
 1070 (10d)").
+
+**Then the refresh rates (144 and 165 Hz)**, on the native driver with the
+LG UltraGear on DisplayPort. Its EDID lists 2560 x 1440 at 120 Hz (the
+preferred timing), 60 and 144 Hz (CEA block) and 165 Hz (DisplayID block);
+the driver now offers all four.
+
+1. Display Properties, Settings: with 2560 x 1440 chosen, the **Refresh
+   rate** list should say 60, 120, 144 and 165 Hertz (System Information
+   and `BOOT.LOG`'s `display:   2560x1440 at 60, 120, 144, 165 Hz` say the
+   same). If 144 or 165 Hz is missing, the DisplayPort link was read as too
+   slow: the driver's line `DP-1: DisplayPort sink, DPCD 1.4, 4 lanes, rate
+   1e` in `BOOT.LOG` says what it found (165 Hz needs 4 lanes at 5.4 or
+   8.1 GHz).
+2. Choose **144 Hertz**, **Apply**, and answer **Yes** if the picture is
+   fine; then the same with **165 Hertz**. If the monitor goes dark or says
+   "out of range", wait 15 seconds: the old rate comes back by itself. The
+   monitor's own menu (the OSD) usually shows the rate it receives.
+3. Restart: the rate chosen comes back (`display.dp-1.hz=165` in
+   `\HALCYON\SETTINGS.INI`), and since the start guard has not seen that
+   rate yet it asks **"Can you see this message?"** once more.
+4. Send back `BOOT.LOG` (each mode set logs its timing, the video PLL's
+   coefficients, e.g. `VPLL0 ... 679300 kHz (N 49 ... P 2 ...)`, and the
+   link it trained, `DP: SOR2 trained, 4 lanes x 1e`), and what the
+   monitor's OSD said at each rate.
+
+The pixel clocks come from the EDID exactly (679.30 MHz for 165 Hz) and the
+host tests check that the PLL hits them with the table limits the report
+implies; what they cannot check is the card's own limit at that clock and
+the cable. To go back by hand, delete the `display.dp-1.hz` line (the
+monitor's 120 Hz is used) or choose a lower rate.
 
 What may go wrong: the register addresses come from nouveau (Linux's
 open-source driver) and are used the way it uses them, but nothing here has
