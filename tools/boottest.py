@@ -68,13 +68,23 @@ or attach a network adapter on QEMU's user-mode network (-netdev user):
           INTx, or polled with noirq).
 or attach a sound card, its output recorded by QEMU's wav backend (48 kHz):
   ac97          Intel 82801AA AC'97
+  virtiosnd     virtio-sound-pci (virtio 1.2 sound device; MSI-X)
+  es1370        Ensoniq AudioPCI ES1370 (plays at 44.1 kHz)
+  sb16          Creative Sound Blaster 16 (ISA, IRQ 5, DMA 5; plays at 44.1 kHz)
           The card's driver must register it as snd0. Once the desktop is up
           the kernel's sound test (QEMU fw_cfg soundtest) plays a 440 Hz sine
-          at 44.1 kHz for 2 s through a stream, then a 1 kHz triangle at
-          22.05 kHz for 0.25 s as a static sound: the log must report no
-          underruns and the expected interrupt (live, or polled with noirq),
-          and the recording must hold both, at the right pitch and length,
-          without dropouts.
+          at 44.1 kHz for 2 s through a stream, then 100 ms later a 1 kHz
+          triangle at 22.05 kHz for 0.25 s as a static sound: the log must
+          report no underruns and the expected interrupt (live, or polled with
+          noirq), and the recording must hold both, at the right pitch and
+          length, without dropouts. (QEMU resamples a 44.1 kHz card to the
+          recording's 48 kHz; the pitch still comes out within 1 Hz.)
+  beep    instead of the sound test, the beep test (soundtest = "beep"):
+          snd_beep(880, 300), 4.3 s later (the device has been stopped and
+          must start again) snd_beep(660, 200). With a sound card (e.g.
+          ac97+beep) both go through it; without one (just beep) through the
+          PC speaker, recorded with -machine pcspk-audiodev. The recording
+          must hold both beeps at the right pitch and length.
 NETDUMP=file.pcap records the net variants' frames (128 bytes each) for debugging.
 Exit status is the number of failed configurations.
 """
@@ -93,9 +103,9 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user", "xhci:bios:sock", "xhci:bios:web",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
-          "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97"]
+          "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:uefi:virtiosnd"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
-            "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0}
+            "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -105,7 +115,10 @@ NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
 for _n in NICS:
     VARIANTS[_n] = 0
 # sound card variants: QEMU device arguments (audiodev snd0), the driver's name
-SOUNDS = {"ac97": ("-device AC97,audiodev=snd0", "ac97")}
+SOUNDS = {"ac97": ("-device AC97,audiodev=snd0", "ac97"),
+          "virtiosnd": ("-device virtio-sound-pci,audiodev=snd0", "virtio-snd"),
+          "es1370": ("-device ES1370,audiodev=snd0", "es1370"),
+          "sb16": ("-device sb16,audiodev=snd0", "sb16")}
 for _n in SOUNDS:
     VARIANTS[_n] = 0
 SOUND_TEST_MS = 2000
@@ -289,6 +302,44 @@ def wav_segments(path):
     return segs
 
 
+def pitch_runs(path):
+    """the tones of a QEMU wav capture told apart by pitch, also where no
+    silence separates them: [(start_s, length_ms, pitch_hz)] from the
+    spacing of rising zero crossings (in loud stretches)"""
+    import array
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        return None
+    i = data.find(b"data")
+    if data[:4] != b"RIFF" or i < 0:
+        return None
+    ch = data[22] | data[23] << 8
+    rate = int.from_bytes(data[24:28], "little")
+    pcm = array.array("h")
+    pcm.frombytes(data[i + 8: i + 8 + (len(data) - i - 8) // (2 * ch) * 2 * ch])
+    x = pcm[0::ch]
+    cross, armed = [], False
+    for k in range(1, len(x)):           # (armed below -2000: noise near zero is no crossing)
+        if x[k] < -2000:
+            armed = True
+        elif armed and x[k - 1] < 0 <= x[k]:
+            cross.append(k - 1 + (-x[k - 1]) / (x[k] - x[k - 1]))
+            armed = False
+    runs, start = [], 0
+    for k in range(1, len(cross) + 1):
+        if k < len(cross):
+            d, d0 = cross[k] - cross[k - 1], cross[min(start + 1, k)] - cross[start]
+            if k == start + 1 or abs(d - d0) < d0 * 0.1:
+                continue
+        n = k - 1 - start
+        if n >= 4:
+            span = cross[k - 1] - cross[start]
+            runs.append((cross[start] / rate, (span + span / n) * 1000 / rate, n * rate / span))
+        start = k
+    return runs
+
+
 def sound_failures(text, snd, opts, wav):
     """the sound card variant's checks (see the docstring)"""
     driver = SOUNDS[snd][1]
@@ -312,6 +363,34 @@ def sound_failures(text, snd, opts, wav):
     (t0, l0, f0, d0), (t1, l1, f1, d1) = segs
     if not (SOUND_TEST_MS - 30 <= l0 <= SOUND_TEST_MS + 30 and abs(f0 - 440) < 1 and not d0 and
             230 <= l1 <= 270 and abs(f1 - 1000) < 3 and not d1 and t1 > t0):
+        fails.append("recording: %s" % desc)
+    return fails
+
+
+def beep_failures(text, snd, wav):
+    """the beep variant's checks (see the docstring)"""
+    fails = []
+    if snd and not any(l.startswith("sound: snd0: ") and "(%s)" % SOUNDS[snd][1] in l for l in text.splitlines()):
+        return ["no %s sound card registered" % SOUNDS[snd][1]]
+    m = re.search(r"sound: beep test: done through (.+?) \((-?\d+), (-?\d+)\), device underruns (\d+)", text)
+    if not m:
+        return ["beep test did not finish"]
+    if m.group(1) != ("snd0" if snd else "PC speaker"):
+        fails.append("beep through %s" % m.group(1))
+    if m.group(2) != "0" or m.group(3) != "0" or m.group(4) != "0":
+        fails.append("beep test: %s" % m.group(0))
+    # (QEMU's wav file only grows while a voice plays: the 4 s between the
+    # beeps are not all there, and with the PC speaker not at all)
+    runs = pitch_runs(wav)
+    if runs is None:
+        return fails + ["no recording"]
+    desc = ", ".join("%.2fs %dms %.1fHz" % r for r in runs)
+    if len(runs) != 2:
+        return fails + ["recording: expected two beeps, got: %s" % (desc or "silence")]
+    (t0, l0, f0), (t1, l1, f1) = runs
+    # (the second beep may lose its last ~20 ms: QEMU stops writing the file
+    # when the PC speaker goes off, with some of it still buffered)
+    if not (270 <= l0 <= 330 and abs(f0 - 880) < 2 and 150 <= l1 <= 230 and abs(f1 - 660) < 2 and t1 > t0):
         fails.append("recording: %s" % desc)
     return fails
 
@@ -364,11 +443,13 @@ def run(cfg):
             NICS[nic][0], NET_PROBE)
     snd = next((v for v in opts if v in SOUNDS), None)
     wav = os.path.abspath(os.path.join(BUILD, "ci_sound.wav"))
-    if snd:
+    beep = "beep" in opts
+    if snd or beep:
         if os.path.exists(wav):
             os.remove(wav)
-        extra += " -audiodev wav,id=snd0,path=%s,out.frequency=48000 %s -fw_cfg name=opt/halcyon/soundtest,string=%d" % (
-            wav, SOUNDS[snd][0], SOUND_TEST_MS)
+        # beep without a sound card: the PC speaker is recorded
+        extra += " -audiodev wav,id=snd0,path=%s,out.frequency=48000 %s -fw_cfg name=opt/halcyon/soundtest,string=%s" % (
+            wav, SOUNDS[snd][0] if snd else "-machine pcspk-audiodev=snd0", "beep" if beep else SOUND_TEST_MS)
     prog = next((PROGRAMS[v] for v in opts if v in PROGRAMS), None)
     prog_args = ""
     ini_lines = []
@@ -458,9 +539,10 @@ def run(cfg):
         while time.time() - t1 < 20 and p.poll() is None and "probe burst:" not in text:
             time.sleep(0.5)
             text = open(log, errors="replace").read()
-    if snd:
+    if snd or beep:
+        done = "sound: beep test: done" if beep else "sound: test: done"
         t1 = time.time()
-        while time.time() - t1 < 30 and p.poll() is None and "sound: test: done" not in text:
+        while time.time() - t1 < 30 and p.poll() is None and done not in text:
             time.sleep(0.5)
             text = open(log, errors="replace").read()
     idle = None
@@ -502,7 +584,9 @@ def run(cfg):
     failures += kbd_fails
     if nic:
         failures += net_failures(text, nic, opts)
-    if snd:
+    if beep:
+        failures += beep_failures(text, snd, wav)
+    elif snd:
         failures += sound_failures(text, snd, opts, wav)
     want_mode = {"": "irq: mode I/O APIC", "pic": "irq: mode 8259 PIC", "nomsi": "irq: mode I/O APIC",
                  "noirq": "interrupts disabled by boot option"}[irqmode]

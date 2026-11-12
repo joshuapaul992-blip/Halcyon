@@ -178,6 +178,33 @@ What is written to spec only, and what may go wrong on a real PC:
 - Jumbo frames, checksum and segmentation offloads, VLANs and Wake-on-LAN are
   not used by any driver.
 
+## Sound
+
+Every driver plays 16-bit stereo through the kernel mixer (which resamples
+each stream to the card's rate and applies the master volume), keeps a few
+periods of 10 ms queued ahead of the hardware, counts underruns and recovers
+from them, and works with its interrupt or polled. "Tested" means in QEMU
+with `tools/boottest.py`: a 2 s tone and a short beep recorded from QEMU's
+audio output and checked for pitch, length and dropouts, under BIOS and UEFI,
+with the interrupt (I/O APIC and legacy PIC) and polled.
+
+Sound cards other than HD Audio:
+
+| Driver | Devices | IDs | Status |
+|--------|---------|-----|--------|
+| `virtio-snd` | virtio sound device (QEMU `virtio-sound-pci`) | 1AF4:1059 (virtio 1.0+ only) | Tested with QEMU 8.2 at 48 kHz: MSI-X, INTx, polled. The first output stream that takes S16 stereo at 48 or 44.1 kHz is used; capture streams, jack remapping and controls are not |
+| `es1370` | Ensoniq AudioPCI ES1370 (Creative Sound Blaster PCI64/PCI128 of 1998) | 1274:5000 | Tested with QEMU `ES1370` (INTx, polled). Plays on DAC2 at 44.1 kHz (48 kHz is not a divider of its clock); the AK4531 mixer is set to 0 dB but was not checked (QEMU does not model it) |
+| `sb16` | Creative Sound Blaster 16 and compatibles with DSP 4.xx (ISA) | ports 0x220 or 0x240 | Tested with QEMU `sb16` on the q35 machine (ISA IRQ 5 edge and level-triggered, PIC, polled; 16-bit DMA channel 5). Plays at 44.1 kHz; IRQ and DMA channel come from the card's mixer registers 0x80/0x81. Probed only when no PCI sound card was found |
+| PC speaker | PIT channel 2 and port 0x61 | – | Tested with QEMU's `pcspk-audiodev`. Used for beeps (message boxes, the Command Prompt's BEL) only when there is no sound card; otherwise beeps go through the card |
+
+Not supported: the Ensoniq ES1371/ES1373 and Creative CT5880 (AudioPCI 97,
+Sound Blaster PCI 128 rev. 2 / Live! "Value"; 1274:1371, 1274:5880): they
+have an AC'97 codec and a sample rate converter whose setup is a different
+driver. On real hardware the Sound Blaster 16 needs its DMA buffer below
+16 MiB: it lives in the kernel image (loaded at 1 MiB), so this holds on any
+PC; Plug and Play ISA cards that the firmware did not configure (no
+resources assigned) are not found.
+
 ## Compatibility list
 
 | Machine | Year | Firmware | USB controllers | Result | Notes |

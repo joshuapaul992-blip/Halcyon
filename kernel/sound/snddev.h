@@ -105,6 +105,11 @@ int  snd_muted(void);
 void snd_set_volume(int percent, int mute, int save);
 u32  snd_generation(void);                  /* changes with the volume, mute or the devices */
 
+/* a beep of hz (20..20000) for ms (1..2000): a tone through the mixer when
+ * there is a sound card, else the PC speaker; returns at once (0 or E_*) */
+int  snd_beep(int hz, int ms);
+void beep_init(void) __attribute__((weak));    /* sound_init: the beep test hook */
+
 /* drivers (weak: probe the PCI bus, register what they find) */
 void hda_init(void) __attribute__((weak));
 void ac97_init(void) __attribute__((weak));
