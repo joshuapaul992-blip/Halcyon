@@ -90,9 +90,12 @@ and two drivers that exercise all of it in QEMU: Bochs (moved behind the
 interface) and virtio GPU (several outputs, cursor, flips, hotplug). Its
 "Writing a native display driver" section is the checklist for 10b and 10d.
 
-**Status:** the display core and 10a are done. Next is 10b, then the NVIDIA
-side of 10d; 10e is decided from NVREPORT's frame-buffer speed test on the
-GTX 1070; 10c stays deferred.
+**Status:** the display core, 10a and 10b are written; 10b (the EVO
+modesetting driver, Tesla to Pascal, with a start guard and the firmware
+frame buffer as the fallback) is tested on the host against a simulated
+display engine and in QEMU with a simulated card, and waits for its first
+run on the GTX 1070. Next is the NVIDIA side of 10d; 10e is decided from
+NVREPORT's frame-buffer speed test on the GTX 1070; 10c stays deferred.
 
 Two display engines cover all eight generations, so the work splits by engine:
 
@@ -103,7 +106,9 @@ Two display engines cover all eight generations, so the work splits by engine:
   the GTX 1070): see [DESIGN-M10-NVIDIA.md](DESIGN-M10-NVIDIA.md).
 - **10b, Tesla to Pascal modesetting:** the NV50 "EVO" display engine (a command
   channel to the display; small changes per generation). Covers five
-  generations and most cards still in use. No firmware needed.
+  generations and most cards still in use. No firmware needed. Written
+  (ported from nouveau; host-tested against a simulated display engine,
+  awaiting the GTX 1070): see [DESIGN-M10-NVIDIA.md](DESIGN-M10-NVIDIA.md).
 - **10c, Kelvin to Curie modesetting: deferred.** The older VGA-style CRTCs and
   RAMDAC, with output setup through the video BIOS's init scripts (needs a
   script interpreter). Until then these cards run on the firmware framebuffer

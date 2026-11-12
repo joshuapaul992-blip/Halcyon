@@ -175,6 +175,24 @@ mode for one driver), `display.flip=0` (no page flips),
   is used instead". Never a black screen, as long as the firmware's frame
   buffer was visible to begin with (see "Not done" for virtio-gpu-pci under
   UEFI).
+- **The start guard** (`display_guard_begin`, for drivers that set
+  `a->guarded`: the NVIDIA one): right before the driver's first register
+  write the core saves `display.<driver>.guard=start` in SETTINGS.INI and
+  BOOT.LOG. Once the desktop runs on the driver, a configuration (connectors
+  and modes) confirmed before clears the marker after 10 seconds; a new one
+  makes the GUI ask "Halcyon now uses its own driver for the ... Can you
+  see this message?" (15 seconds, No is the default): Yes stores it in
+  `display.<driver>.confirmed` and clears the marker, anything else gives
+  the device back (the fallback above). A driver that fails after touching
+  its device keeps the marker. A marker found at the next start (a hang, a
+  crash, a dark screen switched off) becomes `blocked`: the adapter is not
+  started ("turned off: its last start did not finish"), which BOOT.LOG,
+  System Information and a balloon say, until Display Properties' **Turn on
+  driver...** button or removing the key. `display_guard_checkpoint` saves
+  BOOT.LOG before other risky steps (the first mode set). The fw_cfg test
+  hook `opt/halcyon/displayguard` = `<driver>` guards a driver that does not
+  use the guard itself (the boot tests `guard` and `guardblock` use the
+  virtio GPU).
 - The fw_cfg test hook `opt/halcyon/displayfail` = `<driver>:<step>`
   (`enable`, `fb`, `setmode`) makes that step fail, after the driver did
   it (`setmode`: the device is programmed, then the core says it failed),
@@ -477,8 +495,9 @@ six display variants `vgpu`, `dual`, `arrange`, `multi`, `gpufail`,
 and the host tests (modetest 42 checks + 200,000 random EDIDs, layouttest
 24 checks + 20,000 random arrangements, displaytest 19).
 
-Remaining, besides the list below: the NVIDIA modesetting driver itself
-(10b/10d, against the interface above); `dual+noirq` (hotplug found by
+Remaining, besides the list below: the NVIDIA cursor, page flips and
+several monitors (10d; 10b, the modesetting driver, is written against the
+interface above, see DESIGN-M10-NVIDIA.md); `dual+noirq` (hotplug found by
 polling: the test knows how to check it, it was not run); screenshots for
 the documentation were looked at but are not in the repository.
 

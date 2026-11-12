@@ -1,5 +1,5 @@
 <html><head><title>Display Properties</title>
-<meta name="keywords" content="Display Properties; screen resolution#res; resolution; monitor; keep these settings#res; screen saver#saver; graphics card#res; black screen after changing resolution#res; several monitors#monitors; second monitor#monitors; multiple monitors#monitors; extend the desktop#monitors; primary monitor#monitors; Identify#monitors; arrange monitors#monitors; display driver#driver; safe mode, display driver#driver">
+<meta name="keywords" content="Display Properties; screen resolution#res; resolution; monitor; keep these settings#res; screen saver#saver; graphics card#res; black screen after changing resolution#res; several monitors#monitors; second monitor#monitors; multiple monitors#monitors; extend the desktop#monitors; primary monitor#monitors; Identify#monitors; arrange monitors#monitors; display driver#driver; safe mode, display driver#driver; NVIDIA#driver; GeForce#driver; Can you see this message#driver; Turn on driver#driver">
 </head><body>
 <h2 style="color:#1f4e9a">Display Properties</h2>
 <p>Display Properties sets the screen resolution, arranges your monitors and
@@ -69,16 +69,28 @@ Click the tab names at the top (or press <kbd>Ctrl</kbd>+<kbd>Tab</kbd>) to
 switch between the two tabs.</p>
 
 <h3 id="driver">If the picture is wrong</h3>
-<p>Halcyon's display drivers (the QEMU and VirtualBox adapters and virtio GPUs
-today) are used whenever such an adapter is found. If one of them cannot
-start, Halcyon keeps showing the picture the computer's firmware set up and
-writes the reason to <code>\HALCYON\BOOT.LOG</code>. To start without the
-display drivers, press <kbd>F8</kbd> at start-up and choose <b>Safe video mode</b>
-(or <b>Safe Mode</b>); to turn one driver off for good, add a line such as
-<code>display.disable=virtio-gpu</code> (or <code>bochs</code>) to
-<code>\HALCYON\SETTINGS.INI</code>. <a href="sysinfo.htm">System
+<p>Halcyon's display drivers (the QEMU and VirtualBox adapters, virtio GPUs,
+and NVIDIA graphics cards from the GeForce 8 to the GeForce 10 series) are
+used whenever such an adapter is found. If one of them cannot start, Halcyon
+keeps showing the picture the computer's firmware set up and writes the
+reason to <code>\HALCYON\BOOT.LOG</code>. To start without the display
+drivers, press <kbd>F8</kbd> at start-up and choose <b>Safe video mode</b> (or
+<b>Safe Mode</b>); to turn one driver off for good, add a line such as
+<code>display.disable=virtio-gpu</code> (or <code>bochs</code>, <code>nv</code>)
+to <code>\HALCYON\SETTINGS.INI</code>. <a href="sysinfo.htm">System
 Information</a> lists the display adapters, their connectors and the monitors
 on them.</p>
+<p><b>NVIDIA graphics cards.</b> The first time Halcyon's own NVIDIA driver
+shows a monitor in a new resolution, it asks <b>"Can you see this
+message?"</b>. Click <b>Yes</b>; if nobody answers within 15 seconds (perhaps
+because the screen went dark), Halcyon goes back to the picture the firmware
+set up. If the computer stops or is switched off while the driver starts,
+Halcyon notices at the next start and leaves the driver off, with a message
+in the corner of the screen; on the <b>Settings</b> tab, <b>Turn on
+driver...</b> tries it again at the next start. To keep using the firmware's
+picture for good, add <code>nv.modeset=0</code> to
+<code>\HALCYON\SETTINGS.INI</code> (Halcyon still lists the card in System
+Information); <code>nv.disable=1</code> leaves the card alone altogether.</p>
 
 <p><b>Related topics:</b> <a href="control.htm">Changing the theme and wallpaper</a> &middot;
 <a href="windows.htm">Working with windows</a></p>

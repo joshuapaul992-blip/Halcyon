@@ -6,7 +6,7 @@ GeForce 10 series (see the roadmap). It is built in steps:
 | Step | What | Status |
 |------|------|--------|
 | 10a | Identification: chip, VRAM, video BIOS and its tables, EDIDs over I2C / DP AUX, System Information, NVREPORT | **this document** |
-| 10b | Modesetting on the NV50 "EVO" display engine (Tesla to Pascal) | to do (headings below) |
+| 10b | Modesetting on the NV50 "EVO" display engine (Tesla to Pascal) | written, host-tested; awaits the GTX 1070 |
 | 10c | Modesetting on the VGA-style CRTCs (Celsius to Curie) | deferred |
 | 10d | Hardware cursor, page flips with vblank interrupts, several monitors | to do |
 | 10e | 2D acceleration, if the speed test says it is needed | to decide |
@@ -21,6 +21,7 @@ The code lives in `kernel/drivers/nv/`:
 | `i2c.c` | the bit-banged I2C master, one AUX transaction in the G94 / GM200 layouts, native AUX and I2C over AUX, EDID over DDC | `nvtest.c` (simulated buses) |
 | `nv.h`, `nv.c` | the kernel side: probe, ROM sources, ports and pads, EDIDs, hot-plug sense; the API for 10b | QEMU test hook only |
 | `report.c` | BOOT.LOG lines, the report text and register dump, System Information rows, `SYS_NV_QUERY` and the frame buffer speed test | QEMU (`nvfake`) |
+| `evo.h`, `evo.c`, `evodp.c`, `evopll.c`, `evoscript.c`, `disp.c` | 10b: the EVO display engine and the modesetting driver (below) | `tests/host/evotest.c`; `disp.c` in QEMU (`nvfake`) |
 
 ![System Information with the QEMU test hook's simulated GTX 1070](m10a-sysinfo.png)
 
@@ -246,8 +247,9 @@ mapping are what it needs to route a connector to a SOR and head.
   and timeouts. Without a card: `nv: no NVIDIA graphics card`.
 - **System Information**: an "NVIDIA graphics" book (only when there is a
   card): the card (name, chip, family, product line, VRAM, VBIOS version
-  and source, bus, "Display driver: firmware frame buffer (native
-  modesetting arrives with M10b)") and below it each connector: type,
+  and source, bus, "Display driver:" the 10b driver's state, e.g.
+  "native (GP102 display engine), in use on DP-1" or "firmware frame
+  buffer; native driver failed: ...") and below it each connector: type,
   outputs, hot-plug sense, the monitor's name, maker, native mode, size and
   how its EDID was read.
 - **NVREPORT.EXE** (`nvreport [/nospeed] [/quiet]`) writes
@@ -353,7 +355,338 @@ Remains for 10a:
 
 ## 10b: Tesla to Pascal modesetting
 
-(to be written)
+10b drives the NV50 "EVO" display engine of Tesla (G80-GT21x, MCP7x),
+Fermi, Kepler, Maxwell and Pascal (GP10x) cards as a native adapter of the
+display core: any mode the monitor's EDID offers, resolution changes
+without a restart, the firmware frame buffer as the fallback. It is a port
+of nouveau's display code (MIT; `nvkm/engine/disp`, `nvkm/subdev/bios`,
+`nvkm/subdev/devinit`, `nvkm/subdev/clk`, `dispnv50`); no firmware is
+loaded. Single-buffered scanout from VRAM with the software cursor; the
+hardware cursor, page flips and several monitors at once are 10d (every
+head and connector is registered already, and a second monitor uses the
+same code, but nothing was done for it).
+
+### Files
+
+| File | What | Host tested |
+|------|------|-------------|
+| `evo.h` | the interface of the parts below (no kernel dependencies) | |
+| `evo.c` | generations, method streams per class, rasters, the object table and context DMAs, the VRAM allocator, the core channel, the takeover, the supervisor, release | `tests/host/evotest.c` |
+| `evodp.c` | DisplayPort: link configurations, bandwidth, transfer unit and watermark, DPCD over AUX, link training | `evotest.c` (simulated sink) |
+| `evopll.c` | the video PLLs: the VBIOS PLL limits table (3.0, 4.0, 5.0), nouveau's GT215 and NV04 calculators, the register sequences | `evotest.c` |
+| `evoscript.c` | the VBIOS display tables (IED output scripts, BIT `U`; DisplayPort, BIT `d`) and the init script interpreter | `evotest.c` |
+| `disp.c` | the kernel side: registration, BAR1 and VRAM, the start guard, takeover, detect / mode_valid / buffers / set_mode, restore, the hot-plug poll | QEMU (`nvfake`) |
+
+### How a mode gets on the screen
+
+**Registration** (`nv_display_probe`, at the end of `nv_init`, read only):
+for each identified card whose chipset has an EVO engine
+(`nv_evo_gen_for`), with a video BIOS and a DCB, unless `nv.modeset=0`, F8
+Safe Mode / safe video or `nv.disable=1`: one adapter `nv` with the card's
+name, `live`, `guarded`; a head per bit of the head mask (`0x612004` and
+`0x022448` on GF119+, two before); one connector per DCB connector with a
+TMDS, DisplayPort or analog output on the chip (`DP-1`, `HDMI-1`,
+`DVI-D-1`, `DVI-I-1`, `VGA-1`; TV outputs, LVDS / eDP panels and external
+encoders are not driven), its heads from the outputs' head masks. The
+display core learns from BAR1 whether the card shows the firmware frame
+buffer.
+
+**enable** (from `display_start`, on the GUI thread):
+
+1. No hardware for the simulated card, no registers, a fused-off display
+   engine (`0x022500` / `0x021C04` bit 0), no BAR1 of at least 64 MiB: fail
+   with the reason.
+2. BAR1 is mapped (uncached); the window is `min(BAR1, VRAM, 4 GiB)`. The
+   firmware frame buffer (`g_bootinfo`) must lie inside it at 32 bpp for
+   restore to work.
+3. VRAM we must not use: the first 2 MiB, the firmware frame buffer (2 MiB
+   pages), the VBIOS shadow (`0x619f04`), the firmware's display objects
+   (`0x610010`), the BAR1 / BAR2 page tables (`0x001704` / `0x001714` when
+   bit 31 is set) and the last 16 MiB of VRAM. A 2 MiB block holds our
+   objects: the instance memory (64 KiB: the object table at its start, two
+   context DMAs after it), the push buffer (4 KiB, in VRAM as nouveau does
+   on Pascal) and the notifier (4 KiB). Buffers get their own 2 MiB pages
+   (the display core sets write-combining per page).
+4. **BAR1 must map VRAM 1:1**: a pattern written through BAR1 at two places
+   in our block must read back through the PRAMIN window (`0x001700`,
+   `0x700000`, VRAM directly) at the same offset, and the firmware frame
+   buffer must read the same both ways. Every new buffer is checked the
+   same way at both ends. Otherwise: "BAR1 does not map VRAM linearly".
+5. The **start guard** (`display_guard_begin`): the marker goes to
+   SETTINGS.INI and BOOT.LOG is saved.
+6. INTx off in the PCI command register, then `nv_evo_takeover`:
+   - the engine's resources and **the firmware's state**: the armed state of
+     every head (raster, pixel clock, depth, core surface) and output
+     resource (owner, protocol, link), which DCB output each armed OR drives
+     (`map_armed`, GM200+ through the SOR routing `0x612308`), the lit head
+     (`nv_evo_find_fw`); all of it logged;
+   - our object table and context DMAs written through BAR1 (GF119 / NV50
+     formats), the BAR flushed (`0x070000`, NV50 `0x00330c`);
+   - the GPU's interrupts masked (`0x000140` = 0; GP100+ `0x000180` all
+     ones);
+   - `nv50_disp_init` / `gf119_disp_init`: the capability copies, the
+     display taken from the VBIOS (`0x6100ac` / `0x610024` bit 8,
+     `0x6194e8`), `0x610010` = our instance, supervisor interrupts on (their
+     status is what is polled), everything else off, underflow reporting off
+     (GF119+);
+   - every OR's "normal" power state on (`0x61c004`, `0x61a004`; 200 ms per
+     wait, not 2 s);
+   - the firmware's core channel stopped if it runs, ours started (push
+     buffer `0x610204` / `0x610494` / `0x611494` on GP102), the notifier's
+     context DMA set and the channel seen to fetch it (GET = PUT).
+   Every register written here is saved first (`nv_evo_saved_t`).
+
+**detect**: the hot-plug line (GPIO), a DisplayPort sink's capabilities
+(DPCD `0x000`, the extended field at `0x2200`, capped by the DCB's lanes and
+rate), the EDID over AUX or DDC (10a's code; AUX is safe now that the GPU
+cannot interrupt), else the copy 10a read at boot. The output used on a
+connector: DisplayPort if a sink answered, else TMDS (unless the EDID says
+analog), else the DAC. HDMI sinks are recognised from the CEA-861 vendor
+block.
+
+**mode_valid**: no interlace; at least 25 MHz; TMDS 165 MHz single link,
+330 MHz dual link (DCB 4.x link 3, not for HDMI sinks), HDMI sinks
+225 MHz on Fermi, 297 MHz on Kepler / GM107, 340 MHz from GM200 (no
+scrambling); DisplayPort: the mode at 24 bits per pixel must fit lanes x
+rate after 8b/10b; DACs 400 MHz; the generation's raster limit.
+
+**set_mode**: the output resource is the DCB output's own OR before GM200;
+from GM200 the SOR already routed to it, else a free one, else one only the
+firmware used (`nvkm_outp_acquire`). One update carries, in nouveau's
+order: at the first mode set the firmware's head off and its OR detached
+(unless we take them over), the head's previous OR detached, then for the
+head the LUT and cursor off, the viewport, the raster and pixel clock, the
+core layer (pitch-linear A8R8G8B8 at the buffer's VRAM offset through the
+VRAM context DMA), base / overlay bounds, dither and procamp off, the
+output resource word (GF119+), the OR control word (owner, protocol, and
+before GF119 polarities and depth), then `SET_NOTIFIER_CONTROL` + `UPDATE`.
+TMDS uses link A or B, dual link at 165 MHz and above when possible; DP
+uses 24 bpp. A DisplayPort output's hybrid pad is held in AUX mode.
+
+**The update** (`nv_evo_submit`): the words go into the push buffer (a
+`JUMP` to 0 when it would run into the last 12 words), the BAR is flushed,
+PUT written. Then, polled, for at most 3 s: the supervisor status
+(`0x6100ac` / `0x610024`), answered as nouveau's `nv50_disp_super` /
+`gf119_disp_super` do:
+
+| Round | For each head whose state changes |
+|-------|-----------------------------------|
+| 1 | read the armed and assembly state; the old OR's IED script OffInt1 |
+| 2 | OffInt2, DisplayPort DisableLT when the OR loses its only head; GM200+ routing; the video PLL of heads whose clock changes; then for the new OR: DisplayPort link training, the IED script OnInt2 for the clock, the RG divider, DisplayPort transfer unit and watermark, the SOR / DAC clock, the G94 TMDS workaround |
+| 3 | OnInt3, the G94 workaround's second half |
+
+then the release word (`0x6101d0` / `0x610030`). The channel's error
+registers are checked all along (method, data, reason logged, cleared);
+the update is done when the notifier's DONE bit is set. Afterwards the
+armed state is read again: which OR drives which output now.
+
+**DisplayPort link training** (`nvkm_dp_train`): the sink woken (`0x600`),
+enhanced framing from the sink, the VBIOS scripts EnableSpread /
+DisableSpread and BeforeLinkTraining, then configurations from most lanes
+and the highest rate down while the data rate fits: the link-rate script,
+the SOR's lanes and rate, lane power, the sink's `LINK_BW_SET`, clock
+recovery (pattern 1, drive levels from the VBIOS DP table for the sink's
+adjust requests, at most 5 tries per swing level) and equalisation
+(pattern 2, 3 with TPS3 from GF119, 4 with TPS4 from GM107; 5 tries), then
+pattern 0, AfterLinkTraining. A failure makes the mode set fail.
+
+**Video PLLs** (`nv_evo_vpll_set`): the limits of `VPLL<head>` from the
+PLL table; NV50-G98 the two-stage calculator and `0x10000611` + N1/M1 +
+P/N2/M2, GT215 / MCP89 `0x50000610` + P/M/N + fractional N, GF100 to
+Pascal P/N/M at `reg + 4` and fN at `reg + 0x10`. A register that is not a
+PLL register is never written. A table 5.0 names no register (nouveau would
+write at 0): the PLL is left to the display engine and the log says so.
+
+**restore** (the display core's fallback): when our channel runs and the
+firmware frame buffer is in BAR1, one update switches our heads off and
+programs the firmware's head again from the state read at takeover (its
+raster, clock, polarities, depth, OR and protocol, the viewport from the
+frame buffer's size to the raster's), scanning out the firmware frame
+buffer (its own pitch word when the pitch is not a multiple of 256), with
+DisplayPort retrained. Then every saved register is put back, except the
+channel, the instance pointer and the VBIOS ownership while our channel
+runs, and the GPU's interrupt enables, which stay masked. If the channel
+never came up, only the registers are put back: the hardware still shows
+the firmware's armed state, as no update was made.
+
+### Generations
+
+| Chipsets | nouveau display | Core class / methods | Registers | SOR state | DisplayPort | Video PLL | Notes |
+|----------|-----------------|----------------------|-----------|-----------|-------------|-----------|-------|
+| 50 (G80) | nv50 | 507d / 507d | NV50 | `0x610b70` | - | NV50 two-stage, fixed map `0x614100` | BAR flush `0x00330c` |
+| 84, 86, 92 | g84 | 827d / 827d | NV50 | `0x610b70` | - | NV50 | |
+| 94, 96, 98 | g94 | 887d / 827d | NV50 | `0x610794` | G94 (lanes 2,1,0,3), 2.7 GHz | NV50 | TMDS workaround |
+| A0 (GT200) | gt200 | 837d / 827d | NV50 | `0x610b70` | - | NV50 | |
+| A3, A5, A8 | gt215 | 857d / 827d | NV50 | `0x610794` | G94 | GT215 | |
+| AA, AC | mcp77 | 887d / 827d | NV50 | `0x610794` | G94 | NV50 | |
+| AF | mcp89 | 857d / 827d | NV50 | `0x610794` | lanes 3,2,1,0 | GT215 | |
+| C0-CF (GF100-GF116) | gt215 | 857d / 827d | NV50 | `0x610794` | G94 | GF100 | |
+| D7, D9 (GF119) | gf119 | 907d / 907d | GF119 | `0x640200` | GF119 (TPS3), 5.4 GHz | GF100 | dither at `0x490` |
+| E4-E7 | gk104 | 917d / 917d | GF119 | `0x640200` | GF119 | GF100 | |
+| F0, F1, 106, 108 | gk110 | 927d / 917d | GF119 | `0x640200` | GF119 | GF100 | |
+| 117, 118 | gm107 | 947d / 917d | GF119 | `0x640200` | GM107 (TPS4, lanes 0-3) | GF100 | |
+| 120, 124, 126 | gm200 | 957d / 917d | GF119 | `0x640200` | GM200 drive | GF100 | SOR routing |
+| 130 (GP100) | gp100 | 977d / 917d | GF119 | `0x640200` | GM200 | GF100 | no DACs |
+| 132-138 (GP102-GP108; GTX 1070: 134) | gp102 | 987d / 917d | GF119, push buffer at `0x611494`, errors at `0x6111f0` | `0x640200` | GM200, 8.1 GHz | GF100 | no DACs |
+
+Volta and later: identification only, as in 10a.
+
+### Interrupts
+
+Halcyon has no NVIDIA interrupt handler and the kernel's model is
+"interrupts only wake, drivers work polled". So while the driver owns the
+display: INTx is off in the PCI command register and the GPU's interrupt
+enables are masked at the top (`PMC_INTR_EN`, `0x000140`; on GP100+ the
+leaf enables through `0x000180`), and stay so after a fallback (nobody
+would answer them). Inside the display engine the supervisor's interrupt
+enables are set as nouveau sets them, so that its status register latches
+the supervisor requests the update loop polls; everything else (channel
+completion, vertical blank, errors) is off and polled from status
+registers. AUX transactions and I2C are therefore always allowed in 10b.
+
+### Safety
+
+- **Nothing is written before display_start**; registration reads only.
+  Before the start marker, the only writes are those of 10a's kind (the
+  PRAMIN window, put back) and the BAR1 test pattern in our own VRAM block.
+- **Bounded everywhere**: two updates in a row that time out give the
+  channel up (later updates, a restore included, fail at once); channel
+  start / stop 2 s, an update with its
+  supervisor rounds 3 s (at most 12 rounds), GET catching up 2 s, BAR flush
+  2 ms, OR power 200 ms per wait (1 ms after the first that ran out), AUX 32
+  DEFERs per transfer, link training 8 configurations and 40 tries, VBIOS
+  scripts 4096 opcodes / 8 levels / 1 s of delays. A register reading all
+  ones or a PRI error ends the step.
+- **Registers**: everything the takeover writes is saved and put back by
+  release; VBIOS scripts may only write `0x00d000-0x00efff` (GPIO, I2C,
+  pads, NV50 PLLs), `0x0c0000-0x0c0fff` and `0x601000-0x603fff` (VGA) and
+  `0x610000-0x61ffff` (the display engine): other writes are refused and
+  logged, POST opcodes (memory, clocks, resets, the NV50 `IO 3c3` PLL
+  sequence) stop the script, PLL and GPIO opcodes are skipped and logged; a
+  video PLL is written only at a PLL register.
+- **The fallback rule** at every step: any error returns an `E_*` with the
+  reason in the adapter's `why`; the display core goes back to the previous
+  configuration or gives the device back (restore) and uses the firmware
+  frame buffer, with the reason in BOOT.LOG, System Information and
+  NVREPORT.
+- **The start guard** (in the display core, for every driver with
+  `guarded`): `display.nv.guard=start` is saved (with BOOT.LOG) right
+  before the first register write. When the desktop is up, a configuration
+  (connectors and modes) confirmed before clears the marker after 10 s;
+  a new one asks "Halcyon now uses its own driver for the NVIDIA GeForce
+  GTX 1070. Can you see this message?" (Yes / No, No is the default for
+  Enter, 15 s), Yes saves it as `display.nv.confirmed` and clears the
+  marker, anything else gives the device back. A marker found at the next
+  start ("the start did not finish": a hang, a crash, a black screen the
+  user switched off) becomes `blocked`: the driver is not started, BOOT.LOG,
+  System Information (adapter "disabled") and a balloon say so, until
+  Display Properties' **Turn on driver...** (Settings tab) or removing the
+  key. A driver that failed after touching the device keeps its marker too.
+  BOOT.LOG is also saved before the first mode set.
+- **Switches**: `nv.disable=1` and F8 Safe Mode (nothing of M10),
+  `nv.modeset=0` (identification only, the firmware frame buffer),
+  `display.disable=nv` (the display core leaves the driver off),
+  `nv.scripts=0` (no VBIOS display scripts: for diagnosis),
+  `display.nv.guard` as above.
+- **Logging**: every step goes to BOOT.LOG with the `nv0:` prefix (the
+  firmware state, the VRAM layout and BAR1 check, each register block, each
+  supervisor round and script with its counts, PLL coefficients, DP
+  training, errors) and to a copy NVREPORT adds to REPORT.TXT ("Native
+  modesetting (M10b): the driver's log of this start").
+
+### Tests
+
+- `tests/host/evotest.c` (`make -C tests/host evo`, in `run.sh`,
+  ASan/UBSan): 41,762 checks. Generations for every chipset; the method
+  streams of one head for 507d, 827d (with a DAC), 907d and 917d compared
+  word by word with sequences written out from nouveau's `head*.c`,
+  `sor*.c`, `dac*.c`, `core507d.c`; head and OR off; rasters (CEA 1080p,
+  CVT-RB 1440p, bad timings); the object table hash and the GF119 / NV50
+  context DMAs, a full table; the VRAM allocator with random holes; PLL
+  tables 3.0, 4.0 and 5.0, the GT215 calculator against values worked out by
+  hand (148.5 MHz: N 115, fN 0, M 1, P 21) and within 0.01 % from 25 to
+  600 MHz, the two-stage calculator within its VCO limits and 0.5 %; DP
+  configurations, bandwidth, the transfer unit and watermark against
+  hand-computed values (1080p60 on 4 x 2.7 GHz: 490 / 1905 symbols,
+  watermark 21) and 2,000 random ones; a test VBIOS with IED and DP tables
+  and scripts: conditions, NOT, RESUME, SUB, REPEAT, macros, the OR / link /
+  head selectors, refused writes, an unknown opcode, an endless JUMP, reads
+  past the end, 3,000 random scripts (they never write outside the
+  allowed registers). A **simulated display engine** (both register
+  layouts) executes the push buffer, resolves handles through our object
+  table, runs three supervisor rounds per update, arms the state and writes
+  the notifier; with a simulated DisplayPort sink. On it, for GP102, GP100,
+  GM200, GM107, GK104, GF119, GF104, GT215, G94, G84 and G80: the takeover
+  (the firmware's head and output found, the VBIOS ownership, the
+  instance pointer, the interrupt masks, the channel running), a 1080p mode
+  set (three supervisor rounds, the IED scripts with the right OR / head,
+  the refused write not done, the video PLL coefficients, DP training and
+  transfer unit, GM200 routing moved to another SOR), the firmware's mode
+  armed again by restore, the saved registers back. And the hangs: a
+  channel that never starts, never fetches, an update without notifier,
+  without supervisor, a channel error (both layouts), a VBIOS that keeps
+  the display, a dead card, a stuck BAR flush, a layout outside VRAM, a
+  stream too long, 40 updates wrapping the push buffer; DP: a sink that
+  needs more swing (the drive levels from the VBIOS table), one that never
+  locks, none, one too small, the DCB capping the rate.
+- QEMU: `nvfake` (UEFI) registers the simulated GTX 1070 (GP102 engine, 4
+  heads, 5 connectors) and must log that it is not touched, after a dry run
+  of the first mode set from its EDID (the method stream is built and
+  logged, 56 words for 1920x1200 on DP-1, nothing is sent); NVREPORT says
+  "Display driver: firmware frame buffer..." and adds the driver's log;
+  `nvfake+nvoff` (BIOS) checks `nv.modeset=0`. The start guard is tested
+  on the virtio GPU through a test hook (`opt/halcyon/displayguard`):
+  `guard` (nobody confirms: back to the firmware frame buffer after 15 s,
+  the marker stays) and `guardblock` (a marker from the last boot: not
+  started, the marker becomes `blocked`).
+
+### Verified only on the host
+
+Everything that touches a real card: the register addresses and
+sequences (from nouveau, which runs on these cards; our simulator models
+nouveau's view of them, not the silicon), the BAR1 / PRAMIN behaviour, the
+VBIOS tables of real boards (the parsers were tested on generated tables
+in nouveau's layouts), whether the GOP's state is as `nv_evo_find_fw`
+expects, link training against real sinks, the PLL limits of real tables
+(a version 5.0 table on Pascal would leave the pixel clock to the display
+engine), the timing of everything, and the restore path on hardware.
+
+### What to check on the GTX 1070
+
+1. Boot from the stick (UEFI). The screen flickers once when the driver
+   takes over. Expect "Halcyon now uses its own driver ... Can you see this
+   message?": click **Yes**. If the screen is dark, wait 15 s: the
+   firmware's picture should come back by itself.
+2. Display Properties: the monitor's own resolutions (e.g. 2560 x 1440)
+   are offered; try one ("Do you want to keep these settings?").
+3. If the screen stays dark or the machine stops: switch off; at the next
+   start Halcyon leaves the driver off and says so. Then send
+   `\HALCYON\BOOT.LOG` and `BOOTPREV.LOG` (the start that went wrong) and
+   NVREPORT's folder (run `NVREPORT` again: REPORT.TXT has the driver's log
+   and the register dump after the fallback).
+4. Try each connector (DisplayPort, HDMI, DVI) if you can; `nv.scripts=0`
+   in SETTINGS.INI is worth one try if a connector stays dark ("Turn on
+   driver..." in Display Properties first).
+5. If anything goes badly wrong: `nv.modeset=0` keeps the firmware's
+   picture, `nv.disable=1` leaves the card alone.
+
+What to send back: BOOT.LOG, BOOTPREV.LOG, the NVREPORT folder, which
+connector and monitor (with its resolution), and what the screen did.
+
+### Not done (10b)
+
+- Hardware cursor, page flips, vertical blank, several monitors at once
+  (10d; a second head would use the same code, untested).
+- HDMI mode (infoframes, audio, scrambling above 340 MHz): HDMI sinks get
+  a DVI-mode signal. LVDS / eDP panels, TV outputs, external encoders
+  (PIOR), MST, LTTPRs, eDP link rate tables, DisplayPort retraining after
+  a sink's IRQ, HPD interrupts (polled once a second from the GPIO lines).
+- The VBIOS PLL / GPIO script opcodes are skipped (the driver programs the
+  video PLLs itself); scripts on pre-NV50 boards (10c).
+- Restore cannot bring back an interlaced or 24 bpp firmware mode; after a
+  failed takeover the display engine stays with the VBIOS's ownership bit
+  cleared (nouveau never gives it back either).
+- Not verified on any real card yet (above).
 
 ## 10d: cursor, page flips, several monitors
 

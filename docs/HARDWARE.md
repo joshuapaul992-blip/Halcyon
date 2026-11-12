@@ -297,17 +297,18 @@ What may go wrong on a real PC:
 
 Halcyon draws on every graphics card through the frame buffer the firmware
 set up (VESA on a BIOS, GOP on UEFI). For NVIDIA cards a native driver is
-being written (milestone M10); its first step only **identifies** the card
-and reads, never changes, what is on screen. "Tested" below means with
-generated video BIOS images and simulated I2C / DisplayPort buses on the
-host (`tests/host/nvtest.c`) and a simulated card in QEMU; no real NVIDIA
-card has run this code yet.
+being written (milestone M10): its first step (10a) **identifies** the card
+and reads, never changes, what is on screen; the second (10b) **sets modes**
+on cards from the GeForce 8 to the GeForce 10 series. "Tested" below means
+with generated video BIOS images and simulated I2C / DisplayPort buses and a
+simulated display engine on the host (`tests/host/nvtest.c`, `evotest.c`)
+and a simulated card in QEMU; no real NVIDIA card has run this code yet.
 
 | Generation | Cards | Identified | Video BIOS read from | Monitors (EDID) | Native modesetting |
 |------------|-------|------------|----------------------|-----------------|--------------------|
 | Celsius, Kelvin, Rankine, Curie (NV1x-NV4x, G7x) | GeForce 256 to GeForce 7 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C through the CRTC registers (C51: its own I2C) | Deferred (M10c) |
-| Tesla (G80-GT21x, MCP7x) | GeForce 8, 9, 200, 300 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C ports; DisplayPort AUX from G94 on | M10b |
-| Fermi, Kepler, Maxwell, Pascal | GeForce 400 to GeForce 10 | Yes (untested; the GTX 1070 is the test card) | PRAMIN, PROM (with IFR data), ROM BAR, C0000 | I2C ports, hybrid pads, DisplayPort AUX (GM200 layout from GM20x) | M10b |
+| Tesla (G80-GT21x, MCP7x) | GeForce 8, 9, 200, 300 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C ports; DisplayPort AUX from G94 on | Written (M10b), untested: VGA, DVI (dual link), DisplayPort from G94 |
+| Fermi, Kepler, Maxwell, Pascal | GeForce 400 to GeForce 10 | Yes (untested; the GTX 1070 is the test card) | PRAMIN, PROM (with IFR data), ROM BAR, C0000 | I2C ports, hybrid pads, DisplayPort AUX (GM200 layout from GM20x) | Written (M10b), untested: DisplayPort, DVI / HDMI (DVI-mode signal), VGA up to Maxwell |
 | Volta, Turing and later | Titan V, GeForce 16, RTX | Named only: "Turing or later: not supported until Halcyon 1.1" | - | - | - |
 
 What it finds is in System Information (an "NVIDIA graphics" book with the
@@ -337,6 +338,30 @@ verbose boot starts with `nv`), add `nv.disable=1` to
 `BOOT.LOG`. `nv.i2c=0` skips only the monitor part (I2C and DisplayPort
 AUX), `nv.prom=0` and `nv.rombar=0` two of the places the video BIOS is
 read from.
+
+**Then try the native driver (M10b)** on the same PC; the card is the
+first to run it, so expect surprises and please report them:
+
+1. Start Halcyon from the stick (UEFI). When the desktop appears on
+   Halcyon's own driver it asks **"Can you see this message?"**: click
+   **Yes**. If the screen is dark, wait 15 seconds: the firmware's picture
+   comes back by itself.
+2. In Display Properties (Settings) the monitor's own resolutions should be
+   offered; try one, and a second connector (DisplayPort, HDMI, DVI) if you
+   can.
+3. If the screen stays dark or the PC stops, switch it off and on: Halcyon
+   notices that the driver's start did not finish, leaves it off and says
+   so in a balloon. Run `NVREPORT` again (its REPORT.TXT then holds the
+   driver's log and the registers after the fallback).
+4. Send back `\HALCYON\BOOT.LOG`, `\HALCYON\BOOTPREV.LOG`, the
+   `\HALCYON\NVREPORT` folder, which connector and monitor (and its
+   resolution) you used and what the screen did.
+
+Switches in `\HALCYON\SETTINGS.INI`: `nv.modeset=0` keeps the firmware's
+picture (the card is still identified), `nv.scripts=0` runs no video BIOS
+display scripts (one try if a connector stays dark), `display.disable=nv`
+leaves the driver off, `display.nv.guard=` (empty) or **Turn on driver...**
+in Display Properties turns it on again after a start that did not finish.
 
 What may go wrong: the register addresses come from nouveau (Linux's
 open-source driver) and are used the way it uses them, but nothing here has
