@@ -142,31 +142,64 @@ static const char *ctype(int t) {
     return "unknown";
 }
 
+static void rate(const hal_nvfbtest_t *t, unsigned long long *mbs10, unsigned long long *fps10, unsigned *cpu) {
+    unsigned long long us = t->us ? t->us : 1;
+    *mbs10 = t->bytes * 10 / us;                                   /* bytes/us = MB/s */
+    *fps10 = t->frame_bytes ? t->bytes * 10000000ull / t->frame_bytes / us : 0;
+    *cpu = (unsigned)(t->cpu_us * 100 / us);
+}
+
 static void speed(void) {
     hal_nvfbtest_t t[NV_FBTESTS];
-    int n = 0;
+    int ok[NV_FBTESTS], n = 0;
     for (int i = 0; i < NV_FBTESTS; i++) {
+        memset(&t[i], 0, sizeof t[i]);
         long r = nv_query(NVQ_FBTEST, i, &t[i], sizeof t[i]);
-        if (r < 0) { say("  test %d: error %ld\n", i, r); break; }
+        ok[i] = r >= 0;
+        if (r < 0 && i < NV_FBTESTS_CPU) { say("  test %d: error %ld\n", i, r); break; }
         n++;
     }
     if (!n) return;
     say("  Mode %ux%u, %u bits per pixel, pitch %u bytes: %llu KiB per frame. Frame buffer page attribute: %s.\n",
         t[0].width, t[0].height, t[0].bpp, t[0].pitch, t[0].frame_bytes >> 10, ctype(t[0].cache_type));
-    say("\n  %-40s %10s %12s %8s\n", "test", "MB/s", "frames/s", "ms");
+    say("\n  %-40s %10s %12s %8s %9s\n", "test", "MB/s", "frames/s", "ms", "CPU busy");
     for (int i = 0; i < n; i++) {
-        unsigned long long us = t[i].us ? t[i].us : 1;
-        unsigned long long mbs10 = t[i].bytes * 10 / us;                /* bytes/us = MB/s */
-        unsigned long long fps10 = t[i].frame_bytes ? t[i].bytes * 10000000ull / t[i].frame_bytes / us : 0;
-        say("  %-40s %8llu.%llu %10llu.%llu %8llu\n", t[i].name, mbs10 / 10, mbs10 % 10, fps10 / 10, fps10 % 10, us / 1000);
-        printf("  %-40s %6llu.%llu MB/s, %llu.%llu frames/s\n", t[i].name, mbs10 / 10, mbs10 % 10, fps10 / 10, fps10 % 10);
+        unsigned long long mbs10, fps10;
+        unsigned cpu;
+        if (!ok[i]) {
+            say("  %-40s not available: %s\n", t[i].name, t[i].note[0] ? t[i].note : "?");
+            printf("  %-40s not available\n", t[i].name);
+            continue;
+        }
+        rate(&t[i], &mbs10, &fps10, &cpu);
+        say("  %-40s %8llu.%llu %10llu.%llu %8llu %8u %%\n", t[i].name, mbs10 / 10, mbs10 % 10, fps10 / 10, fps10 % 10, t[i].us / 1000, cpu);
+        printf("  %-40s %6llu.%llu MB/s, %llu.%llu frames/s, CPU %u %%\n", t[i].name, mbs10 / 10, mbs10 % 10, fps10 / 10, fps10 % 10, cpu);
+    }
+    if (n > NV_FBTESTS_CPU) {
+        /* side by side: the CPU's way and the copy engine's way of the same work */
+        static const struct { int cpu, eng; const char *what; } pair[] = {
+            { 0, 6, "fill the screen" }, { 2, 7, "RAM to screen (the compositor)" }, { 3, 8, "screen to screen" } };
+        say("\n  %-36s %12s %10s  %17s %10s\n", "Side by side (M10e)", "CPU MB/s", "CPU busy", "copy engine MB/s", "CPU busy");
+        for (int k = 0; k < 3; k++) {
+            unsigned long long m1, f1, m2, f2;
+            unsigned c1, c2;
+            rate(&t[pair[k].cpu], &m1, &f1, &c1);
+            if (ok[pair[k].eng]) {
+                rate(&t[pair[k].eng], &m2, &f2, &c2);
+                say("  %-36s %10llu.%llu %8u %%  %15llu.%llu %8u %%\n", pair[k].what, m1 / 10, m1 % 10, c1, m2 / 10, m2 % 10, c2);
+            } else {
+                say("  %-36s %10llu.%llu %8u %%  %20s\n", pair[k].what, m1 / 10, m1 % 10, c1, "not available");
+            }
+        }
+        if (ok[6] || ok[7] || ok[8]) say("  Copy engine: %s\n", t[ok[7] ? 7 : ok[6] ? 6 : 8].note);
+        else say("  Copy engine: %s\n", t[6].note[0] ? t[6].note : "not available");
     }
     say("\n  frames/s: how many whole screens that speed moves in a second. MB = 1,000,000 bytes.\n"
+        "  CPU busy: the share of the time the processor worked. A copy engine works by itself: the\n"
+        "  processor only queues the work (the test waits for it; the desktop does not).\n"
         "  The desktop draws into memory and copies the changed parts to the screen (\"RAM to screen\");\n"
-        "  it never reads the screen. Moving a window with a screen-to-screen copy would need the\n"
-        "  \"screen to screen\" speed, which reads the frame buffer: reads are uncached and slow on every card.\n"
-        "  If RAM to screen stays well above 60 frames/s, CPU drawing is fast enough and 2D acceleration\n"
-        "  (M10e) can wait.\n");
+        "  it never reads the screen. With the copy engine (M10e) those copies, the page flips'\n"
+        "  catching up between the two buffers and new buffers' fills are done by the GPU.\n");
 }
 
 static const char readme[] =
@@ -223,7 +256,7 @@ int main(int argc, char **argv) {
     if (!gpus) say("\nNo NVIDIA graphics card was identified (or nv.disable=1 is set in SETTINGS.INI).\n");
     printf("%d NVIDIA card%s; writing %s\n", gpus, gpus == 1 ? "" : "s", DIR);
     for (int g = 0; g < gpus; g++) card(g);
-    say("\nFrame buffer speed (for M10e: is drawing with the CPU fast enough?)\n");
+    say("\nFrame buffer speed: the CPU and, with M10e, the copy engine\n");
     if (nospeed) say("  skipped (/nospeed)\n");
     else {
         if (!quiet && msgbox(0, "NVREPORT", "NVREPORT now measures how fast the screen can be drawn.\n\n"

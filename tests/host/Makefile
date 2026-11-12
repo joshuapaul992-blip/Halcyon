@@ -206,10 +206,18 @@ $(OUT)/layouttest: layouttest.c $(ROOT)/kernel/gui/layout.c $(ROOT)/kernel/gui/l
 	@mkdir -p $(OUT)
 	gcc $(CFLAGS) layouttest.c $(ROOT)/kernel/gui/layout.c -o $@
 
-display: $(OUT)/displaytest $(OUT)/modetest $(OUT)/layouttest
+# M10e: the display core's presentation with acceleration (display.c with a
+# fake adapter and copy engine): flip ordering, pixels, the fallback
+PRESENTSRCS := $(addprefix $(ROOT)/kernel/drivers/,display.c modes.c edid.c) $(ROOT)/kernel/gui/layout.c
+$(OUT)/presenttest: presenttest.c $(PRESENTSRCS) $(ROOT)/kernel/drivers/display.h $(ROOT)/kernel/drivers/modes.h Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) presenttest.c $(PRESENTSRCS) -o $@
+
+display: $(OUT)/displaytest $(OUT)/modetest $(OUT)/layouttest $(OUT)/presenttest
 	$(OUT)/displaytest
 	$(OUT)/modetest
 	$(OUT)/layouttest
+	$(OUT)/presenttest
 
 hid: $(OUT)/hidtest
 	$(OUT)/hidtest $(HIDARGS)
@@ -236,6 +244,16 @@ $(OUT)/evotest: evotest.c $(EVOSRCS) $(EVOHDRS) Makefile
 
 evo: $(OUT)/evotest
 	$(OUT)/evotest $(EVOARGS)
+
+# M10e: PFIFO, the GPU's page tables and the copy engine (fifo.c) against a
+# simulated PFIFO, MMU and copy engine (fifotest.c)
+FIFOSRCS := $(ROOT)/kernel/drivers/nv/fifo.c
+$(OUT)/fifotest: fifotest.c $(FIFOSRCS) $(ROOT)/kernel/drivers/nv/fifo.h $(NVHDRS) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) fifotest.c $(FIFOSRCS) -o $@
+
+fifo: $(OUT)/fifotest
+	$(OUT)/fifotest $(FIFOARGS)
 
 $(OUT)/fuzz_nv: fuzz_nv.c $(NVSRCS) $(NVHDRS) Makefile
 	@mkdir -p $(OUT)

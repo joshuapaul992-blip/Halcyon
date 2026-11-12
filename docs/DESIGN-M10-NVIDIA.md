@@ -9,7 +9,7 @@ GeForce 10 series (see the roadmap). It is built in steps:
 | 10b | Modesetting on the NV50 "EVO" display engine (Tesla to Pascal) | written, host-tested; awaits the GTX 1070 |
 | 10c | Modesetting on the VGA-style CRTCs (Celsius to Curie) | deferred |
 | 10d | Hardware cursor, page flips at vertical blank, several monitors | written, host-tested; awaits the GTX 1070 |
-| 10e | 2D acceleration, if the speed test says it is needed | to decide |
+| 10e | Acceleration with the copy engine (Kepler to Pascal, no firmware): uploads, copies and fills for the display core | written, host-tested; awaits the GTX 1070 |
 
 The code lives in `kernel/drivers/nv/`:
 
@@ -23,6 +23,8 @@ The code lives in `kernel/drivers/nv/`:
 | `report.c` | BOOT.LOG lines, the report text and register dump, System Information rows, `SYS_NV_QUERY` and the frame buffer speed test | QEMU (`nvfake`) |
 | `evo.h`, `evo.c`, `evodp.c`, `evopll.c`, `evoscript.c`, `disp.c` | 10b: the EVO display engine and the modesetting driver (below) | `tests/host/evotest.c`; `disp.c` in QEMU (`nvfake`) |
 | `evochan.c` | 10d: base and cursor channels, the vertical blank, output resources for several heads | `tests/host/evotest.c` |
+| `fifo.h`, `fifo.c` | 10e: PFIFO (runlist, channel, RAMFC, USERD, GPFIFO), the GPU's page tables (GF100 / GM200 / GP100), the copy engine's methods, fences | `tests/host/fifotest.c` (simulated PFIFO, MMU, copy engine) |
+| `accel.h`, `accel.c` | 10e: the kernel side: the guarded, deferred bring-up, the self test, the display core's accelerated operations | QEMU (`nvfake`: dry run only) |
 
 ![System Information with the QEMU test hook's simulated GTX 1070](m10a-sysinfo.png)
 
@@ -692,7 +694,8 @@ Also seen: "firmware frame buffer not in BAR1", so a fallback could only
 switch the heads off. The log line now prints the loader's frame-buffer
 address and depth to find out why. The CPU drawing speed test gave 205
 frames/s for RAM-to-screen copies at 2560x1440, so 10e (2D acceleration)
-is not needed for the desktop.
+is not needed for the desktop's speed; 10e (below) takes the copies off the
+CPU instead.
 
 ### What to check on the GTX 1070
 
@@ -1058,6 +1061,298 @@ card.
   limited to one head may find it taken).
 
 
-## 10e: 2D acceleration
+## 10e: acceleration with the copy engine
 
-(to be written: decided from NVREPORT's frame buffer speed test on the GTX 1070)
+The speed test on the GTX 1070 (10b) showed that the CPU alone is fast
+enough for the desktop: 205 frames/s for RAM-to-screen copies at
+2560x1440. 10e takes that work off the CPU: the display core's copies of
+damaged rectangles from the desktop surface in RAM into the scanout
+buffers, the page flips' catching up between a head's two buffers, and the
+fills of new buffers go to one of the GPU's **copy engines** (CE / LCE),
+fed through one PFIFO channel. CPU copies stay the fallback for everything.
+
+**No firmware.** The 2D engine of PGRAPH would be the natural blitter, but
+on Pascal (and from GM20x) PGRAPH only runs with NVIDIA-signed FECS /
+GPCCS firmware loaded through ACR secure boot: a binary blob on the image
+and a large amount of work. That stays a later option. The copy engines of
+GK104 to GP108 are fixed-function: nouveau creates them without microcode
+(`nvkm/engine/ce/gk104.c`, `gm107.c`, `gm200.c`, `gp100.c`, `gp102.c`:
+`nvkm_engine_new_`, no falcon), and a channel on a copy engine's own
+runlist is scheduled by the host alone (no context switch firmware).
+PGRAPH, the PMU and the secure boot paths are never touched.
+
+### Generations
+
+| Chipsets | nouveau fifo | Channel class | Copy engine class | Page tables | Notes |
+|----------|--------------|---------------|-------------------|-------------|-------|
+| E4, E6, E7 (GK104-GK107) | gk104 | a06f | a0b5 (KEPLER_DMA_COPY_A) | GF100, 2 levels | runlist in `0x800004`, 4096 channels |
+| F0, F1 (GK110, GK110B) | gk110 | a16f | a0b5 | GF100 | |
+| 106, 108 (GK208B, GK208) | gk208 | a06f | a0b5 | GF100 | PBDMA timeout `0x04012c`, 1024 channels |
+| 117, 118 (GM107, GM108) | gm107 | a16f | b0b5 (MAXWELL_DMA_COPY_A) | GF100 | instance pointer in the runlist, 2048 channels |
+| 120, 124, 126 (GM200-GM206) | gm200 | b06f | b0b5 | GM200 (per-instance big pages) | channels from `0x002008`, PBDMAs from `0x002004` |
+| 130 (GP100) | gp100 | c06f | c0b5 (PASCAL_DMA_COPY_A) | GP100, 5 levels ("VER2") | every channel in a channel group |
+| 132-138 (GP102-GP108; GTX 1070: 134) | gp100 | c06f | c1b5 (PASCAL_DMA_COPY_B) | GP100 | |
+
+Not covered, and why:
+
+- **Fermi** (GF100-GF119): its copy engines run falcon microcode (nouveau
+  ships it as generated source, `nvkm/engine/ce/fuc/gf100.fuc3.h`, about
+  600 lines of hex words, loaded through the falcon's code ports), and
+  Fermi's PFIFO is another design (`gf100.c`: fixed engine slots, its own
+  runlist and channel registers at `0x003000`, engine contexts for the
+  copy engines in the instance block). Porting both is not small, so 10e
+  stops at Kepler.
+- **Tesla**: G80-G98 have no copy engine, GT215 and later one with falcon
+  microcode, and the NV50 PFIFO is different again (skipped, as allowed).
+- Tegra parts (GK20A, GM20B, GP10B) have no PCI display; Volta and later
+  are outside M10.
+
+`nv_fifo_gen_for` gives each refusal its reason; BOOT.LOG says it
+("nv0: 10e: no acceleration: Fermi: the copy engines run falcon microcode
+...").
+
+### Bring-up
+
+`accel.c` waits until the display driver's start guard is done with the
+adapter (`display_guard_settled`: the desktop runs on the driver and its
+picture was confirmed, or a confirmed configuration ran for 10 seconds)
+and at least one head is lit. Then, once per start, on the GUI thread
+(`nvd_poll`):
+
+1. The **acceleration marker** `display.nv.accel.guard=start` is saved in
+   SETTINGS.INI with BOOT.LOG (`display_accel_guard_begin`). A marker left
+   by the last start ("its bring-up did not finish": a hang) becomes
+   `blocked` and acceleration stays off, the driver itself runs as usual.
+   The marker goes 10 seconds after the self test passed, or at a clean
+   shutdown or restart; a bring-up that failed (cleanly) keeps it too, so
+   the next start does not try again. Removing the key tries again.
+2. Two 2 MiB blocks of VRAM from 10b's allocator, inside BAR1 and checked
+   to be mapped 1:1 through PRAMIN like 10b's own: **USERD** (a block of
+   its own, because BAR1 writes anywhere in `channels x 0x200` bytes from
+   its start are taken as channel controls) and the **channel block**:
+   instance block (4 KiB), runlist, GPFIFO (512 entries), semaphore,
+   scratch for the self test, push ring (64 KiB), page tables (1.75 MiB
+   pool). A 4 KiB page of system RAM becomes the flush page (`0x100c10`).
+3. PCI bus mastering on if the firmware left it off (the copy engine reads
+   system RAM); put back when the engine stops.
+4. `nv_fifo_start` (`fifo.c`, nouveau's order):
+   - the **device topology** (`0x022700`, `gk104_top_parse`): engines,
+     their runlists, reset bits and fault ids; the copy engine chosen is
+     the first one whose runlist has no GR engine (never the GRCE);
+   - **PMC_ENABLE** (`0x000200`): PFIFO (bit 8) and the copy engine's
+     reset bit on, if off (other bits untouched);
+   - the PBDMA serving that runlist (`0x002390 + n * 4`), enabled in
+     `0x000204` if needed, initialised as `gk104_runq_init` /
+     `gk208_runq_init` (`0x04013c`, the interrupt status cleared and
+     enables set: they only latch, the GPU's interrupts stay masked at PMC
+     as in 10b);
+   - PFIFO: USERD through BAR1 (`0x002254 = 0x10000000 | USERD >> 12`),
+     its interrupt status cleared and enables set (`0x002100`,
+     `0x002140`), the copy engine's old status cleared;
+   - the **page tables** (below), invalidated for our directory only
+     (`0x100cb8`, `0x100cec`, `0x100cbc`; never "all directories": the
+     firmware's BAR1 mappings are left alone);
+   - a free **channel id** among the first 64 (`0x800000 + id * 8` not
+     bound, not enabled), its USERD slot, its **instance block** and
+     **RAMFC** exactly as `gk104_chan_ramfc_write` (`0xface` signature,
+     USERD address, GPFIFO address and size, the page directory at
+     `0x200` and the limit at `0x208`);
+   - **bind** (`0x800004` runlist bits before GM107, `0x800000` instance
+     pointer), **start** (`0x800004 |= 0x400`), the **runlist** (a channel
+     group entry first on Pascal, the instance pointer in the channel
+     entry from GM107; `0x002270`, `0x002274`, pending in `0x002284 +
+     runlist * 8`);
+   - the first submission: 32 NOPs (nouveau's skips), `SET_OBJECT` with
+     the copy engine's class on subchannel 4, a semaphore release that must
+     come back within 200 ms.
+   Every register written is saved first and put back by `nv_fifo_stop`.
+5. A **self test**: a 64 x 16 fill, a copy of it within VRAM and a copy of
+   a pattern from system RAM, read back through BAR1. Which of them came
+   out right decides what the display core gets (uploads are required).
+6. `display_accel_ready`: the display core presents through the copy
+   engine from now on (DESIGN-M10-DISPLAY.md, "Acceleration").
+
+### The address space
+
+One small GPU virtual address space for the channel, limit 12 GiB:
+
+| VA | What | Pages |
+|----|------|-------|
+| 0 - 4 GiB | nothing (a stray address faults) | |
+| 4 GiB + VRAM offset | VRAM `[0, window)` 1:1 (the BAR1 window, at most 4 GiB) | GP100: 2 MiB pages in PD0; GF100 / GM200: big pages (64 or 128 KiB as the MMU is set: `0x100c80`) |
+| 8 GiB + ... | the desktop surface (system RAM), **read only**, up to 256 MiB | 4 KiB pages, coherent |
+
+Formats, as nouveau writes them (`vmmgf100.c`, `vmmgm200.c`,
+`vmmgp100.c`):
+
+- **GP100**: PD3 (4 entries) -> PD2 -> PD1 (8 bytes, `pt >> 4 | VRAM << 1`)
+  -> PD0 (16-byte dual entries: big table low, small table high; or a
+  2 MiB PTE in the low half) -> small tables of 512 PTEs. PTE: `addr >> 4 |
+  VALID | aperture << 1 | VOL << 3 | RO << 6` (system RAM: aperture 2,
+  coherent, VOL, RO). Directory base `| VER2 (bit 10) | 64 KiB (bit 11)`.
+- **GF100 / GM200**: one directory of 8-byte entries (128 MiB each with
+  128 KiB big pages, 64 MiB with 64 KiB), the big table in the low word
+  (`1 | lpt >> 8`), the small one in the high word (`1 << 32 | spt <<
+  24`). PTE: `addr >> 8 | VALID | RO << 2 | VOL << 32 | aperture << 33`.
+  GM200 in per-instance mode with 64 KiB pages sets bit 11 of the base.
+
+The window onto system RAM is remapped (and the TLB invalidated) when the
+desktop surface changes; the display core drains first. The copy engine
+cannot write system RAM at all: all writes go to VRAM.
+
+### Submissions and completion
+
+Work is queued as method words (`nv_fifo_copy`, `nv_fifo_fill`), then
+`nv_fifo_submit` appends a **host semaphore release** (`SEMAPHOREA..D`:
+release after the engine is idle, 16 bytes; nouveau's `nvc0_fence_emit32`
+without the non-stall interrupt nobody would answer), copies the words into
+the push ring, writes a GPFIFO entry, flushes BAR1 (`0x070000`) and writes
+GP_PUT into USERD through BAR1. The fence is the semaphore's payload.
+`nv_fifo_poll` reads the semaphore (VRAM through BAR1) and the error
+registers; nothing is interrupt-driven.
+
+Methods (subchannel 4), word for word nouveau's use:
+
+| Operation | Methods |
+|-----------|---------|
+| copy (`nve0_bo_move_copy`) | `OFFSET_IN_UPPER .. LINE_COUNT` (8 words: source, destination, pitches, line length in bytes, lines), `LAUNCH_DMA` = `0x386` (non-pipelined, flush, pitch layouts, multi-line) |
+| fill (`nvc0b5_migrate_clear`, as a rectangle) | `SET_REMAP_CONST_A / B / COMPONENTS` (`0x00030004`: one 4-byte component = constant A), the offsets (source = destination, never read), pitches, line length in pixels, lines, `LAUNCH_DMA` = `0x786` (+ remap) |
+
+Non-pipelined launches keep the order the display core relies on (a copy
+from the front buffer before the uploads into the same back buffer).
+
+**Bounds**: a register wait (runlist, preempt, TLB invalidate) 100 ms, a
+BAR flush 2 ms, a fence 200 ms from its submission (the display core's own
+bound is 250 ms), no room in the push ring 200 ms. **Errors** watched on
+every poll: PFIFO's status (MMU fault with the fault unit's address and
+reason when it is our channel, PBDMA errors with method and data,
+scheduler, bind, channel switch, flush timeout), the copy engine's status
+and launch error (`0x104410` / `0x104418` on Pascal, `0x104908` /
+`0x104f14` before), a register reading all ones. Any of them, or a fence
+that does not come back: the channel is disabled (`0x800004 |= 0x800`),
+preempted (`0x002634`, its group on Pascal), an empty runlist submitted,
+the channel unbound, every saved register put back, bus mastering off
+again if we turned it on; the display core redraws with the CPU and logs
+why. Acceleration stays off for the rest of the session.
+
+### Settings and logs
+
+- `nv.accel=0`: no acceleration (the driver runs as 10d).
+- `display.nv.accel.guard`: the marker above (`start` while the bring-up
+  runs, `blocked` after one that did not finish; remove the key to try
+  again). Display Properties' **Turn on driver...** is for the driver's
+  own guard (`display.nv.guard`).
+- `nv.disable=1`, `nv.modeset=0`, F8 Safe Mode, `display.disable=nv`:
+  nothing of 10e either; `nv.flip=0`, `nv.hwcursor=0`, `nv.heads=N` work
+  as before (with `nv.flip=0` the uploads go straight into the buffer on
+  screen).
+- BOOT.LOG (`nv0:`): the plan at registration ("10e: copy engine
+  acceleration (GP100 (GP102 copy engine) fifo, class c1b5, GP100 page
+  tables): starts once the desktop runs on the driver"), the topology,
+  PMC_ENABLE, the PBDMA, the page tables and their size, the channel and
+  its registers, the first semaphore's time, the self test with the values
+  read back, "acceleration in use", and every failure with the registers
+  that matter (`nv_fifo_state`: channel, GP_GET / GP_PUT, semaphore, engine
+  status, PBDMA status, PFIFO status). The display core logs "display:
+  DP-1: 100 updates presented through acceleration (...)".
+- System Information: "Acceleration: in use: copy engine 0 (class c1b5);
+  N uploads, N copies, N fills" or why it is off, for the NVIDIA card and
+  for each display adapter.
+- NVREPORT: "Acceleration (M10e)" in the card's summary, a "Copy engine
+  acceleration (M10e)" section (state, channel, runlist, PBDMA, page
+  tables, counters, registers, the last problem), and the speed test runs
+  the copy engine's fill, RAM to screen (the desktop surface, so the
+  screen does not change) and screen to screen next to the CPU's, with
+  the CPU time each used ("CPU busy": the copy engine's tests count only
+  queueing and submitting, not the polled wait).
+
+### Tests
+
+- `tests/host/fifotest.c` (`make -C tests/host fifo`, in `run.sh`,
+  ASan/UBSan): 22,486 checks. Generations for every chipset (and the
+  refusals with their reasons); the topology tables of a GK104 and a GP104
+  (LCEs) board, the GRCE never chosen; the method streams word for word
+  (SET_OBJECT, copy, fill, release, GPFIFO entries); page tables of the
+  three formats against entries worked out by hand from nouveau's
+  formulas. A **simulated GPU**: PMC, PBDMAs with their runlist masks,
+  USERD through BAR1 (the simulated PBDMA refuses a USERD the BAR1 window
+  does not cover), the instance block and RAMFC read the way the PBDMA
+  reads them (signature, GPFIFO, USERD, page directory), runlists checked
+  per generation (groups, instance pointers, runqueue), an MMU that walks
+  both formats with its own code and keeps a TLB (a remap without
+  invalidate visibly copies stale data), a host that executes GPFIFO
+  entries and method headers (incrementing, non-incrementing, immediate,
+  NOPs), semaphores with "wait for idle", and a copy engine that executes
+  pitch copies and remapped fills on simulated VRAM and system RAM,
+  checks pitches and faults on read-only or unmapped pages. On GK104,
+  GK110, GK208, GM107, GM204, GP100 and GP104: the bring-up, 400 rounds of
+  random uploads, VRAM copies and fills pixel-compared with a reference,
+  wrapping the push ring and GPFIFO; the system RAM window moved; every
+  register put back. Hangs: a dead card, no copy engine, only a GRCE, no
+  free channel, a BAR flush, TLB invalidate or runlist that never
+  finishes, a channel that never fetches, an engine that never idles, a
+  lost semaphore, a preempt that never finishes; during work a copy that
+  never ends, a lost semaphore, a launch error, an MMU fault (a write to
+  the read-only window), a PBDMA error, a card that stops answering, a
+  full push ring: each ends in an error within its bound and is logged.
+- `tests/host/presenttest.c` (the display core with a fake copy engine,
+  DESIGN-M10-DISPLAY.md) covers the ordering against page flips and the
+  fallback.
+- QEMU: `nvfake` (BIOS and UEFI) logs the copy engine's dry run (the
+  method streams, 10 words for a 1920x1200 upload, and the page tables of
+  the GP100 format) and that nothing is touched; NVREPORT's REPORT.TXT has
+  "Acceleration (M10e): off: simulated card: no registers" and the copy
+  engine's speed tests "not available"; `nvfake+nvset` checks
+  `nv.accel=0`. The accelerated presentation path itself runs in QEMU on
+  the virtio GPU through the display core's software test hook (`vgpu+accel`,
+  `dual+accel`, `vgpu+accelhang`).
+
+### What to check on the GTX 1070 (10e)
+
+1. Boot from the stick as with 10d and confirm the picture if asked. About
+   10 seconds after the desktop is up the copy engine starts: BOOT.LOG
+   should have "nv0: 10e: self test (64x16, ...): fill ok, copy within
+   VRAM ok, copy from system RAM ok" and "acceleration in use: copy engine
+   N (class c1b5)". System Information (NVIDIA graphics and Display) says
+   "Acceleration: in use".
+2. Use the desktop as usual: drag windows, open menus, scroll a long text
+   in Notepad, run the screen saver. The picture must look exactly as
+   before (any garbage, stale rectangles or a picture that stops following
+   are what to report). The counters in System Information should grow.
+3. Run `NVREPORT`: the speed test now has the copy engine's lines and a
+   "side by side" table; the CPU busy column is the point (the copy
+   engine should show a few per cent where the CPU shows 100 %).
+4. If anything goes wrong, `nv.accel=0` in `\HALCYON\SETTINGS.INI` turns
+   10e off and nothing else. If the machine hangs while the copy engine
+   starts (about 10 s after the desktop appears), switch off: the next
+   start leaves acceleration off ("blocked") and the driver on.
+
+Send back: `\HALCYON\BOOT.LOG`, `BOOTPREV.LOG`, the NVREPORT folder (with
+the desktop running on the driver), and what the screen did.
+
+### Verified only on the host (10e)
+
+Everything that touches the card: the topology table of the real board
+(which LCE has a runlist of its own), whether PFIFO and the copy engine are
+powered after a UEFI boot, the PBDMA initialisation as nouveau does it on
+an already-running card, USERD through the firmware's BAR1 (nouveau sets
+up BAR1 itself; Halcyon uses the firmware's 1:1 mapping, which 10b
+checked), the channel's RAMFC values (nouveau's, never seen on this card
+by Halcyon), whether a host semaphore with "wait for idle" waits for the
+copy engine as nouveau's fences rely on, the remap fill with more than one
+line (nouveau uses one line), the speed of all of it, and the recovery
+from a hung engine (only the channel is stopped; the engine is not
+reset). Each failure has a bounded fallback, but none of it has run on a
+card.
+
+### Not done (10e)
+
+- The 2D engine (PGRAPH) through NVIDIA's signed FECS / GPCCS firmware and
+  ACR secure boot: a later option, if the copy engine is not enough.
+- Fermi and Tesla (falcon microcode, another PFIFO), Volta and later.
+- Window moves and scrolling as copies within a buffer: the window
+  manager composes in RAM and only reports damage, so it cannot express
+  them yet; the operation (copy) is in the interface for when it can.
+- An interrupt path (as 10d: completion is polled; the idle loop is asked
+  to come back every millisecond while work is in flight).
+- Resetting a hung copy engine (it is only taken off the runlist).

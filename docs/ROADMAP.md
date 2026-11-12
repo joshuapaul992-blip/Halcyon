@@ -95,8 +95,17 @@ interface) and virtio GPU (several outputs, cursor, flips, hotplug). Its
 zero saturation setting, is fixed. The NVIDIA side of 10d (hardware cursor,
 page flips at the vertical blank, several monitors) is written and
 host-tested against the simulated display engine; it awaits the GTX 1070.
-10e can wait: NVREPORT measured 205 frames/s for CPU drawing at 2560x1440
-on the native driver. 10c stays deferred.
+10e is written with the copy engine instead of the 2D engine: on Kepler to
+Pascal it needs no firmware, and through one PFIFO channel it uploads the
+desktop's changes, keeps the page-flip buffers in step and fills new
+buffers, with the CPU as the fallback; host-tested against a simulated
+PFIFO, MMU and copy engine (and the display core's side in QEMU through a
+software test hook), it awaits the GTX 1070. (CPU drawing alone already
+reached 205 frames/s at 2560x1440: 10e frees the CPU rather than speeding
+the desktop up.) The 2D engine through NVIDIA's signed firmware remains a
+later option. Display Properties now offers every refresh rate the
+monitor lists, per monitor (60, 120, 144 and 165 Hz on the LG); not yet
+tried on the GTX 1070. 10c stays deferred.
 
 Two display engines cover all eight generations, so the work splits by engine:
 
@@ -118,21 +127,26 @@ Two display engines cover all eight generations, so the work splits by engine:
   monitors. Written (the base and cursor channels per head, flips and the
   vertical blank polled, no interrupt path; host-tested, awaiting the GTX
   1070): see [DESIGN-M10-NVIDIA.md](DESIGN-M10-NVIDIA.md).
-- **10e, optional 2D acceleration** (fill, copy) through the 2D engine:
+- **10e, acceleration** (copy, fill). Written with the **copy engines**,
+  which need no firmware from Kepler on (GK104 to GP108): one PFIFO channel,
+  a small GPU address space, uploads from the desktop surface, copies
+  between buffers, fills, completion polled (host-tested, awaiting the GTX
+  1070): see [DESIGN-M10-NVIDIA.md](DESIGN-M10-NVIDIA.md). Fermi's and
+  Tesla's copy engines run falcon microcode and are not covered. The 2D
+  engine (PGRAPH) stays a later option:
   - Kelvin to Tesla: no firmware.
   - Fermi, Kepler, first-generation Maxwell: context-switch firmware; nouveau's
     open-source version can be used.
   - Second-generation Maxwell and Pascal: NVIDIA-signed firmware from
     linux-firmware (redistributable, but a binary blob on the image).
-  - Measure first: with write-combining from M5, CPU drawing may be fast enough.
 - **Stretch:** start a card the firmware did not initialise (a second card, or
   a Tesla or Fermi card on a UEFI machine without CSM: they have no GOP driver)
   by running the video BIOS's init tables ("devinit").
 
 Test hardware: a GeForce GTX 1070 (GP104, Pascal). It is PCIe and has a GOP
 driver, so it already boots Halcyon through UEFI; 10a, 10b and 10d are
-developed against it first. Its 2D acceleration (10e) would need the signed
-GP104 firmware.
+developed against it first. Its copy engines need no firmware (10e); its
+2D engine would need the signed GP104 firmware.
 
 Constraints:
 

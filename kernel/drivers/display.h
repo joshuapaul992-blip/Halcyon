@@ -69,6 +69,45 @@ typedef struct display_fb {
     void *priv;
 } display_fb_t;
 
+/* ---------------- acceleration (M10e) ----------------
+ * Optional asynchronous operations a device's copy engine (or blitter)
+ * offers. The core uses them to present (uploads from the desktop surface
+ * in RAM, copies between a head's buffers when flipping, fills of new
+ * buffers); CPU copies stay the fallback for everything. Operations are
+ * queued, then submit() sends them and returns a fence; done() is polled
+ * (interrupts only wake). The core never flushes or flips a buffer before
+ * the fence covering the writes into it has completed, waits (bounded) for
+ * outstanding fences before buffers are freed or the desktop surface goes,
+ * and gives acceleration up for the session when a fence does not come
+ * back (DISPLAY_ACCEL_TIMEOUT_MS) or an operation fails: stop() is called,
+ * every buffer is redrawn by the CPU. See DESIGN-M10-DISPLAY.md,
+ * "Acceleration". */
+#define ACCEL_UPLOAD  0x01            /* copies from the desktop surface (RAM) into a buffer */
+#define ACCEL_COPY    0x02            /* copies between buffers of the adapter (not overlapping) */
+#define ACCEL_FILL    0x04            /* solid fills */
+#define DISPLAY_ACCEL_TIMEOUT_MS 250
+
+typedef struct display_accel_ops {
+    /* the desktop surface the uploads read: [px, px + bytes), to be made
+     * readable by the device (mapped, read-only); 0 or E_* (uploads are
+     * then done by the CPU). Nothing is in flight when it is called. */
+    int  (*source)(display_adapter_t *a, const void *px, u64 bytes);
+    /* queue: w x h pixels from the source at byte offset src_off (pitch
+     * src_pitch bytes) to (x, y) of dst */
+    int  (*upload)(display_adapter_t *a, display_fb_t *dst, int x, int y, int w, int h, u64 src_off, u32 src_pitch);
+    /* queue: w x h pixels from (sx, sy) of src to (dx, dy) of dst */
+    int  (*copy)(display_adapter_t *a, display_fb_t *dst, int dx, int dy, display_fb_t *src, int sx, int sy, int w, int h);
+    /* queue: w x h pixels at (x, y) of dst set to xrgb */
+    int  (*fill)(display_adapter_t *a, display_fb_t *dst, int x, int y, int w, int h, u32 xrgb);
+    /* send what is queued: its fence (> 0), or 0 when that failed */
+    u32  (*submit)(display_adapter_t *a);
+    /* 1 the fence's work is done, 0 not yet, E_* the device failed */
+    int  (*done)(display_adapter_t *a, u32 fence);
+    /* acceleration ends for the session (why: for the log); bounded, no
+     * operation is used afterwards. Optional. */
+    void (*stop)(display_adapter_t *a, const char *why);
+} display_accel_ops_t;
+
 typedef struct display_ops {
     /* Take the device over from the firmware (before the first set_mode).
      * Optional. Return 0 or an E_* error (the firmware frame buffer stays). */
@@ -132,6 +171,14 @@ struct display_head {
     struct { int x, y, w, h; } stale[2][8];
     int dirty_n;               /* single-buffered: rectangles to flush */
     struct { int x, y, w, h; } dirty[8];
+    /* acceleration (M10e, the core's) */
+    int acc_queued;            /* operations for this head queued since the last submit */
+    u32 acc_fence;             /* the fence its last submitted writes wait on (0: none) */
+    int acc_flip;              /* the flip of fb[acc_back] waits for acc_fence */
+    int acc_back;
+    int acc_rn;                /* rectangles written into fb[acc_back] (flushed before that flip) */
+    struct { int x, y, w, h; } acc_r[8];
+    u32 acc_frames;            /* frames presented through acceleration */
 };
 
 struct display_connector {
@@ -184,6 +231,23 @@ struct display_adapter {
     int guard_armed;           /* the start marker was saved this boot */
     int guard_confirm;         /* the GUI asks whether the picture can be seen */
     u64 guard_clear_ms;        /* the marker goes when the desktop has run this long */
+    /* acceleration (M10e): set by the driver when its engine runs (or by
+     * the core's software test hook); the core clears accel on a failure */
+    const display_accel_ops_t *accel_ops;
+    void *accel_priv;
+    u32 accel;                 /* ACCEL_* usable now */
+    char accel_name[48];       /* "copy engine 0 (PASCAL_DMA_COPY_B)" */
+    char accel_why[96];        /* why it is off (when accel_ops is set but accel is 0) */
+    /* the core's */
+    const void *accel_src;     /* the source the driver mapped (NULL: none) */
+    u64 accel_src_bytes;
+    int accel_src_ok;
+    u32 accel_last;            /* the last fence submitted */
+    u32 accel_seen;            /* the last fence seen done */
+    u64 accel_last_ms;         /* when the oldest fence not seen done was submitted (or progress seen) */
+    u32 accel_uploads, accel_copies, accel_fills, accel_cpu;   /* operations, and rectangles the CPU did instead */
+    int accel_guard_armed;     /* display.<driver>.accel.guard was saved this boot */
+    u64 accel_guard_clear_ms;
 };
 enum { ADAPTER_PROBED = 0, ADAPTER_ACTIVE, ADAPTER_FAILED, ADAPTER_DISABLED, ADAPTER_RETIRED };
 
@@ -219,6 +283,27 @@ void display_guard_reenable(const char *driver);
  * confirmed (NULL: none); then the answer (0: no / no answer) */
 display_adapter_t *display_guard_confirm_needed(void);
 void display_guard_confirm(display_adapter_t *a, int yes);
+
+/* Acceleration (M10e). A driver brings its engine up only once the start
+ * guard is done with the adapter (display_guard_settled: running, the
+ * picture confirmed); its own marker display.<driver>.accel.guard is saved
+ * before the first register write of that bring-up
+ * (display_accel_guard_begin: 0, or E_* when it cannot be saved, or
+ * E_PERM when the last boot's marker is still there: acceleration stays
+ * off, "blocked", until the key is removed); display_accel_ready says it
+ * works (the marker goes after 10 seconds of use, or at a clean shutdown),
+ * display_accel_lost that it failed by itself (the core redraws with the
+ * CPU). */
+int  display_guard_settled(display_adapter_t *a);
+int  display_accel_guard_begin(display_adapter_t *a);
+void display_accel_ready(display_adapter_t *a, u32 caps, const char *name);
+void display_accel_lost(display_adapter_t *a, const char *why);
+/* System Information / NVREPORT: "in use: copy engine ..., 1234 uploads" or why it is off */
+const char *display_accel_state(display_adapter_t *a, char *buf, int n);
+/* NVREPORT's speed test through the primary head's adapter: test 0 fill,
+ * 1 upload of the desktop surface, 2 buffer to buffer (half the screen),
+ * about 200 ms on the buffer on screen. 0, or E_NOTSUP with why. */
+int  display_accel_bench(int test, u64 *bytes, u64 *us, u64 *cpu_us, u32 *passes, char *why, int whyn);
 
 /* a fw_cfg test hook asked this step to fail (tests of the fallback):
  * "opt/halcyon/displayfail" = "<driver>:<step>" (step: enable, setmode, fb) */

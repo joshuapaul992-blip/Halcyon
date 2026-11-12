@@ -139,6 +139,9 @@ const char *nv_display_state(nv_device_t *d, char *buf, int n);
 const char *nv_display_log(nv_device_t *d);
 /* 10d: the heads (flips, cursor, vertical blank) as text for NVREPORT; bytes */
 int  nv_display_heads(nv_device_t *d, char *buf, int size);
+/* 10e: the copy engine (accel.c) for NVREPORT (bytes) and System Information */
+int  nv_display_accel(nv_device_t *d, char *buf, int size);
+const char *nv_display_accel_state(nv_device_t *d, char *buf, int n);
 
 /* report.c: text for BOOT.LOG, System Information and NVREPORT.EXE */
 int  nv_report_text(nv_device_t *d, char *buf, int size);   /* bytes (truncated to size - 1) */

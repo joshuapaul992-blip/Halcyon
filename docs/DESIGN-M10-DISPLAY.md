@@ -13,7 +13,7 @@ Files:
 
 | File | What |
 |------|------|
-| `kernel/drivers/display.h`, `display.c` | the core: registry, firmware adapter, configurations, presentation, cursor, fallback |
+| `kernel/drivers/display.h`, `display.c` | the core: registry, firmware adapter, configurations, presentation (with optional acceleration, M10e), cursor, fallback |
 | `kernel/drivers/modes.h`, `modes.c` | timings: EDID timings, DMT and CEA tables, CVT reduced blanking, mode lists (host-tested) |
 | `kernel/drivers/bochs.c` | QEMU std-vga / bochs-display / VirtualBox VGA |
 | `kernel/drivers/virtio_gpu.c` | virtio GPU (`virtio-gpu-pci`, `virtio-vga`, `-vga virtio`) |
@@ -22,7 +22,7 @@ Files:
 | `kernel/apps/display.c` | Display Properties, Settings tab |
 | `kernel/apps/sysinfo.c` | System Information: adapters, connectors, monitors |
 | `tools/vnc_ctl.py` | QEMU output hotplug for the tests (RFB SetDesktopSize) |
-| `tests/host/modetest.c`, `layouttest.c` | host tests |
+| `tests/host/modetest.c`, `layouttest.c`, `presenttest.c` | host tests |
 
 ## Words
 
@@ -258,6 +258,82 @@ mode for one driver), `display.flip=0` (no page flips),
   (`enable`, `fb`, `setmode`) makes that step fail, after the driver did
   it (`setmode`: the device is programmed, then the core says it failed),
   so the fallback is tested for real.
+
+### Acceleration (M10e)
+
+A driver whose device has a copy engine or blitter may offer three
+asynchronous operations on its own buffers (`display_accel_ops_t`, set in
+`a->accel_ops` with `a->accel_priv`); the core uses them to present and
+keeps its CPU copies as the fallback for everything:
+
+| op | does |
+|----|------|
+| `source(a, px, bytes)` | make the desktop surface readable by the device (mapped read-only); called lazily before the first upload from a surface, with nothing in flight |
+| `upload(a, dst, x, y, w, h, src_off, src_pitch)` | queue: a rectangle from the desktop surface into a buffer |
+| `copy(a, dst, dx, dy, src, sx, sy, w, h)` | queue: a rectangle between two buffers of the adapter (not overlapping) |
+| `fill(a, dst, x, y, w, h, xrgb)` | queue: a solid rectangle |
+| `submit(a)` | send what is queued; the fence (> 0; the last one again if nothing new), 0 on failure |
+| `done(a, fence)` | polled: 1 done, 0 not yet, `E_*` the device failed (with `a->accel_why`) |
+| `stop(a, why)` | acceleration ends for the session (bounded) |
+
+The driver says which operations work with `display_accel_ready(a,
+ACCEL_UPLOAD | ACCEL_COPY | ACCEL_FILL, name)` (uploads are the one that
+matters), and may give up itself with `display_accel_lost(a, why)`.
+Operations of one adapter must complete in the order they were queued.
+
+How the core uses them:
+
+- **Single-buffered heads**: a damaged rectangle is queued as an upload
+  into the buffer on screen instead of being copied by the CPU; the
+  commit submits; a device that needs flushes (virtio) gets its `flush`
+  only once the fence is done.
+- **Double-buffered heads** (page flips): the back buffer is brought up to
+  date by copying from the front buffer what the front already has (every
+  pixel outside the front's stale rectangles is current there), then
+  uploading what neither has (the front's stale rectangles), so the
+  desktop surface is read once per change, not twice; when the front is
+  wholly stale (after a mode set) everything is uploaded. **The flip (and
+  the driver's flush of those rectangles) is queued only when that fence
+  is done**: `head_commit` checks it, `display_service` calls it again,
+  the idle loop is asked to come back in a millisecond meanwhile.
+- **New buffers** are filled black by the device (bounded wait before the
+  mode set shows them).
+- Before buffers are freed (a mode set, a head off, a failure) and before
+  the desktop surface is replaced (`display_set_source`), outstanding
+  work is waited for (bounded); `display_sync` (shutdown) waits too.
+- **Failure**: a fence not done within `DISPLAY_ACCEL_TIMEOUT_MS` (250 ms)
+  of its submission, `done` or `submit` failing, an operation refused
+  (other than "no room": that rectangle is simply drawn by the CPU) ends
+  acceleration for the session: `stop` is called once, "display: ...:
+  acceleration off for this session: why; the CPU draws" is logged, and
+  every buffer of the adapter is redrawn by the CPU. The desktop never
+  goes down with the accelerator.
+- A rectangle in flight may be read from the desktop surface after the
+  compositor has drawn the next frame into it; the next frame's damage
+  covers it again, so this can only show a rectangle one frame early.
+
+**The acceleration guard**: a driver brings its engine up only once the
+start guard is done with the adapter (`display_guard_settled`), and
+saves `display.<driver>.accel.guard=start` first
+(`display_accel_guard_begin`: `E_PERM` when the last boot's marker is
+still there, which becomes `blocked`). The marker goes 10 seconds after
+`display_accel_ready` or at a clean shutdown; a failure keeps it, so the
+next start does not try again. A hang while the engine starts therefore
+costs acceleration at the next start, never the driver.
+
+**State**: `display_accel_state(a)` ("in use: copy engine 0 (class c1b5);
+N uploads, N copies, N fills, N rectangles by the CPU" / "off: why") is in
+System Information for every adapter; `display_accel_bench(test)` runs
+NVREPORT's copy engine speed tests (fill, upload, buffer to buffer on the
+primary's buffer on screen, about 200 ms, CPU time counted apart).
+
+**Test hook**: `-fw_cfg name=opt/halcyon/displayaccel,string=<driver>`
+(or `<driver>:hang`) gives an adapter without acceleration of its own a
+software implementation that does the operations with the CPU, but only
+when `done` is asked at least 2 ms after `submit`, so the queueing, the
+fences, the flip and flush ordering and the fallback run on the real
+presentation path in QEMU (`vgpu+accel`, `dual+accel`; `:hang` stops
+completing after 50 fences: `vgpu+accelhang`).
 
 ## The desktop on several monitors
 
@@ -520,13 +596,19 @@ EVO display engine) follows; the virtio driver is the worked example.
 10. **poll**: completions, hotplug (HPD interrupts or polled status, every
     second or so): call `display_hotplug(a)` when a connector may have
     changed; the core calls `detect` and reconfigures.
-11. **restore**: put the firmware's mode back (on NVIDIA: tear down the
+11. **Acceleration** (optional, "Acceleration" above): offer
+    `display_accel_ops_t` once the engine runs (after
+    `display_guard_settled`, with `display_accel_guard_begin` before the
+    first register write of its bring-up), `display_accel_ready` with what
+    works. Keep every wait bounded; on any doubt return an error and let
+    the core fall back.
+12. **restore**: put the firmware's mode back (on NVIDIA: tear down the
     channels and restore the VGA/EFI framebuffer head state saved in
     `enable`) so that the firmware frame buffer is visible again.
-12. **panic_flush**: nothing for VRAM scanout; the core points
+13. **panic_flush**: nothing for VRAM scanout; the core points
     `g_bootinfo.fb_*` at the primary head's visible buffer before drawing
     the panic screen.
-13. **Test the fallback**: `-fw_cfg name=opt/halcyon/displayfail,string=nv:setmode`
+14. **Test the fallback**: `-fw_cfg name=opt/halcyon/displayfail,string=nv:setmode`
     (or `enable`, `fb`) must leave the desktop on the firmware frame buffer
     with the reason in `BOOT.LOG`; `display.disable=nv` in `SETTINGS.INI`
     and F8's "no display driver" must keep the driver off.
@@ -569,6 +651,22 @@ hotplug reconfiguration, Display Properties and System Information.
   arrangements: no overlaps, all connected, origin at (0, 0), the primary in
   place, idempotent, the pointer always on a monitor, a dragged monitor
   snapped to an edge.
+- `tests/host/presenttest.c` (M10e): `display.c` itself, compiled with
+  `modes.c`, `edid.c`, `layout.c` and stubs, against a fake adapter whose
+  copy engine completes on simulated time; each scenario in a fork of its
+  own. The **ordering rule** (a flip queued, a rectangle flushed, a buffer
+  freed or the desktop surface replaced while an operation on it is in
+  flight is a violation the fake device counts), and **pixels**: after
+  hundreds of frames of random rectangles on two double-buffered heads and
+  on a single-buffered head of a device that needs flushes, the buffers on
+  screen equal the desktop; the same with an engine that stops completing,
+  reports an error, refuses operations or has no room (the CPU takes over,
+  `stop` is called once, the screen still equals the desktop); a mode
+  change and a new desktop surface with work in flight; the speed test;
+  the acceleration guard (saved, cleared after 10 s, `blocked`, kept after
+  a failure, cleared at shutdown); the software test hook, also hanging.
+  A core that flipped without waiting is caught (tried: hundreds of
+  violations).
 - Boot matrix (`tools/boottest.py`):
   - `vgpu` (`-vga virtio`, BIOS): the driver replaces the firmware frame
     buffer, hardware cursor, page flips, a screendump with the desktop and
@@ -608,6 +706,12 @@ hotplug reconfiguration, Display Properties and System Information.
     is a new configuration that asks again;
   - `ratefall` (BIOS): 85 Hz saved, not offered: 60 Hz (the monitor's
     preferred rate) and the reason in BOOT.LOG (read from the image);
+  - `vgpu+accel`, `dual+accel`, `vgpu+accelhang` (M10e): the software
+    acceleration test hook on the virtio GPU; with Starfield providing
+    frames, 100 updates through acceleration (uploads and buffer-to-buffer
+    copies) with the page flips and screendumps of `vgpu` / `dual` still
+    right; `accelhang`: acceleration given up after 250 ms and a
+    screendump of the desktop drawn by the CPU afterwards;
   - the existing `res`, `res+fwvideo`, `switch` and every other variant
     keep using the Bochs adapter or the firmware frame buffer (BIOS VBE and
     UEFI GOP).
@@ -618,7 +722,11 @@ Done: everything above. Last run: the default boot matrix 47/47 (with the
 six display variants `vgpu`, `dual`, `arrange`, `multi`, `gpufail`,
 `gpuoff`), `virtio+noirq` (flips and the cursor polled), `tools/ci.sh quick`,
 and the host tests (modetest 42 checks + 200,000 random EDIDs, layouttest
-24 checks + 20,000 random arrangements, displaytest 19).
+24 checks + 20,000 random arrangements, displaytest 19). With M10e's
+acceleration: presenttest 58 checks (each a whole screen compared pixel by
+pixel), and the display variants above plus `vgpu+accel`, `dual+accel`,
+`vgpu+accelhang`, `guard`, `guardblock`, `nvfake` (BIOS and UEFI),
+`nvfake+nvoff`, `nvfake+nvset`, `res`, `switch`, `res+fwvideo`, `help`.
 
 Refresh rates: last run 22/22 boot variants (`vgpu`, `dual`, `arrange`, `multi`,
 `gpufail`, `gpuoff`, `nvfake` BIOS and UEFI, `nvfake+nvoff`, `nvfake+nvset`,
@@ -629,15 +737,21 @@ evotest 45,580. The drop-down was looked at in screendumps (open with the
 rates at 1024 x 768, and disabled "Default" on a plain virtio GPU). Not run
 on the GTX 1070 yet.
 
-The NVIDIA driver (10b, 10d) implements the whole interface above:
-cursor, page flips, vertical blank and several heads (see
-DESIGN-M10-NVIDIA.md; 10d has not run on a card yet). Remaining, besides
+The NVIDIA driver (10b, 10d, 10e) implements the whole interface above:
+cursor, page flips, vertical blank, several heads and acceleration through
+a copy engine (see DESIGN-M10-NVIDIA.md; 10d and 10e have not run on a
+card yet). The acceleration interface is generic: an Intel or AMD driver
+would offer the same operations through its blitter or DMA engine. Remaining, besides
 the list below: `dual+noirq` (hotplug found by
 polling: the test knows how to check it, it was not run); screenshots for
 the documentation were looked at but are not in the repository.
 
 ## Not done
 
+- **Moves and scrolls as device copies**: the window manager composes in
+  RAM and reports only damage, so a window move or a scroll is uploaded as
+  damage, not copied within the buffer; `copy` is in the acceleration
+  interface for when the compositor can express them.
 - **virtio-gpu-pci under UEFI**: OVMF's GOP on a virtio GPU without VGA
   offers only Blt modes (no linear frame buffer), so the UEFI loader stops
   ("graphics adapter only offers PixelBltOnly modes"). The loader could

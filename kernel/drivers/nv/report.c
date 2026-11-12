@@ -10,6 +10,7 @@
  * Nothing here writes to the GPU (the CRTC index register of pre-NV50
  * cards, needed to read CRTC registers, is put back). */
 #include "nv.h"
+#include "drivers/display.h"
 #include "core/lib.h"
 #include "core/io.h"
 #include "core/mm.h"
@@ -472,6 +473,10 @@ int nv_report_text(nv_device_t *d, char *buf, int size) {
     static const char *in[] = { "none", "CRTC-indexed", "NV4E", "NV50", "G94", "GF119", "GM200" };
     sp(&s, "  Display engine: %s; I2C/AUX layout: %s\n", dn[d->chip.disp], in[d->chip.i2c]);
     sp(&s, "  Display driver: %s\n", driver_line(d));
+    {
+        char ab[160];
+        sp(&s, "  Acceleration (M10e): %s\n", nv_display_accel_state(d, ab, sizeof ab));
+    }
     sp(&s, "  Probe took %u ms, %u timeouts\n", d->init_ms, d->timeouts);
     if (d->chip.in_range || d->fake) {
         bios_part(&s, d);
@@ -487,6 +492,7 @@ int nv_report_text(nv_device_t *d, char *buf, int size) {
         }
         char hb[1536];
         if (nv_display_heads(d, hb, sizeof hb) > 0) sp(&s, "\nHeads: page flips, hardware cursor, vertical blank (M10d)\n%s", hb);
+        if (nv_display_accel(d, hb, sizeof hb) > 0) sp(&s, "\nCopy engine acceleration (M10e)\n%s", hb);
         const char *lg = nv_display_log(d);
         if (lg) sp(&s, "\nNative modesetting (M10b, M10d): the driver's log of this start\n%s", lg);
     }
@@ -512,8 +518,9 @@ void nv_sysinfo(nv_row_fn add, void *ctx) {
         if (d->bios) sp(&s, "Video BIOS: %s (from %s)\n", d->bios->version_str[0] ? d->bios->version_str : "unknown version", rom_source(d));
         else if (d->chip.in_range) sp(&s, "Video BIOS: not found\n");
         sp(&s, "Bus: %s\n", l);
-        sp(&s, "Connectors: %d\n\nDisplay driver: %s\n\nNVREPORT in the Command Prompt saves a full report in "
-           "C:\\HALCYON\\NVREPORT.", d->nconn, driver_line(d));
+        char ab[160];
+        sp(&s, "Connectors: %d\n\nDisplay driver: %s\nAcceleration: %s\n\nNVREPORT in the Command Prompt saves a full report in "
+           "C:\\HALCYON\\NVREPORT.", d->nconn, driver_line(d), nv_display_accel_state(d, ab, sizeof ab));
         if (d->vram) snprintf(row, sizeof row, "%s (%s, %s)", d->name, d->chip.codename, v);
         else snprintf(row, sizeof row, "%s (%s)", d->name, d->chip.codename);
         add(ctx, 1, d->chip.in_range ? NV_ICON_CARD : NV_ICON_WARNING, dt, row);
@@ -602,9 +609,26 @@ static int fbtest(int test, hal_nvfbtest_t *t) {
     t->cache_type = mm_cache_type(g_bootinfo.fb_addr);
     if (!fb || !size) return E_NODEV;
     static const char *names[NV_FBTESTS] = { "fill, rep stosq", "fill, 32-bit stores", "RAM to screen copy (the compositor)",
-                                             "screen to screen copy", "screen read", "RAM to RAM copy (for comparison)" };
+                                             "screen to screen copy", "screen read", "RAM to RAM copy (for comparison)",
+                                             "copy engine: fill", "copy engine: RAM to screen", "copy engine: screen to screen" };
     if (test < 0 || test >= NV_FBTESTS) return E_INVAL;
     strlcpy(t->name, names[test], sizeof t->name);
+    if (test >= NV_FBTESTS_CPU) {
+        /* M10e: the same work by the display's accelerator, through the display core */
+        u32 passes = 0;
+        u64 b = 0, us = 0, cpu = 0;
+        int r = display_accel_bench(test - NV_FBTESTS_CPU, &b, &us, &cpu, &passes, t->note, sizeof t->note);
+        t->bytes = b;
+        t->us = us;
+        t->cpu_us = cpu;
+        t->passes = passes;
+        if (!r) {
+            display_head_t *ph = display_primary() ? display_primary()->head : NULL;
+            if (ph) display_accel_state(ph->adapter, t->note, sizeof t->note);
+        }
+        if (test != NV_FBTESTS_CPU + 1 && gui_full_redraw) gui_full_redraw();
+        return r;
+    }
     u8 *ram = NULL, *ram2 = NULL;
     if (test == 2 || test == 5) {
         ram = kmalloc(size);
@@ -636,6 +660,7 @@ static int fbtest(int test, hal_nvfbtest_t *t) {
     t->us = now - t0;
     t->passes = (u32)pass;
     t->sink = (u32)sink;
+    t->cpu_us = t->us;                                      /* (the CPU did all of it) */
     kfree(ram);
     kfree(ram2);
     if (test <= 3 && gui_full_redraw) gui_full_redraw();     /* the desktop paints itself again */

@@ -39,8 +39,10 @@ static struct {                                /* g_bootinfo's frame buffer as t
 
 static char fail_hook[48];                     /* test hook: "<driver>:<step>" */
 static char guard_hook[24];                    /* test hook: a driver to guard (opt/halcyon/displayguard) */
+static char accel_hook[32];                    /* test hook: software acceleration for a driver (opt/halcyon/displayaccel) */
 static int init_done;                          /* display_init finished (later registrations: nv_init) */
 static int fb_in_bars(const pci_dev_t *d, u64 addr);
+static void accel_head_drop(display_head_t *h);
 
 /* ---------------- registry ---------------- */
 display_adapter_t *display_register(const char *driver, const char *name, const display_ops_t *ops, void *priv,
@@ -229,6 +231,7 @@ static int fb_in_bars(const pci_dev_t *d, u64 addr) {
 
 static void head_free_fbs(display_head_t *h) {
     display_adapter_t *a = h->adapter;
+    accel_head_drop(h);                        /* nothing may still write into them */
     for (int i = 0; i < h->nfb; i++)
         if (a->ops->fb_free && a != fwa) a->ops->fb_free(a, &h->fb[i]);
     memset(h->fb, 0, sizeof h->fb);
@@ -297,7 +300,247 @@ static void copy_rect(display_head_t *h, display_fb_t *fb, drect_t r) {
     }
 }
 
+/* ---------------- acceleration (M10e) ----------------
+ * The driver's queued operations go out in display_commit (one submit per
+ * adapter); a head whose writes are in flight flushes or flips only when
+ * their fence is done (head_commit checks it, display_service calls it
+ * again). Operations of one adapter complete in the order they were
+ * queued. Anything that fails gives acceleration up for the session. */
+
+static int accel_has(const display_adapter_t *a, u32 caps) { return a->accel_ops && (a->accel & caps) == caps; }
+
+/* a buffer the device writes as the core would (XRGB, 32 bits) */
+static int accel_fb_ok(const display_fb_t *fb) {
+    return fb->px && fb->bpp == 32 && fb->rpos == 16 && fb->gpos == 8 && fb->bpos == 0;
+}
+
+static void head_all_stale(display_head_t *h) {
+    drect_t all = { 0, 0, h->mode.w, h->mode.h };
+    if (!h->nfb || !h->mode.w) return;
+    if (h->nfb == 2 && (h->caps & HEAD_CAP_FLIP)) {
+        for (int b = 0; b < 2; b++) { h->stale_n[b] = 0; rect_add((drect_t *)h->stale[b], &h->stale_n[b], 8, all); }
+    } else {
+        int f = h->front;
+        h->stale_n[0] = h->stale_n[1] = 0;
+        copy_rect(h, &h->fb[f], all);
+        if (h->adapter->ops->flush) { h->dirty_n = 0; rect_add((drect_t *)h->dirty, &h->dirty_n, 8, all); }
+    }
+}
+
+static void accel_guard_key(const display_adapter_t *a, char *k, int n) { snprintf(k, (size_t)n, "display.%s.accel.guard", a->driver); }
+
+/* acceleration ends for the session: the driver stops, the CPU redraws every buffer */
+static void accel_fail(display_adapter_t *a, const char *why_in) {
+    if (!a->accel_ops) return;
+    char why[96];
+    strlcpy(why, why_in ? why_in : "?", sizeof why);       /* (it may be a->accel_why itself) */
+    int was = a->accel || a->accel_last != a->accel_seen;
+    a->accel = 0;
+    if (was || !a->accel_why[0]) strlcpy(a->accel_why, why, sizeof a->accel_why);
+    if (was) {
+        kprintf("display: %s: acceleration off for this session: %s; the CPU draws\n", a->name, why);
+        if (a->accel_ops->stop) a->accel_ops->stop(a, why);
+        if (a->accel_guard_armed)
+            kprintf("display: %s: the acceleration marker stays (display.%s.accel.guard): acceleration stays off at the next start\n",
+                    a->driver, a->driver);
+        a->accel_guard_clear_ms = 0;
+    }
+    a->accel_last = a->accel_seen = 0;
+    a->accel_src = NULL;
+    for (int k = 0; k < a->nheads; k++) {
+        display_head_t *h = &a->heads[k];
+        int busy = h->acc_queued || h->acc_fence || h->acc_flip;
+        h->acc_queued = h->acc_flip = h->acc_rn = 0;
+        h->acc_fence = 0;
+        if (h->conn && (busy || was)) head_all_stale(h);
+    }
+}
+
+void display_accel_lost(display_adapter_t *a, const char *why) { accel_fail(a, why); }
+
+/* a fence was submitted: the clock of the 250 ms bound starts when nothing older is outstanding */
+static void accel_note(display_adapter_t *a, u32 f) {
+    if (a->accel_seen == a->accel_last) a->accel_last_ms = time_ms();
+    a->accel_last = f;
+}
+
+/* poll a fence: 1 done, 0 not yet (the idle loop is asked to come back),
+ * E_* acceleration failed (accel_fail has run) */
+static int accel_check(display_adapter_t *a, u32 fence) {
+    if (!a->accel_ops || !fence) return 1;
+    int r = a->accel_ops->done(a, fence);
+    if (r == 1) {
+        if ((i32)(fence - a->accel_seen) > 0) { a->accel_seen = fence; a->accel_last_ms = time_ms(); }
+        return 1;
+    }
+    if (r < 0) { accel_fail(a, a->accel_why[0] ? a->accel_why : "the device reported an error"); return r; }
+    if (time_ms() - a->accel_last_ms > DISPLAY_ACCEL_TIMEOUT_MS) {
+        char w[64];
+        snprintf(w, sizeof w, "a fence did not complete in %d ms", DISPLAY_ACCEL_TIMEOUT_MS);
+        accel_fail(a, w);
+        return E_TIMEOUT;
+    }
+    idle_wake_at(time_ms() + 1);
+    return 0;
+}
+
+/* wait (bounded) until fence is done; 0 or E_* (acceleration failed) */
+static int accel_wait(display_adapter_t *a, u32 fence) {
+    u64 end = time_ms() + DISPLAY_ACCEL_TIMEOUT_MS;
+    for (;;) {
+        if (!a->accel_ops || !fence) return 0;
+        if (!a->accel && !a->accel_last) return E_IO;
+        int r = accel_check(a, fence);
+        if (r) return r > 0 ? 0 : r;
+        if (time_ms() >= end) {
+            accel_fail(a, "a fence did not complete in time");
+            return E_TIMEOUT;
+        }
+        cpu_relax();
+    }
+}
+
+static void accel_drain(display_adapter_t *a) {
+    if (a->accel_ops && a->accel_last && a->accel_last != a->accel_seen) accel_wait(a, a->accel_last);
+}
+
+/* a head's buffers go away (mode set, head off, failure): its writes first */
+static void accel_head_drop(display_head_t *h) {
+    display_adapter_t *a = h->adapter;
+    if (!a || !a->accel_ops) return;
+    if (h->acc_queued || h->acc_fence) {
+        if (h->acc_queued && a->accel) {
+            u32 f = a->accel_ops->submit(a);
+            if (f) { accel_note(a, f); for (int k = 0; k < a->nheads; k++) if (a->heads[k].acc_queued) { a->heads[k].acc_queued = 0; a->heads[k].acc_fence = f; } }
+        }
+        accel_drain(a);
+    }
+    h->acc_queued = h->acc_flip = h->acc_rn = 0;
+    h->acc_fence = 0;
+}
+
+/* the desktop surface mapped for the device (once per surface) */
+static int accel_src(display_adapter_t *a) {
+    if (!src_px || !a->accel_ops->source) return 0;
+    u64 bytes = (u64)src_stride * 4 * (u64)src_h;
+    if (a->accel_src == src_px && a->accel_src_bytes == bytes) return a->accel_src_ok;
+    accel_drain(a);
+    if (!a->accel) return 0;
+    a->accel_src = src_px;
+    a->accel_src_bytes = bytes;
+    int r = a->accel_ops->source(a, src_px, bytes);
+    a->accel_src_ok = !r;
+    if (r) kprintf("display: %s: the desktop surface (%llu KiB) is not readable by the device (%s): uploads by the CPU\n", a->name,
+                   (unsigned long long)(bytes >> 10), strerror(r));
+    return a->accel_src_ok;
+}
+
+static void acc_frame(display_head_t *h) {
+    display_adapter_t *a = h->adapter;
+    if (++h->acc_frames == 1 || h->acc_frames == 100)
+        kprintf("display: %s: %u updates presented through acceleration (%u uploads, %u copies, %u fills so far)\n", h->conn ? h->conn->name : "?",
+                h->acc_frames, a->accel_uploads, a->accel_copies, a->accel_fills);
+}
+
+/* queue the upload of head rectangle r into fb; 1 queued, 0 the CPU must do it */
+static int accel_upload(display_head_t *h, display_fb_t *fb, drect_t r) {
+    display_adapter_t *a = h->adapter;
+    int sx = h->x + r.x, sy = h->y + r.y;
+    if (sx < 0 || sy < 0 || sx + r.w > src_w || sy + r.h > src_h || r.x + r.w > fb->w || r.y + r.h > fb->h) {
+        int x0 = MAX(r.x, MAX(-h->x, 0)), y0 = MAX(r.y, MAX(-h->y, 0));
+        int x1 = MIN(MIN(r.x + r.w, fb->w), src_w - h->x), y1 = MIN(MIN(r.y + r.h, fb->h), src_h - h->y);
+        if (x1 <= x0 || y1 <= y0) return 1;                     /* nothing of it is visible */
+        r = (drect_t){ x0, y0, x1 - x0, y1 - y0 };
+        sx = h->x + r.x; sy = h->y + r.y;
+    }
+    int e = a->accel_ops->upload(a, fb, r.x, r.y, r.w, r.h, ((u64)sy * (u64)src_stride + (u64)sx) * 4, (u32)src_stride * 4);
+    if (!e) { a->accel_uploads++; return 1; }
+    a->accel_cpu++;
+    if (e != E_NOSPC) {
+        char w[64];
+        snprintf(w, sizeof w, "an upload could not be queued (%s)", strerror(e));
+        accel_fail(a, w);
+    }
+    return 0;
+}
+
+/* the flip's back buffer brought up to date by the device: what the front
+ * buffer has (every pixel outside stale[front] is current there) copied
+ * from it, then what neither has uploaded from the desktop. 1 queued (the
+ * flip follows when they are done), 0 the CPU does it. */
+static int accel_flip_prepare(display_head_t *h, int back) {
+    display_adapter_t *a = h->adapter;
+    int f = !back;
+    display_fb_t *fb = &h->fb[back], *fr = &h->fb[f];
+    if (!accel_has(a, ACCEL_UPLOAD) || !accel_fb_ok(fb) || !accel_src(a) || !a->accel) return 0;
+    int all_stale = h->stale_n[f] == 1 && h->stale[f][0].x <= 0 && h->stale[f][0].y <= 0 && h->stale[f][0].w >= h->mode.w &&
+                    h->stale[f][0].h >= h->mode.h;
+    int use_copy = accel_has(a, ACCEL_COPY) && accel_fb_ok(fr) && !all_stale && fr->w == fb->w && fr->h == fb->h;
+    int ok = 1;
+    h->acc_rn = 0;
+    if (use_copy)
+        for (int i = 0; i < h->stale_n[back] && ok; i++) {
+            drect_t r = { h->stale[back][i].x, h->stale[back][i].y, h->stale[back][i].w, h->stale[back][i].h };
+            int x0 = MAX(r.x, 0), y0 = MAX(r.y, 0), x1 = MIN(r.x + r.w, fb->w), y1 = MIN(r.y + r.h, fb->h);
+            if (x1 <= x0 || y1 <= y0) continue;
+            int e = a->accel_ops->copy(a, fb, x0, y0, fr, x0, y0, x1 - x0, y1 - y0);
+            if (e) {
+                ok = 0;
+                if (e != E_NOSPC) { char w[64]; snprintf(w, sizeof w, "a copy could not be queued (%s)", strerror(e)); accel_fail(a, w); }
+                break;
+            }
+            a->accel_copies++;
+            rect_add((drect_t *)h->acc_r, &h->acc_rn, 8, (drect_t){ x0, y0, x1 - x0, y1 - y0 });
+        }
+    int which = use_copy ? f : back;
+    for (int i = 0; i < h->stale_n[which] && ok; i++) {
+        drect_t r = { h->stale[which][i].x, h->stale[which][i].y, h->stale[which][i].w, h->stale[which][i].h };
+        if (!accel_upload(h, fb, r)) ok = 0;
+        else rect_add((drect_t *)h->acc_r, &h->acc_rn, 8, r);
+    }
+    if (!ok) {
+        /* part of it may be queued: let it finish, then the CPU does all of it */
+        if (a->accel) {
+            u32 fe = a->accel_ops->submit(a);
+            if (fe) { accel_note(a, fe); accel_wait(a, fe); }
+        }
+        h->acc_rn = 0;
+        return 0;
+    }
+    h->stale_n[back] = 0;
+    h->frames++;
+    acc_frame(h);
+    h->acc_queued = 1;
+    h->acc_flip = 1;
+    h->acc_back = back;
+    return 1;
+}
+
+/* the queued operations of every adapter go out */
+static void accel_submit_all(void) {
+    for (int i = 0; i < nadapters; i++) {
+        display_adapter_t *a = &adapter_store[i];
+        if (!a->accel_ops || a->state != ADAPTER_ACTIVE) continue;
+        int any = 0;
+        for (int k = 0; k < a->nheads; k++) any |= a->heads[k].acc_queued;
+        if (!any) continue;
+        u32 f = a->accel ? a->accel_ops->submit(a) : 0;
+        if (!f) { accel_fail(a, "the queued operations could not be sent"); continue; }
+        accel_note(a, f);
+        for (int k = 0; k < a->nheads; k++)
+            if (a->heads[k].acc_queued) { a->heads[k].acc_queued = 0; a->heads[k].acc_fence = f; }
+    }
+}
+
+static void accel_flush_rects(display_head_t *h) {
+    if (h->adapter->ops->flush)
+        for (int i = 0; i < h->acc_rn; i++) h->adapter->ops->flush(h, &h->fb[h->acc_back], h->acc_r[i].x, h->acc_r[i].y, h->acc_r[i].w, h->acc_r[i].h);
+    h->acc_rn = 0;
+}
+
 void display_set_source(const u32 *px, int w, int h, int stride) {
+    /* uploads in flight read the old surface (freed after this): they finish first */
+    for (int i = 0; i < nadapters; i++) accel_drain(&adapter_store[i]);
     src_px = px; src_w = w; src_h = h; src_stride = stride;
 }
 
@@ -312,6 +555,16 @@ void display_present(int x, int y, int w, int hgt) {
         drect_t r = { x0 - h->x, y0 - h->y, x1 - x0, y1 - y0 };
         if (h->nfb == 2 && (h->caps & HEAD_CAP_FLIP)) {
             for (int b = 0; b < 2; b++) rect_add((drect_t *)h->stale[b], &h->stale_n[b], 8, r);
+            continue;
+        }
+        display_adapter_t *a = h->adapter;
+        display_fb_t *ffb = &h->fb[h->front];
+        if (accel_has(a, ACCEL_UPLOAD) && accel_fb_ok(ffb) && accel_src(a) && accel_has(a, ACCEL_UPLOAD) && accel_upload(h, ffb, r)) {
+            /* queued: flushed once its fence is done (head_commit) */
+            h->acc_queued = 1;
+            acc_frame(h);
+            if (a->ops->flush) rect_add((drect_t *)h->dirty, &h->dirty_n, 8, r);
+            else h->frames++;
             continue;
         }
         copy_rect(h, &h->fb[h->front], r);
@@ -333,8 +586,47 @@ static void flips_gone(display_head_t *h) {
     h->stale_n[0] = h->stale_n[1] = 0;
 }
 
+static void head_commit(display_head_t *h);
+
+/* queue the page flip to fb[back] (its contents are complete) */
+static void head_flip(display_head_t *h, int back) {
+    display_adapter_t *a = h->adapter;
+    h->flip_pending = 1;
+    h->flip_ms = time_ms();
+    if (a->ops->flip(h, &h->fb[back])) {
+        /* the flip failed: nothing changed on screen, so the front buffer
+         * stays; it gets what the back one just got (single buffering from now on) */
+        kprintf("display: %s: page flip failed, single buffering\n", h->conn ? h->conn->name : "?");
+        h->flip_pending = 0;
+        h->caps &= ~HEAD_CAP_FLIP;
+        drect_t all = { 0, 0, h->mode.w, h->mode.h };
+        rect_add((drect_t *)h->stale[h->front], &h->stale_n[h->front], 8, all);
+        head_commit(h);
+    }
+}
+
 static void head_commit(display_head_t *h) {
     display_adapter_t *a = h->adapter;
+    /* acceleration in flight: the flush or the flip waits for its fence */
+    if (h->acc_queued) return;                    /* (display_commit submits, then comes back) */
+    if (h->acc_fence) {
+        int d = accel_check(a, h->acc_fence);
+        if (!d) return;
+        if (d > 0) {
+            h->acc_fence = 0;
+            if (h->acc_flip) {
+                h->acc_flip = 0;
+                accel_flush_rects(h);
+                if (!h->flip_pending && h->nfb == 2) {
+                    if (h->caps & HEAD_CAP_FLIP) { head_flip(h, h->acc_back); return; }
+                    /* flips ended meanwhile: the back buffer is complete, the front one is redrawn */
+                    drect_t all = { 0, 0, h->mode.w, h->mode.h };
+                    rect_add((drect_t *)h->stale[h->front], &h->stale_n[h->front], 8, all);
+                }
+            }
+        }
+        /* (d < 0: accel_fail made everything stale; the CPU paths below) */
+    }
     if (h->nfb == 2 && !(h->caps & HEAD_CAP_FLIP)) {
         if (h->flip_pending) return;
         flips_gone(h);
@@ -356,6 +648,7 @@ static void head_commit(display_head_t *h) {
     if (h->flip_pending) return;
     int back = !h->front;
     if (!h->stale_n[back]) return;
+    if (accel_flip_prepare(h, back)) return;      /* the device brings it up to date; the flip waits for it */
     display_fb_t *fb = &h->fb[back];
     for (int i = 0; i < h->stale_n[back]; i++) {
         drect_t r = { h->stale[back][i].x, h->stale[back][i].y, h->stale[back][i].w, h->stale[back][i].h };
@@ -364,24 +657,18 @@ static void head_commit(display_head_t *h) {
     }
     h->stale_n[back] = 0;
     h->frames++;
-    h->flip_pending = 1;
-    h->flip_ms = time_ms();
-    if (a->ops->flip(h, fb)) {
-        /* the flip failed: nothing changed on screen, so the front buffer
-         * stays; it gets what the back one just got (single buffering from now on) */
-        kprintf("display: %s: page flip failed, single buffering\n", h->conn ? h->conn->name : "?");
-        h->flip_pending = 0;
-        h->caps &= ~HEAD_CAP_FLIP;
-        drect_t all = { 0, 0, h->mode.w, h->mode.h };
-        rect_add((drect_t *)h->stale[h->front], &h->stale_n[h->front], 8, all);
-        head_commit(h);
-    }
+    head_flip(h, back);
 }
 
 void display_commit(void) {
     display_head_t *hs[DISPLAY_MAX_OUTPUTS];
-    int n = output_heads(hs, DISPLAY_MAX_OUTPUTS);
+    int n = output_heads(hs, DISPLAY_MAX_OUTPUTS), acc = 0;
     for (int i = 0; i < n; i++) head_commit(hs[i]);
+    for (int i = 0; i < n; i++) acc |= hs[i]->acc_queued;
+    if (!acc) return;
+    accel_submit_all();
+    /* a device that is already done (or failed): flush / flip now */
+    for (int i = 0; i < n; i++) if (hs[i]->acc_fence || hs[i]->dirty_n) head_commit(hs[i]);
 }
 
 void display_sync(void) {
@@ -394,10 +681,25 @@ void display_sync(void) {
                 display_adapter_t *a = &adapter_store[i];
                 if (a->state != ADAPTER_ACTIVE) continue;
                 if (a->ops->poll) a->ops->poll(a);
-                for (int k = 0; k < a->nheads; k++) pending |= a->heads[k].flip_pending;
+                for (int k = 0; k < a->nheads; k++)
+                    pending |= a->heads[k].flip_pending | a->heads[k].acc_flip | (a->heads[k].acc_fence != 0);
             }
             if (!pending || time_ms() > end) break;
+            display_commit();                      /* (finishes accelerated frames: their flush / flip) */
             cpu_relax();
+        }
+    }
+    /* a clean shutdown: acceleration worked this far, its marker goes */
+    for (int i = 0; i < nadapters; i++) {
+        display_adapter_t *a = &adapter_store[i];
+        if (a->accel_guard_armed && a->accel) {
+            char k[SETTINGS_KEY_MAX];
+            accel_guard_key(a, k, sizeof k);
+            settings_set(k, NULL);
+            settings_save();
+            a->accel_guard_armed = 0;
+            a->accel_guard_clear_ms = 0;
+            kprintf("display: %s: acceleration marker cleared (shutting down)\n", a->driver);
         }
     }
 }
@@ -652,11 +954,28 @@ static int head_set(display_head_t *h, display_connector_t *c, const display_mod
             if (display_test_fail(a, "fb")) r = E_NOMEM;
             else r = a->ops->fb_alloc ? a->ops->fb_alloc(a, m->w, m->h, &nfb[got]) : E_NOTSUP;
             if (r) break;
-            /* start black (the desktop is drawn over it at once) */
-            if (nfb[got].px) for (int y = 0; y < nfb[got].h; y++) memset((u8 *)nfb[got].px + (u64)y * nfb[got].pitch, 0, (size_t)nfb[got].w * (nfb[got].bpp / 8));
         }
         if (r && got == 0) return r;
         r = 0;
+        /* start black (the desktop is drawn over it at once): by the device if it can */
+        int filled = 0;
+        if (accel_has(a, ACCEL_FILL)) {
+            accel_drain(a);
+            int ok = accel_has(a, ACCEL_FILL), queued = 0;
+            for (int i = 0; i < got && ok; i++) {
+                if (!accel_fb_ok(&nfb[i]) || a->accel_ops->fill(a, &nfb[i], 0, 0, nfb[i].w, nfb[i].h, 0)) ok = 0;
+                else queued++;
+            }
+            u32 f = queued ? a->accel_ops->submit(a) : 0;
+            if (f) {
+                accel_note(a, f);
+                if (!accel_wait(a, f) && ok) { filled = 1; a->accel_fills += (u32)got; }
+            } else if (queued) {
+                accel_fail(a, "a fill could not be sent");
+            }
+        }
+        for (int i = 0; i < got && !filled; i++)
+            if (nfb[i].px) for (int y = 0; y < nfb[i].h; y++) memset((u8 *)nfb[i].px + (u64)y * nfb[i].pitch, 0, (size_t)nfb[i].w * (nfb[i].bpp / 8));
     }
     /* an unfinished flip on the old buffers: wait for it (bounded) */
     for (u64 end = time_ms() + 100; h->flip_pending && time_ms() < end;) {
@@ -798,7 +1117,8 @@ static void adapter_fail(display_adapter_t *a, const char *why_in) {
         if (h->conn) { h->conn->head = NULL; h->conn = NULL; }
         head_free_fbs(h);
     }
-    if (a->ops->restore) a->ops->restore(a);
+    if (a->ops->restore) a->ops->restore(a);       /* (a driver's acceleration stops with it) */
+    if (a->accel) { a->accel = 0; strlcpy(a->accel_why, "the driver was given up", sizeof a->accel_why); }
     a->state = ADAPTER_FAILED;
     strlcpy(a->why, why, sizeof a->why);
     kprintf("display: %s (%s) failed: %s; the firmware frame buffer is used instead\n", a->name, a->driver, why);
@@ -1115,6 +1435,215 @@ void display_guard_confirm(display_adapter_t *a, int yes) {
     balloon("Display driver turned off", t);
 }
 
+/* ---------------- acceleration: its guard, state, speed test ---------------- */
+
+int display_guard_settled(display_adapter_t *a) {
+    return a->state == ADAPTER_ACTIVE && started && !a->guard_armed && !a->guard_confirm;
+}
+
+int display_accel_guard_begin(display_adapter_t *a) {
+    char k[SETTINGS_KEY_MAX];
+    accel_guard_key(a, k, sizeof k);
+    const char *v = settings_get(k, NULL);
+    if (v && v[0] && strcmp(v, "0")) {
+        int fresh = !strcmp(v, "start");
+        if (fresh) { settings_set(k, "blocked"); settings_save(); }
+        snprintf(a->accel_why, sizeof a->accel_why, "blocked: its start did not finish before (remove %s from SETTINGS.INI)", k);
+        kprintf("display: %s: acceleration not started: %s (%s=%s)\n", a->driver,
+                fresh ? "its bring-up at the last boot did not finish" : "it stays off after a bring-up that did not finish", k,
+                fresh ? "start" : v);
+        return E_PERM;
+    }
+    settings_set(k, "start");
+    int r = settings_save();
+    if (r) {
+        settings_set(k, NULL);
+        snprintf(a->accel_why, sizeof a->accel_why, "its start marker cannot be saved (%s)", strerror(r));
+        kprintf("display: %s: the acceleration marker cannot be saved (%s): not starting it\n", a->driver, strerror(r));
+        return r;
+    }
+    a->accel_guard_armed = 1;
+    kprintf("display: %s: acceleration marker saved (%s=start)\n", a->driver, k);
+    if (bootlog_save) bootlog_save("display acceleration starting");
+    return 0;
+}
+
+static void accel_guard_clear(display_adapter_t *a) {
+    char k[SETTINGS_KEY_MAX];
+    accel_guard_key(a, k, sizeof k);
+    settings_set(k, NULL);
+    settings_save();
+    a->accel_guard_armed = 0;
+    a->accel_guard_clear_ms = 0;
+    kprintf("display: %s: acceleration marker cleared (it ran for 10 seconds)\n", a->driver);
+    if (bootlog_save) bootlog_save("display acceleration running");
+}
+
+void display_accel_ready(display_adapter_t *a, u32 caps, const char *name) {
+    a->accel = caps;
+    a->accel_why[0] = 0;
+    a->accel_src = NULL;
+    a->accel_last = a->accel_seen = 0;
+    strlcpy(a->accel_name, name ? name : "", sizeof a->accel_name);
+    kprintf("display: %s: acceleration in use: %s (%s%s%s)\n", a->name, a->accel_name, caps & ACCEL_UPLOAD ? "uploads" : "",
+            caps & ACCEL_COPY ? ", copies" : "", caps & ACCEL_FILL ? ", fills" : "");
+    if (a->accel_guard_armed) a->accel_guard_clear_ms = time_ms() + 10000;
+}
+
+const char *display_accel_state(display_adapter_t *a, char *buf, int n) {
+    if (!a->accel_ops) snprintf(buf, (size_t)n, "none");
+    else if (a->accel)
+        snprintf(buf, (size_t)n, "in use: %s; %u uploads, %u copies, %u fills, %u rectangles by the CPU", a->accel_name, a->accel_uploads,
+                 a->accel_copies, a->accel_fills, a->accel_cpu);
+    else snprintf(buf, (size_t)n, "off: %s", a->accel_why[0] ? a->accel_why : "not started");
+    return buf;
+}
+
+int display_accel_bench(int test, u64 *bytes, u64 *us, u64 *cpu_us, u32 *passes, char *why, int whyn) {
+    *bytes = *us = *cpu_us = 0;
+    *passes = 0;
+    display_head_t *h = primary ? primary->head : NULL;
+    if (!h || !h->nfb) { snprintf(why, (size_t)whyn, "no monitor on the desktop"); return E_NOTSUP; }
+    display_adapter_t *a = h->adapter;
+    u32 need = test == 0 ? ACCEL_FILL : test == 1 ? ACCEL_UPLOAD : ACCEL_COPY;
+    if (!accel_has(a, need)) {
+        char st[128];
+        snprintf(why, (size_t)whyn, "%s: %s", a->name, a->accel_ops ? display_accel_state(a, st, sizeof st) : "no acceleration");
+        return E_NOTSUP;
+    }
+    display_fb_t *fb = &h->fb[h->front];
+    if (!accel_fb_ok(fb) || (test == 1 && !accel_src(a))) { snprintf(why, (size_t)whyn, "the buffer or the desktop surface cannot be used"); return E_NOTSUP; }
+    accel_drain(a);
+    int w = fb->w, hh = fb->h, half = fb->h / 2;
+    if (test == 1) { w = MIN(w, src_w - h->x); hh = MIN(hh, src_h - h->y); }
+    u64 t0 = time_us(), now = t0, cpu = 0, b = 0;
+    u32 n = 0;
+    do {
+        u64 c0 = time_us();
+        int e;
+        if (test == 0) { e = a->accel_ops->fill(a, fb, 0, 0, w, hh, (n & 1) ? 0x00404040 : 0x00303030); b += (u64)w * 4 * hh; }
+        else if (test == 1) { e = a->accel_ops->upload(a, fb, 0, 0, w, hh, ((u64)h->y * (u64)src_stride + (u64)h->x) * 4, (u32)src_stride * 4); b += (u64)w * 4 * hh; }
+        else {
+            e = (n & 1) ? a->accel_ops->copy(a, fb, 0, 0, fb, 0, half, w, half) : a->accel_ops->copy(a, fb, 0, half, fb, 0, 0, w, half);
+            b += (u64)w * 4 * half;
+        }
+        u32 f = e ? 0 : a->accel_ops->submit(a);
+        cpu += time_us() - c0;
+        if (!f) { snprintf(why, (size_t)whyn, "the operation could not be queued (%s)", strerror(e ? e : E_IO)); return E_IO; }
+        accel_note(a, f);
+        if (accel_wait(a, f)) { snprintf(why, (size_t)whyn, "it failed: %s", a->accel_why); return E_IO; }
+        n++;
+        now = time_us();
+    } while (now - t0 < 200000 && n < 10000);
+    *bytes = b;
+    *us = now - t0;
+    *cpu_us = cpu;
+    *passes = n;
+    return 0;
+}
+
+/* ---------------- acceleration: the software test hook ----------------
+ * opt/halcyon/displayaccel = "<driver>" (or "<driver>:hang") gives an
+ * adapter without acceleration of its own operations done by the CPU, but
+ * asynchronously (2 ms after submit, when done() is asked), so the queueing,
+ * the fences, the flush / flip ordering and the fallback run on the real
+ * presentation path in QEMU. ":hang" stops completing after 50 fences. */
+typedef struct soft_op {
+    u8 kind;                                   /* 1 upload, 2 copy, 3 fill */
+    display_fb_t dst, src;
+    int x, y, sx, sy, w, h;
+    u64 src_off;
+    u32 src_pitch, color;
+} soft_op_t;
+static struct {
+    soft_op_t q[128];
+    int nq, nfl;                               /* queued; submitted (the first nfl of q are in flight) */
+    u32 seq, done;
+    u64 due_ms;
+    int hang;
+    const u8 *src;
+    u64 src_bytes;
+} soft;
+
+static int soft_source(display_adapter_t *a, const void *px, u64 bytes) { (void)a; soft.src = px; soft.src_bytes = bytes; return 0; }
+static int soft_rect_ok(const display_fb_t *fb, int x, int y, int w, int h) { return x >= 0 && y >= 0 && w > 0 && h > 0 && x + w <= fb->w && y + h <= fb->h; }
+static int soft_queue(soft_op_t *o) {
+    if (soft.nq >= (int)ARRAY_SIZE(soft.q)) return E_NOSPC;
+    soft.q[soft.nq++] = *o;
+    return 0;
+}
+static int soft_upload(display_adapter_t *a, display_fb_t *dst, int x, int y, int w, int h, u64 src_off, u32 src_pitch) {
+    (void)a;
+    if (!soft.src || !soft_rect_ok(dst, x, y, w, h) || src_off + (u64)(h - 1) * src_pitch + (u64)w * 4 > soft.src_bytes) return E_INVAL;
+    soft_op_t o = { .kind = 1, .dst = *dst, .x = x, .y = y, .w = w, .h = h, .src_off = src_off, .src_pitch = src_pitch };
+    return soft_queue(&o);
+}
+static int soft_copy(display_adapter_t *a, display_fb_t *dst, int dx, int dy, display_fb_t *src, int sx, int sy, int w, int h) {
+    (void)a;
+    if (!soft_rect_ok(dst, dx, dy, w, h) || !soft_rect_ok(src, sx, sy, w, h)) return E_INVAL;
+    if (dst->px == src->px && dx < sx + w && sx < dx + w && dy < sy + h && sy < dy + h) return E_INVAL;   /* overlapping */
+    soft_op_t o = { .kind = 2, .dst = *dst, .src = *src, .x = dx, .y = dy, .sx = sx, .sy = sy, .w = w, .h = h };
+    return soft_queue(&o);
+}
+static int soft_fill(display_adapter_t *a, display_fb_t *dst, int x, int y, int w, int h, u32 c) {
+    (void)a;
+    if (!soft_rect_ok(dst, x, y, w, h)) return E_INVAL;
+    soft_op_t o = { .kind = 3, .dst = *dst, .x = x, .y = y, .w = w, .h = h, .color = c };
+    return soft_queue(&o);
+}
+static u32 soft_submit(display_adapter_t *a) {
+    (void)a;
+    if (soft.nq > soft.nfl) {
+        soft.nfl = soft.nq;
+        soft.seq++;
+        soft.due_ms = time_ms() + 2;
+    }
+    return soft.seq;
+}
+static void soft_run(void) {
+    for (int i = 0; i < soft.nfl; i++) {
+        soft_op_t *o = &soft.q[i];
+        for (int j = 0; j < o->h; j++) {
+            u32 *d = (u32 *)((u8 *)o->dst.px + (u64)(o->y + j) * o->dst.pitch) + o->x;
+            if (o->kind == 1) memcpy(d, soft.src + o->src_off + (u64)j * o->src_pitch, (size_t)o->w * 4);
+            else if (o->kind == 2) memcpy(d, (u32 *)((u8 *)o->src.px + (u64)(o->sy + j) * o->src.pitch) + o->sx, (size_t)o->w * 4);
+            else for (int k = 0; k < o->w; k++) d[k] = o->color;
+        }
+    }
+    memmove(soft.q, soft.q + soft.nfl, (size_t)(soft.nq - soft.nfl) * sizeof soft.q[0]);
+    soft.nq -= soft.nfl;
+    soft.nfl = 0;
+    soft.done = soft.seq;
+}
+static int soft_done(display_adapter_t *a, u32 fence) {
+    (void)a;
+    if ((i32)(soft.done - fence) >= 0) return 1;
+    if (soft.hang && soft.seq > 50) return 0;            /* (the test of the fallback: never again) */
+    if (time_ms() < soft.due_ms) return 0;
+    soft_run();
+    return (i32)(soft.done - fence) >= 0;
+}
+static void soft_stop(display_adapter_t *a, const char *why) {
+    (void)a; (void)why;
+    soft.nq = soft.nfl = 0;
+    soft.done = soft.seq;
+}
+static const display_accel_ops_t soft_ops = { soft_source, soft_upload, soft_copy, soft_fill, soft_submit, soft_done, soft_stop };
+
+static void soft_accel_install(display_adapter_t *a) {
+    if (!accel_hook[0] || a->accel_ops) return;
+    char name[32];
+    strlcpy(name, accel_hook, sizeof name);
+    char *colon = strchr(name, ':');
+    if (colon) *colon = 0;
+    if (strcasecmp(name, a->driver)) return;
+    memset(&soft, 0, sizeof soft);
+    soft.hang = colon && !strcmp(colon + 1, "hang");
+    a->accel_ops = &soft_ops;
+    a->accel_priv = &soft;
+    display_accel_ready(a, ACCEL_UPLOAD | ACCEL_COPY | ACCEL_FILL, soft.hang ? "software (test hook, hangs after 50 fences)" : "software (test hook)");
+}
+
 /* ---------------- start ---------------- */
 void display_start(void) {
     if (started) return;
@@ -1155,6 +1684,7 @@ void display_start(void) {
             continue;
         }
         a->state = ADAPTER_ACTIVE;
+        soft_accel_install(a);
         int attached = 0;
         for (int k = before; k < cf.n; k++) attached |= cf.out[k].attach;
         if (!attached) {
@@ -1279,6 +1809,7 @@ int display_service(void) {
         display_adapter_t *a = &adapter_store[i];
         if (a->state != ADAPTER_ACTIVE) continue;
         if (a->guard_clear_ms && time_ms() >= a->guard_clear_ms) guard_clear(a, "running for 10 seconds with a confirmed configuration");
+        if (a->accel_guard_clear_ms && time_ms() >= a->accel_guard_clear_ms) accel_guard_clear(a);
         u32 before = 0;
         for (int k = 0; k < a->nheads; k++) before += a->heads[k].flips;
         if (a->ops->poll) a->ops->poll(a);
@@ -1335,6 +1866,7 @@ void display_init(void) {
     fwfb.rp = g_bootinfo.fb_red_pos; fwfb.gp = g_bootinfo.fb_green_pos; fwfb.bp = g_bootinfo.fb_blue_pos;
     if (!qemu_fw_file("opt/halcyon/displayfail", fail_hook, sizeof fail_hook)) fail_hook[0] = 0;
     if (!qemu_fw_file("opt/halcyon/displayguard", guard_hook, sizeof guard_hook)) guard_hook[0] = 0;
+    if (!qemu_fw_file("opt/halcyon/displayaccel", accel_hook, sizeof accel_hook)) accel_hook[0] = 0;
     fwa = display_register("firmware", "Firmware frame buffer (VESA/GOP)", &fw_ops, NULL, fw_fb_device());
     display_head_t *h = display_add_head(fwa, 0, 0);
     display_connector_t *c = display_add_connector(fwa, "Default", CONN_FIRMWARE, 1);

@@ -300,18 +300,22 @@ set up (VESA on a BIOS, GOP on UEFI). For NVIDIA cards a native driver is
 being written (milestone M10): its first step (10a) **identifies** the card
 and reads, never changes, what is on screen; the second (10b) **sets modes**
 on cards from the GeForce 8 to the GeForce 10 series, and 10d adds the
-**hardware cursor, page flips** and **several monitors** there. 10b has run
-on a GTX 1070; 10d has not run on a real card yet. "Tested" below means
-with generated video BIOS images and simulated I2C / DisplayPort buses and a
-simulated display engine on the host (`tests/host/nvtest.c`, `evotest.c`)
-and a simulated card in QEMU.
+**hardware cursor, page flips** and **several monitors** there, and 10e
+**acceleration**: from the GeForce 600 (Kepler) to the GeForce 10 series
+the card's copy engine, which needs no firmware, does the desktop's copies
+to the screen. 10b has run on a GTX 1070; 10d and 10e have not run on a
+real card yet. "Tested" below means with generated video BIOS images and
+simulated I2C / DisplayPort buses, a simulated display engine and a
+simulated PFIFO / MMU / copy engine on the host (`tests/host/nvtest.c`,
+`evotest.c`, `fifotest.c`) and a simulated card in QEMU.
 
-| Generation | Cards | Identified | Video BIOS read from | Monitors (EDID) | Native modesetting |
-|------------|-------|------------|----------------------|-----------------|--------------------|
-| Celsius, Kelvin, Rankine, Curie (NV1x-NV4x, G7x) | GeForce 256 to GeForce 7 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C through the CRTC registers (C51: its own I2C) | Deferred (M10c) |
-| Tesla (G80-GT21x, MCP7x) | GeForce 8, 9, 200, 300 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C ports; DisplayPort AUX from G94 on | Written (M10b, M10d), untested: VGA, DVI (dual link), DisplayPort from G94; cursor, page flips, two monitors |
-| Fermi, Kepler, Maxwell, Pascal | GeForce 400 to GeForce 10 | Yes (untested; the GTX 1070 is the test card) | PRAMIN, PROM (with IFR data), ROM BAR, C0000 | I2C ports, hybrid pads, DisplayPort AUX (GM200 layout from GM20x) | M10b runs on the GTX 1070 (DisplayPort); otherwise written, untested: DVI / HDMI (DVI-mode signal), VGA up to Maxwell. M10d written, untested: cursor, page flips, up to four monitors (two before GF119) |
-| Volta, Turing and later | Titan V, GeForce 16, RTX | Named only: "Turing or later: not supported until Halcyon 1.1" | - | - | - |
+| Generation | Cards | Identified | Video BIOS read from | Monitors (EDID) | Native modesetting | Acceleration (M10e) |
+|------------|-------|------------|----------------------|-----------------|--------------------|---------------------|
+| Celsius, Kelvin, Rankine, Curie (NV1x-NV4x, G7x) | GeForce 256 to GeForce 7 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C through the CRTC registers (C51: its own I2C) | Deferred (M10c) | - |
+| Tesla (G80-GT21x, MCP7x) | GeForce 8, 9, 200, 300 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C ports; DisplayPort AUX from G94 on | Written (M10b, M10d), untested: VGA, DVI (dual link), DisplayPort from G94; cursor, page flips, two monitors | No (the copy engine needs falcon microcode; none before GT215) |
+| Fermi (GF1xx) | GeForce 400, 500 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C ports, hybrid pads, DisplayPort AUX | As Kepler below | No (falcon microcode, another PFIFO) |
+| Kepler, Maxwell, Pascal | GeForce 600 to GeForce 10 | Yes (untested; the GTX 1070 is the test card) | PRAMIN, PROM (with IFR data), ROM BAR, C0000 | I2C ports, hybrid pads, DisplayPort AUX (GM200 layout from GM20x) | M10b runs on the GTX 1070 (DisplayPort); otherwise written, untested: DVI / HDMI (DVI-mode signal), VGA up to Maxwell. M10d written, untested: cursor, page flips, up to four monitors (two before GF119) | Written, untested: the copy engine (no firmware) uploads, copies between the page-flip buffers and fills |
+| Volta, Turing and later | Titan V, GeForce 16, RTX | Named only: "Turing or later: not supported until Halcyon 1.1" | - | - | - | - |
 
 What it finds is in System Information (an "NVIDIA graphics" book with the
 card and every connector's monitor) and in `BOOT.LOG` (lines starting with
@@ -409,6 +413,19 @@ host tests check that the PLL hits them with the table limits the report
 implies; what they cannot check is the card's own limit at that clock and
 the cable. To go back by hand, delete the `display.dp-1.hz` line (the
 monitor's 120 Hz is used) or choose a lower rate.
+
+**Then acceleration (M10e)**, on the native driver, Kepler to Pascal:
+about ten seconds after the desktop appears on the driver (once its
+picture is confirmed) the card's copy engine takes over the copies of what
+changed on the desktop to the screen. Nothing should look different; System
+Information says "Acceleration: in use" with counters, and `NVREPORT`'s
+speed test then compares the CPU and the copy engine side by side,
+including how busy the processor was. `nv.accel=0` turns only this off. If
+the PC stops while the copy engine starts, the next start leaves
+acceleration off (`display.nv.accel.guard=blocked` in SETTINGS.INI; remove
+the line to try again) and the driver on. Send back the same files; see
+[DESIGN-M10-NVIDIA.md](DESIGN-M10-NVIDIA.md) ("What to check on the GTX
+1070 (10e)").
 
 What may go wrong: the register addresses come from nouveau (Linux's
 open-source driver) and are used the way it uses them, but nothing here has

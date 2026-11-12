@@ -107,11 +107,14 @@ enum {
                                    nth connector (E_NOENT no EDID, E_INVAL past the last) */
 #define NVQ_FBTEST   5          /* (test 0..NV_FBTESTS-1, hal_nvfbtest_t *, sizeof) -> 0: one frame buffer
                                    speed test, about 0.2 s, drawing grey frames on the screen (repainted
-                                   after); E_NODEV without a frame buffer */
-#define NV_FBTESTS   6
+                                   after); E_NODEV without a frame buffer; tests 6-8 (the copy engine,
+                                   M10e): E_NOTSUP with note saying why when there is none */
+#define NV_FBTESTS   9
+#define NV_FBTESTS_CPU 6        /* 0-5 by the CPU, 6-8 by the display's accelerator */
 typedef struct hal_nvfbtest {
     int test;                   /* 0 fill (rep stosq), 1 fill (32-bit stores), 2 RAM -> screen,
-                                   3 screen -> screen, 4 screen read, 5 RAM -> RAM */
+                                   3 screen -> screen, 4 screen read, 5 RAM -> RAM; the copy engine:
+                                   6 fill, 7 RAM -> screen (the desktop surface), 8 screen -> screen */
     int cache_type;             /* the frame buffer's page attribute: 1 write-combining, 0 / 7 uncached,
                                    6 write-back, -1 unknown */
     unsigned width, height, pitch, bpp;
@@ -119,6 +122,9 @@ typedef struct hal_nvfbtest {
     unsigned long long bytes, us;       /* moved in that time */
     unsigned passes, sink;
     char name[48];
+    unsigned long long cpu_us;  /* of us, the time the CPU was busy (the whole test for 0-5; queueing and
+                                   submitting for 6-8, not the polled wait, which the desktop does not do) */
+    char note[96];              /* 6-8: the engine used, or why there is none */
 } hal_nvfbtest_t;
 
 /* SYS_SHM_OPEN flags */
