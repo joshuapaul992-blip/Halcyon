@@ -20,6 +20,7 @@ Build N" in the bottom right corner.
 | Area | What's there |
 |------|-------------|
 | Boot | Custom MBR plus stage 2 for BIOS (unreal mode, reads `\HALCYON\KERNEL.BIN` from FAT32 via INT 13h), and a UEFI loader (`\EFI\BOOT\BOOTX64.EFI`, GOP framebuffer). One image boots both ways. |
+| Install | Halcyon Setup (Start → Install Halcyon; offered when Halcyon starts from a USB stick) installs it on an internal SATA or NVMe disk: the whole disk (GPT with an EFI system partition on UEFI, MBR with an active FAT32 partition on BIOS; either way the disk starts with both), or the free space next to Windows, whose partitions are never shrunk, moved or written. Files are copied and verified, settings kept. Windows keeps starting: from a boot menu on BIOS ("Please select the operating system to start"), from the firmware's menu on UEFI, where Setup adds a "Halcyon" boot entry through the UEFI runtime services. See [docs/DESIGN-M8-INSTALL.md](docs/DESIGN-M8-INSTALL.md). |
 | Kernel | 64-bit, identity mapped, TSC timing, PCI enumeration, ACPI S5 power-off, PS/2 keyboard and mouse. |
 | Threads and programs | Kernel threads with a scheduler (copies, moves and deletes run in the background with a progress dialog and Cancel). Programs run in user mode in their own address space: static position-independent ELF64 `.EXE` files loaded from disk (`C:\PROGRAMS`), preempted every 10 ms, with threads (up to 32 per program; mutexes and condition variables on futexes), named shared memory, system calls for files, memory, processes, the console and windows (an early-2000s style window, drawing and controls API with menus, scroll bars, toolbars, status bars and direct access to the window's pixels), and BSD sockets: local stream and datagram sockets between programs, by name (back-pressure, non-blocking calls, timeouts, peers told when a program ends), and `poll` over sockets, files and the program's window events. Pages are no-execute unless they hold code; SMEP, SMAP and UMIP are on where the CPU has them. A program that crashes gets a "has encountered a problem and needs to close" dialog and takes nothing else down. Task Manager (Ctrl+Alt+Del) ends programs that hang; a program can end only programs it started, anything else needs your OK in a dialog of the system. Calculator, Sonar, Notepad, Paint and Explorer are user programs. |
 | Interrupts | Local APIC (xAPIC or x2APIC) and I/O APICs from the ACPI MADT, or the 8259 PICs. MSI-X and MSI for xHCI and AHCI. PCI INTx for UHCI, OHCI and EHCI: without an AML interpreter the routing is learned from which device raised an interrupt. The CPU halts when there is nothing to do: a one-shot local APIC (or PIT) timer wakes it for the next deadline. A device whose interrupt does not work is polled. |
@@ -98,6 +99,24 @@ sudo dd if=build/halcyon.img of=/dev/sdX bs=4M conv=fsync status=progress
 
 On Windows, use a raw image writer such as Rufus (in "DD image" mode) or balenaEtcher.
 Then boot from the stick. On UEFI machines, turn off Secure Boot: the loader is not signed.
+
+## Installing it on a hard disk
+
+Start Halcyon from the stick and choose **Install Halcyon** in the welcome
+prompt or the Start menu. The wizard installs on an internal disk, either the
+whole disk (after a confirmation naming it) or the unpartitioned space next to
+Windows (make room with Windows' Disk Management first: Halcyon never shrinks
+partitions). Back up first: this is a hobby OS. In QEMU, add a disk and start
+from it afterwards without the stick:
+
+```bash
+truncate -s 2G disk.img
+EXTRA="-drive if=none,id=d0,format=raw,file=disk.img -device ide-hd,drive=d0,bus=ide.0" tools/run.sh xhci uefi
+NOSTICK=1 VARS=build/ovmf_vars.fd EXTRA="-drive if=none,id=d0,format=raw,file=disk.img -device ide-hd,drive=d0,bus=ide.0" tools/run.sh xhci uefi
+```
+
+(`VARS` keeps the UEFI variable store, with the boot entry Setup added; run.sh
+otherwise starts from a fresh one.)
 
 ## Troubleshooting and testing on real PCs
 
@@ -203,6 +222,17 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   loss), each ending with a memory check; and a libFuzzer target for the
   receive path (`tests/host/fuzz_net.c`)
 - the EDID parser and the loaders' resolution choice (`tests/host/displaytest.c`)
+- the installer's partition tables (`tests/host/parttest.c`): new MBRs and
+  GPTs (512 and 4096-byte sectors, up to 3 TiB) and partitions added next to
+  Windows-like layouts, checked with sfdisk, sgdisk and an independent
+  checker (`tests/host/gpt_check.py`, zlib CRCs); the other partitions'
+  entries and data must not change
+- the installer in QEMU (`tools/boottest.py install`, `tools/ci.sh full`;
+  two of them in the default matrix): Halcyon installed on a blank SATA or
+  NVMe disk (also 4 KiB sectors) and next to Windows on MBR and GPT disks,
+  checked on the host (tables, fsck.fat, files, Windows' partitions hashed and
+  ntfsfix -n), then the disk started alone with BIOS and UEFI (through the
+  firmware boot entry Setup added), and Windows chosen in the BIOS boot menu
 - the WAV library (`tests/sound/run.sh`), built for Linux with ASan/UBSan:
   every format against known values and encoders written independently from
   the standards (G.711, IMA ADPCM), mix-down, odd and truncated files, every

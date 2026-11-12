@@ -4,7 +4,8 @@
 # seeds replayed), the USB HID report parser, the EDID / video mode choice,
 # the HD Audio codec layer (hdatest.c: synthetic codecs), Notepad's text
 # model and undo engine (notepadtest.c), the NTFS
-# formatter (ntfsfmt.c: NTFSARGS=quick for fewer images and no FUSE),
+# formatter (ntfsfmt.c: NTFSARGS=quick for fewer images and no FUSE), the
+# installer's partition tables (parttest.c, checked with sfdisk / sgdisk),
 # then the storage stack. Extra arguments
 # are passed to fstest: "-v" for verbose output, scenario names
 # (paths fat12 fat16 fat32 gpt 4k misc random testdisks hostile unicode format
@@ -25,4 +26,7 @@ tail -1 $out/notepad.log
 # the NTFS formatter: images checked with ntfs-3g (skipped without it)
 make --no-print-directory ntfsfmt NTFSARGS="$NTFSARGS" > $out/ntfsfmt.log 2>&1 || { cat $out/ntfsfmt.log; exit 1; }
 tail -1 $out/ntfsfmt.log
+# the installer's partition tables (MBR / GPT writer), checked with sfdisk, sgdisk and gpt_check.py
+make --no-print-directory parttab > $out/parttest.log 2>&1 || { cat $out/parttest.log; exit 1; }
+tail -1 $out/parttest.log
 exec make --no-print-directory test ARGS="$*"

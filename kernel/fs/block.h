@@ -54,6 +54,8 @@ struct blockdev {
     u8   ptab_slot;         /* MBR: entry 0-3 in the sector at ptab_lba */
     u64  ptab_lba;          /* MBR: parent sector holding the entry (0 = MBR, else EBR) */
     blockdev_t *next;       /* registry list */
+    u8   part_guid[16];     /* GPT: unique partition GUID (as stored on disk) */
+    u8   part_type_guid[16];/* GPT: partition type GUID */
 };
 
 #define PTAB_MBR 1
@@ -80,6 +82,16 @@ void blockdev_init(void);
 int  blockdev_set_mbr_type(blockdev_t *part, u8 type);
 int  blockdev_register(blockdev_t *bd);
 void blockdev_unregister(blockdev_t *bd);
+
+/* The installer (apps/instcore.c) changes partition tables of registered
+ * disks. blockdev_rescan() unmounts and drops the disk's partitions and
+ * scans its table again (E_BUSY, nothing changed, if a volume on it is the
+ * boot volume or has open files). blockdev_add_part() registers one new
+ * partition next to the existing ones without touching them (it is not
+ * mounted: format it, which mounts it). Both with storage_lock held. */
+int  blockdev_rescan(blockdev_t *disk);
+blockdev_t *blockdev_add_part(blockdev_t *disk, u64 start, u64 count, int index, u8 mbr_type, int ptab_kind,
+                              int mbr_slot, const u8 *gpt_type, const u8 *gpt_guid);
 
 /* bounds-checked I/O (works for disks and partitions) */
 int blk_read(blockdev_t *bd, u64 lba, u32 count, void *buf);

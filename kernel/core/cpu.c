@@ -112,6 +112,9 @@ void isr_dispatch(struct regs *r) {
     if ((r->cs & 3) && r->vector == 2) { kprintf("cpu: NMI while a program was running (ignored)\n"); proc_user_return(r); return; }
     /* an exception in a user program ends that program, not the system */
     if ((r->cs & 3) && r->vector != 8 && r->vector != 18) { proc_user_fault(r); return; }
+    /* a fault inside a UEFI runtime service ends that call, not the system (core/efirt.c) */
+    int efi_fault_fixup(struct regs *r);
+    if (!(r->cs & 3) && r->vector != 2 && r->vector != 8 && r->vector != 18 && efi_fault_fixup(r)) return;
     __asm__ volatile("cli");
     g_panicking = 1;
     u64 cr2;

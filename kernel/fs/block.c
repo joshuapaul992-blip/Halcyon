@@ -247,7 +247,12 @@ static int scan_gpt(blockdev_t *disk, u8 *buf) {
             continue;
         }
         blockdev_t *p = add_part(disk, s, l - s + 1, (int)i + 1, 0);
-        if (p) { count++; p->ptab_kind = PTAB_GPT; }
+        if (p) {
+            count++;
+            p->ptab_kind = PTAB_GPT;
+            memcpy(p->part_type_guid, e, 16);
+            memcpy(p->part_guid, e + 16, 16);
+        }
     }
     kfree(ents);
     return count;
@@ -289,6 +294,7 @@ static void mount_children(blockdev_t *disk) {
 mutex_t storage_lock = MUTEX_INIT("storage");
 
 static int blockdev_register_locked(blockdev_t *bd);
+static int scan_disk(blockdev_t *bd);
 int blockdev_register(blockdev_t *bd) {
     mutex_lock(&storage_lock);
     int r = blockdev_register_locked(bd);
@@ -313,7 +319,11 @@ static int blockdev_register_locked(blockdev_t *bd) {
         vfs_try_mount(bd);
         return 0;
     }
+    return scan_disk(bd);
+}
 
+/* the partition table (or superfloppy volume) of a registered disk */
+static int scan_disk(blockdev_t *bd) {
     u8 *s0 = kmalloc(bd->sector_size), *buf = kmalloc(bd->sector_size);
     if (!s0 || !buf) { kfree(s0); kfree(buf); return E_NOMEM; }
     int r = blk_read(bd, 0, 1, s0);
@@ -401,6 +411,54 @@ static void blockdev_unregister_locked(blockdev_t *bd) {
     vfs_unmount_blockdev(bd);
     list_remove(bd);
     bd->present = 0;
+}
+
+/* ---- the installer: a changed partition table ---- */
+
+static int disk_busy(blockdev_t *disk) {
+    for (int i = 0; i < vfs_volume_count(); i++) {
+        volume_t *v = vfs_volume(i);
+        if (v->bd && (v->bd == disk || v->bd->parent == disk) && (v->is_boot || v->open_files)) return 1;
+    }
+    return 0;
+}
+
+int blockdev_rescan(blockdev_t *disk) {
+    if (!disk || disk->type == BDEV_PART || !disk->present) return E_INVAL;
+    if (disk_busy(disk)) return E_BUSY;
+    kprintf("block: %s: partition table changed, scanning it again\n", disk->name);
+    for (;;) {
+        blockdev_t *child = NULL;
+        for (blockdev_t *b = g_devs; b; b = b->next) if (b->parent == disk) { child = b; break; }
+        if (!child) break;
+        vfs_unmount_blockdev(child);
+        list_remove(child);
+        child->present = 0;
+        kfree(child);
+    }
+    vfs_unmount_blockdev(disk);
+    disk->disk_sig = 0;
+    return scan_disk(disk);
+}
+
+blockdev_t *blockdev_add_part(blockdev_t *disk, u64 start, u64 count, int index, u8 mbr_type, int ptab_kind,
+                              int mbr_slot, const u8 *gpt_type, const u8 *gpt_guid) {
+    if (!disk || disk->type == BDEV_PART || !disk->present) return NULL;
+    for (blockdev_t *b = g_devs; b; b = b->next)
+        if (b->parent == disk && b->part_index == index) return NULL;
+    /* a new MBR may carry a new disk signature */
+    u8 *s0 = kmalloc(disk->sector_size);
+    if (s0 && !blk_read(disk, 0, 1, s0) && s0[510] == 0x55 && s0[511] == 0xAA) disk->disk_sig = rd32(s0 + 440);
+    kfree(s0);
+    blockdev_t *p = add_part(disk, start, count, index, mbr_type);
+    if (!p) return NULL;
+    p->ptab_kind = (u8)ptab_kind;
+    p->ptab_lba = 0;
+    p->ptab_slot = (u8)(mbr_slot < 0 ? 0 : mbr_slot);
+    if (gpt_type) memcpy(p->part_type_guid, gpt_type, 16);
+    if (gpt_guid) memcpy(p->part_guid, gpt_guid, 16);
+    for (blockdev_t *b = g_devs; b; b = b->next) if (b->parent == disk) b->disk_sig = disk->disk_sig;
+    return p;
 }
 
 /* ---- partition type ---- */

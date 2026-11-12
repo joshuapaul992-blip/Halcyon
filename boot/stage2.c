@@ -161,40 +161,87 @@ static u32 load_settings(void) {
     return left ? 0 : size;
 }
 
-static u32 load_kernel(void) {
+/* the partition at lba holds a FAT32 volume with \HALCYON\KERNEL.BIN:
+ * remember its layout (part_lba, fat_lba, ...) and the kernel's first
+ * cluster and size */
+static u32 kernel_clus, kernel_size;
+static int try_partition(u32 lba) {
+    if (read_to(lba, 1, (u32)sector)) return 0;
+    if (sector[510] != 0x55 || sector[511] != 0xAA) return 0;
+    u32 s = sector[13], rsvd = rd16(sector + 14), nfats = sector[16];
+    /* FAT32 only: no fixed root directory, no 16-bit FAT size (NTFS has
+     * neither reserved sectors nor FATs, so it fails here too) */
+    if (rd16(sector + 11) != 512 || !s || (s & (s - 1)) || !rsvd || nfats < 1 || nfats > 2 ||
+        rd16(sector + 17) != 0 || rd16(sector + 22) != 0 || !rd32(sector + 36)) return 0;
+    spc = s;
+    part_lba = lba;
+    root_clus = rd32(sector + 44);
+    fat_lba = part_lba + rsvd;
+    data_lba = fat_lba + nfats * rd32(sector + 36);
+    fatsec_lba = 0xFFFFFFFF;
+    u32 dir = find_entry(root_clus, "HALCYON    ", 0, 1);
+    if (!dir) return 0;
+    u32 size, c = find_entry(dir, "KERNEL  BIN", &size, 0);
+    if (!c) return 0;
+    halcyon_dir = dir;
+    kernel_clus = c;
+    kernel_size = size;
+    return 1;
+}
+
+static int is_fat_type(u8 t) { return t == 0x0B || t == 0x0C || t == 0xEF || t == 0x0E || t == 0x06; }
+
+/* GPT (protective MBR): every partition is probed, in table order (the
+ * installer gives Halcyon's partition the EFI system type, next to
+ * Windows' own one, and stage2 its own BIOS boot partition) */
+static u8 gpt_part_guid[16];
+static int gpt_boot;
+static int find_on_gpt(void) {
+    static u8 hdr[512], ents[512];
+    if (read_to(1, 1, (u32)hdr) || memcmp(hdr, "EFI PART", 8)) return 0;
+    u32 ent_lba = rd32(hdr + 72), num = rd32(hdr + 80), esz = rd32(hdr + 84);
+    if (rd32(hdr + 76) || (esz != 128 && esz != 256 && esz != 512)) return 0;
+    if (num > 128) num = 128;
+    u32 per = 512 / esz;
+    for (u32 i = 0; i < num; i++) {
+        if (i % per == 0 && read_to(ent_lba + i / per, 1, (u32)ents)) return 0;
+        u8 *e = ents + (i % per) * esz;
+        int used = 0;
+        for (int k = 0; k < 16; k++) if (e[k]) used = 1;
+        if (!used || rd32(e + 36)) continue;           /* empty, or starts beyond 2 TiB */
+        if (try_partition(rd32(e + 32))) {
+            memcpy(gpt_part_guid, e + 16, 16);         /* the kernel finds its boot volume by it */
+            gpt_boot = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static u8 mbr_tab[64];      /* the MBR's partition table */
+
+static void find_halcyon(void) {
     if (read_to(0, 1, (u32)sector)) die("cannot read MBR");
     if (sector[510] != 0x55 || sector[511] != 0xAA) die("bad MBR signature");
     disk_sig = rd32(sector + 440);
-    int best = -1;
-    for (int i = 0; i < 4; i++) {
-        u8 *pe = sector + 446 + i * 16;
-        u8 t = pe[4];
-        if (t == 0x0B || t == 0x0C || t == 0xEF || t == 0x0E || t == 0x06) {
-            if (best < 0 || (pe[0] & 0x80)) best = i;
+    memcpy(mbr_tab, sector + 446, 64);
+    for (int i = 0; i < 4; i++)
+        if (mbr_tab[i * 16 + 4] == 0xEE) {
+            if (find_on_gpt()) return;
+            die("no Halcyon partition (\\HALCYON\\KERNEL.BIN) in the GPT");
         }
-    }
-    if (best < 0) die("no FAT partition found");
-    part_lba = rd32(sector + 446 + best * 16 + 8);
+    /* MBR: the active FAT partition first, then the others in table order */
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < 4; i++) {
+            u8 *pe = mbr_tab + i * 16;
+            if (!is_fat_type(pe[4]) || !!(pe[0] & 0x80) != !pass) continue;
+            if (try_partition(rd32(pe + 8))) return;
+        }
+    die("no FAT32 partition with \\HALCYON\\KERNEL.BIN found");
+}
 
-    if (read_to(part_lba, 1, (u32)sector)) die("cannot read boot sector");
-    if (rd16(sector + 11) != 512) die("unsupported sector size");
-    spc = sector[13];
-    u32 rsvd = rd16(sector + 14);
-    u32 nfats = sector[16];
-    u32 fatsz = rd16(sector + 22);
-    if (fatsz != 0) die("boot partition is not FAT32");
-    fatsz = rd32(sector + 36);
-    root_clus = rd32(sector + 44);
-    fat_lba = part_lba + rsvd;
-    data_lba = fat_lba + nfats * fatsz;
-
-    u32 dir = find_entry(root_clus, "HALCYON    ", 0, 1);
-    halcyon_dir = dir;
-    if (!dir) die("\\HALCYON directory not found");
-    u32 size;
-    u32 c = find_entry(dir, "KERNEL  BIN", &size, 0);
-    if (!c) die("\\HALCYON\\KERNEL.BIN not found");
-
+static u32 load_kernel(void) {
+    u32 size = kernel_size, c = kernel_clus;
     puts("Loading kernel");
     u32 dest = KERNEL_LOAD, remaining = (size + 511) / 512, dots = 0;
     while (c >= 2 && c < 0x0FFFFFF8 && remaining) {
@@ -459,9 +506,104 @@ static u32 check_f8(void) {
     return flags;
 }
 
+/* ---------------- choosing an operating system ----------------
+ * When Halcyon was installed next to another system on an MBR disk, that
+ * system's partition is still the active one (the installer leaves the
+ * partition table entries of other systems alone). Its boot record is
+ * offered in a menu like Windows XP's boot.ini menu and started the way
+ * the standard MBR code would: loaded to 0000:7C00, DL = drive, DS:SI = its
+ * partition entry. boot.timeout in SETTINGS.INI sets the countdown. */
+extern void chain_boot(u32 drive);
+static u32 other_lba;
+static int other_slot = -1;
+static int other_ntfs;
+
+static int find_other_os(void) {
+    for (int i = 0; i < 4; i++) {
+        u8 *pe = mbr_tab + i * 16;
+        u32 lba = rd32(pe + 8);
+        if (!(pe[0] & 0x80) || !pe[4] || pe[4] == 0xEE || lba == part_lba) continue;
+        if (read_to(lba, 1, (u32)sector) || sector[510] != 0x55 || sector[511] != 0xAA) continue;
+        other_lba = lba;
+        other_slot = i;
+        other_ntfs = !memcmp(sector + 3, "NTFS    ", 8);
+        return 1;
+    }
+    return 0;
+}
+
+static void start_other_os(void) {
+    if (read_to(other_lba, 1, 0x7C00)) die("cannot read the boot sector of the other system");
+    memcpy((void *)0x7BE, mbr_tab + other_slot * 16, 16);   /* where the standard MBR keeps its table */
+    clear_regs(); bregs.eax = 0x0003; bios_int(0x10);         /* clear the screen */
+    chain_boot(drive);
+}
+
+static void vga_num(int x, int y, int v, u8 attr) {
+    char b[8];
+    int n = 0;
+    if (v >= 100) b[n++] = (char)('0' + v / 100);
+    if (v >= 10) b[n++] = (char)('0' + v / 10 % 10);
+    b[n++] = (char)('0' + v % 10);
+    b[n++] = ' '; b[n++] = ' '; b[n] = 0;
+    vga_put(x, y, b, attr);
+}
+
+/* returns the advanced startup flags (| 0x80000000 if the F8 menu ran) */
+static int seconds_since(u16 t0) { return (int)(u16)(ticks() - t0) * 10 / 182; }
+
+static u32 os_menu(int timeout) {
+    const char *names[2] = { "Halcyon", other_ntfs ? "Windows" : "Other operating system" };
+    int sel = 0, counting = timeout > 0;
+    u16 t0 = ticks();
+    clear_regs(); bregs.eax = 0x0003; bios_int(0x10);
+    clear_regs(); bregs.eax = 0x0100; bregs.ecx = 0x2000; bios_int(0x10);
+    for (;;) {
+        int left = counting ? timeout - seconds_since(t0) : 0;
+        if (counting && left <= 0) break;
+        for (int y = 0; y < 25; y++) vga_fill(y, 0x07);
+        vga_put(2, 2, "Please select the operating system to start:", 0x07);
+        for (int i = 0; i < 2; i++) {
+            u8 a = i == sel ? 0x70 : 0x07;
+            for (int x = 6; x < 74; x++) LAUNDER((volatile u16 *)0xB8000)[(5 + i) * 80 + x] = (u16)((a << 8) | ' ');
+            vga_put(8, 5 + i, names[i], a);
+        }
+        vga_put(2, 10, "Use the up and down arrow keys to move the highlight to your choice.", 0x07);
+        vga_put(2, 11, "Press ENTER to choose.", 0x07);
+        vga_put(2, 21, "For troubleshooting and advanced startup options for Halcyon, press F8.", 0x07);
+        if (counting) {
+            vga_put(2, 14, "Seconds until highlighted choice will be started automatically:", 0x07);
+            vga_num(67, 14, left, 0x07);
+        }
+        /* wait for a key, or the next second of the countdown */
+        while (!key_ready() && !(counting && timeout - seconds_since(t0) != left)) ;
+        if (!key_ready()) continue;
+        u16 k = key_read();
+        u8 sc = k >> 8, ch = (u8)k;
+        counting = 0;
+        if (sc == 0x48 || sc == 0x50) sel ^= 1;
+        else if (sc == 0x42 && sel == 0) return boot_menu() | 0x80000000u;
+        else if (ch == 13) break;
+    }
+    if (sel == 1) start_other_os();
+    clear_regs(); bregs.eax = 0x0003; bios_int(0x10);
+    return 0;
+}
+
 void stage2_main(u32 boot_drive) {
     drive = boot_drive;
     puts("\r\nHalcyon loader\n");
+
+    find_halcyon();
+    u32 slen = load_settings();
+    u32 bf;
+    if (find_other_os()) {
+        int timeout = slen ? modesel_setting(LAUNDER((const char *)SETTINGS_BUF), slen, "boot.timeout") : -1;
+        bf = os_menu(timeout < 0 ? 10 : timeout > 999 ? 999 : timeout);
+        puts("\r\nHalcyon loader\n");
+    } else {
+        bf = check_f8();
+    }
 
     u32 ksize = load_kernel();
     struct kernel_header *kh = LAUNDER((struct kernel_header *)KERNEL_LOAD);
@@ -474,15 +616,14 @@ void stage2_main(u32 boot_drive) {
     bi->magic = BOOTINFO_MAGIC;
     bi->boot_type = BOOT_TYPE_BIOS;
     bi->bios_drive = drive;
-    bi->boot_disk_sig = disk_sig;
+    bi->boot_disk_sig = gpt_boot ? 0 : disk_sig;      /* (a protective MBR's signature means nothing) */
     bi->boot_part_lba = part_lba;
+    if (gpt_boot) memcpy(bi->boot_part_guid, gpt_part_guid, 16);
     bi->rsdp = find_rsdp();
-    u32 bf = check_f8();
     bi->boot_flags = bf & ~0x80000000u;
     get_mmap(bi);
     build_page_tables();
     (void)puthex;
-    u32 slen = load_settings();
     set_video(bi, slen ? LAUNDER((const char *)SETTINGS_BUF) : 0, slen);
     enter_long(PT_BASE, (u32)kh->entry, BOOTINFO);
 }

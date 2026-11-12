@@ -51,6 +51,10 @@ static int is_boot_volume(volume_t *v) {
                    bd->part_start == g_bootinfo.boot_part_lba;
         return bd->disk_sig == g_bootinfo.boot_disk_sig && g_bootinfo.boot_part_lba == 0;
     }
+    /* UEFI from a GPT disk: the partition's unique GUID */
+    static const u8 zero[16];
+    if (memcmp(g_bootinfo.boot_part_guid, zero, 16))
+        return bd->type == BDEV_PART && !memcmp(bd->part_guid, g_bootinfo.boot_part_guid, 16);
     return !strcasecmp(v->label, "HALCYON");
 }
 

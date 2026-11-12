@@ -2,6 +2,8 @@
 # Halcyon continuous-integration checks. Run locally or from CI.
 #   tools/ci.sh            build + host FAT tests + QEMU boot matrix
 #   tools/ci.sh quick      build + host FAT tests + xhci:bios and xhci:uefi boots
+#   tools/ci.sh full       the matrix plus the installer set (boottest.py install:
+#                          install, start the installed disk; next to Windows)
 set -e
 cd "$(dirname "$0")/.."
 
@@ -35,6 +37,8 @@ echo "$snd" | tail -2
 echo "== QEMU boot matrix"
 if [ "$1" = quick ]; then
     python3 tools/boottest.py xhci:bios xhci:uefi
+elif [ "$1" = full ]; then
+    python3 tools/boottest.py matrix install
 else
     python3 tools/boottest.py
 fi

@@ -134,6 +134,16 @@ ntfsfmt: $(OUT)/ntfsfmt
 	@rm -rf $(OUT)/ntfswork && mkdir -p $(OUT)/ntfswork
 	$(OUT)/ntfsfmt $(OUT)/ntfswork $(NTFSARGS)
 
+# the installer's partition tables (kernel/fs/parttab.c, parttest.c): checked
+# with gpt_check.py (independent, zlib CRCs), sfdisk and sgdisk (if installed)
+$(OUT)/parttest: $(ROOT)/kernel/fs/parttab.c $(ROOT)/kernel/fs/parttab.h parttest.c shim.c $(wildcard $(ROOT)/kernel/core/*.h) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) $(ROOT)/kernel/fs/parttab.c parttest.c shim.c -o $@
+
+parttab: $(OUT)/parttest
+	@rm -rf $(OUT)/partwork && mkdir -p $(OUT)/partwork
+	$(OUT)/parttest $(OUT)/partwork $(PARTARGS)
+
 # Notepad's text model and undo engine (userland/programs/notepad/doc.c,
 # undo.c), compiled for the host (-DNP_HOST) with the user library's UTF-8
 NPDIR := $(ROOT)/userland/programs/notepad

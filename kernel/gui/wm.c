@@ -1111,6 +1111,7 @@ void gui_main(void) {
     }
     format_test_hook();
     recycle_test_hook();                    /* apps/recycletest.c: fw_cfg opt/halcyon/recycletest */
+    installer_boot_hook();
     for (;;) gui_step();
 }
 

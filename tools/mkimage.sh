@@ -24,8 +24,11 @@ dd if=/dev/zero of="$PART" bs=512 count=0 seek=$PART_SECTORS 2>/dev/null
 mkfs.fat -F 32 -s 1 -h $PART_START -n HALCYON "$PART" >/dev/null
 export MTOOLS_SKIP_CHECK=1
 export LC_ALL=C.UTF-8   # long names in rootfs/ are UTF-8
-mmd -i "$PART" ::/HALCYON ::/EFI ::/EFI/BOOT
+mmd -i "$PART" ::/HALCYON ::/EFI ::/EFI/BOOT ::/HALCYON/BOOT
 mcopy -i "$PART" $BUILD/KERNEL.BIN ::/HALCYON/KERNEL.BIN
+# the BIOS boot code once more as files: the installer writes them to the disk it installs on
+mcopy -i "$PART" $BUILD/boot/mbr.bin ::/HALCYON/BOOT/MBR.BIN
+mcopy -i "$PART" $BUILD/boot/stage2.bin ::/HALCYON/BOOT/STAGE2.BIN
 if [ -f $BUILD/efi/BOOTX64.EFI ]; then
     mcopy -i "$PART" $BUILD/efi/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
 fi
