@@ -544,3 +544,91 @@ As M17 for 1.0: no new big features, finishing, fixing and testing.
 **1.1 order:** 18 → 19 → 20 → 21 → 22 → 23 → 24 → 25 → 26 → 27 (M20, SMP,
 may move to the front if Firefox and Roblox need it sooner).
 
+## Release schedule
+
+Releases are gated by milestones and quality, not by dates. Target windows
+are named so there is something to aim at; when a gate is not met, the window
+slips and the bar stays where it is.
+
+### Versions and build numbers
+
+- Every build is `major.minor.build`: 1.0.<build>, 1.1.<build>, and so on, one
+  build number per release line. The build number is the number of commits
+  in the history the build comes from (tools/mkversion.sh).
+- Service packs are built on the release's maintenance branch (`release/1.0`
+  from the RTM commit), so their build numbers keep rising within the line:
+  1.0 RTM might be 1.0.4210 and 1.0 SP1 1.0.4267. A 1.0 build and a 1.1 build
+  can share a number; the version as a whole stays unique, and About and the
+  boot screen name the service pack ("Halcyon 1.0, Service Pack 1, build
+  4267").
+- Pre-release builds (everything except an RTM or a service pack's final
+  build) show the desktop watermark; finals do not.
+
+### Channels
+
+| Channel | When | What |
+|---|---|---|
+| Dev builds | every commit | what CI builds; watermark |
+| Milestone previews | each finished milestone | a GitHub pre-release: USB image, ISO, checksums, short notes; tag `m7.5`, `m8`, ... |
+| Beta | all features of the release are in, polish not done | Beta 1, Beta 2, ... for testers on real hardware |
+| Release candidates | during the release milestone (M17, M27) | RC1, RC2, ...: fixes only; any of them may become the final |
+| RTM | the approved RC | tag `v1.0`, `v1.1`; no watermark; release notes, known issues |
+| Service packs | every few months after an RTM | fixes plus selected features backported from the next release; their own RCs |
+
+### 1.0
+
+- **Beta 1** once M7.5 to M15 are done (Halcyon runs Firefox, with hardware 3D
+  on the GTX 1070); M17's work runs alongside the betas.
+- **M16 (Xenithium) is not on 1.0's critical path:** it depends on Roblox's
+  weekly clients and its willingness to tolerate unofficial runtimes. It
+  ships in 1.0 if it is ready by the release candidates, otherwise in a 1.0
+  service pack or 1.1.
+- **RTM** when the release candidates show no known crash, hang or data-loss
+  bugs and the hardware matrix is published (M17).
+
+Target windows (estimates; the graphics drivers move at the pace of
+real-hardware testing, and M13-M15 are each bigger than everything before
+them):
+
+| Step | Target |
+|---|---|
+| M7.5 and M8 previews | November-December 2026 |
+| Graphics, M10-M12 | early 2027 |
+| Linux layer, Firefox, Mesa, M13-M15 | through 2027 |
+| 1.0 Beta 1 | mid-2027 |
+| 1.0 RTM | late 2027 |
+
+### 1.0 service packs and backports from 1.1
+
+A 1.1 feature may come to 1.0 in a service pack when it has shipped in a 1.1
+preview or beta and survived testing there, keeps 1.0's programs, settings
+and files working, and is self-contained (drivers, apps, protocols; nothing
+that changes the core of the kernel). Every service pack gets its own release
+candidates, the full CI and the hardware matrix.
+
+| Backported in service packs | 1.1 only |
+|---|---|
+| codecs and Sound Recorder (M25); the firewall, IPv6, SMB file sharing (M23); game controllers, UASP, printers (M24); Wi-Fi and Bluetooth (M22); display on Turing/Ampere and the 2020 Intel/AMD GPUs (M18/M19 modesetting); Check Disk, ext4 (M26) | several cores (M20); the ACPI interpreter, sleep and resume (M21); 3D on the new GPUs (M18/M19 acceleration) |
+
+- **SP1**, about 3-4 months after 1.0 RTM: fixes and the low-risk backports
+  (codecs, firewall, controllers).
+- **SP2**, once 1.1's betas have proven them: Wi-Fi, Bluetooth, IPv6, SMB,
+  display on the newer GPUs.
+- **SP3**, after 1.1 RTM: the last bundle of fixes. 1.0 then gets security
+  fixes only, for 6 months.
+
+### 1.1
+
+Milestone previews for M18-M26, betas once they are in, then M27's release
+candidates and RTM; target about 12 months after 1.0 RTM.
+
+### Beyond 1.1
+
+- A feature release about once a year (1.2, 1.3, ...), each with a theme;
+  1.2 could bring newer GPUs (NVIDIA Ada, AMD RDNA3, Intel Arc), Wi-Fi 6E/7
+  and the security work M17 begins.
+- 2.0 is kept for one change in how Halcyon works, such as a GPU-composited
+  desktop or an ARM64 port, not for a longer feature list.
+- Support: the latest release gets fixes; the one before gets security
+  fixes for 6 months after the next one ships.
+
