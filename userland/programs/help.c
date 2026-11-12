@@ -356,7 +356,7 @@ static void update_buttons(void) {
 }
 static void update_title(void) {
     char t[160];
-    if (doc && doc->title && doc->title[0]) snprintf(t, sizeof t, "%s - Help and Support", doc->title);
+    if (doc && doc->title && doc->title[0]) snprintf(t, sizeof t, strstr(doc->title, "Help and Support") ? "%s" : "%s - Help and Support", doc->title);
     else strlcpy(t, "Help and Support", sizeof t);
     win_set_title(win, t);
 }
@@ -925,8 +925,9 @@ static void run_test(const char *start) {
     ctl_set_text(win, C_SQ, "zzqqxx");
     do_search();
     CHECK(nsr == 0, "search for nonsense: %d", nsr);
+    show_page("notepad", 0);
     paint();
-    CHECK(doc_has_text("Notepad") || doc != NULL, "drawn");
+    CHECK(doc_has_text("Undo and redo") && doc_has_text("Word wrap"), "the headings of the Notepad page");
     if (t_fails) printf("helptest: %d of %d checks FAILED\n", t_fails, t_checks);
     else printf("helptest: all %d checks passed\n", t_checks);
     win_destroy(win);
@@ -945,6 +946,16 @@ int main(int argc, char **argv) {
     lp = clampi(setting_get_int("help.pane", 250), 170, 500);
     load_contents();
     load_index();
+    /* one Help window: a second HELP.EXE hands its page to the first and ends */
+    int lsock = -1;
+    if (!test_mode && (lsock = local_listen("halcyon.help", 4)) < 0) {
+        int c = local_connect("halcyon.help");
+        if (c >= 0) {
+            send(c, start, strlen(start) + 1, 0);
+            close(c);
+            return 0;
+        }
+    }
     win = win_create("Help and Support", cw, ch, WIN_RESIZABLE);
     if (win < 0) return 1;
     win_set_icon(win, HICON_HELP);
@@ -965,6 +976,22 @@ int main(int argc, char **argv) {
             if (dirty) paint();
             continue;
         }
-        if (win_get_event(&ev, -1)) handle(&ev);
+        struct pollfd pf[2] = { { FD_WINDOWS, POLLIN, 0 }, { lsock, POLLIN, 0 } };
+        poll(pf, lsock >= 0 ? 2 : 1, -1);
+        if (lsock >= 0 && (pf[1].revents & POLLIN)) {
+            int c = accept(lsock, NULL, NULL);
+            if (c >= 0) {
+                char ref[96];
+                sock_timeouts(c, 1000, 1000);
+                long n = recv(c, ref, sizeof ref - 1, MSG_WAITALL);
+                close(c);
+                if (n > 0) {
+                    ref[n] = 0;
+                    show_page(ref[0] ? ref : HOME_PAGE, 0);
+                    SC1(SYS_WIN_SHOW, win);        /* to the front */
+                }
+            }
+        }
+        while (win_get_event(&ev, 0)) handle(&ev);
     }
 }
