@@ -5,11 +5,13 @@
 # built with xorriso). Also the keyboard layouts (kbdtest.c: kernel/drivers/
 # keymap.c and keylayouts.c), the USB HID report descriptor parser and report
 # decoder (kernel/usb/hidparse.c, hidtest.c), and the EDID parser and the
-# loaders' video mode choice (displaytest.c).
+# loaders' video mode choice (displaytest.c), and the HD Audio codec layer
+# (kernel/sound/drivers/hda_codec.c against synthetic codecs, hdatest.c).
 #
 #   tests/host/run.sh            (== make -C tests/host kbd test)
 #   make -C tests/host kbd       keyboard layouts only
 #   make -C tests/host hid       only the HID tests (HIDARGS=-v lists every report)
+#   make -C tests/host hda       only the HD Audio codec tests (HDAARGS=-v dumps the codecs)
 #                                includes the "hostile" scenario: corrupted
 #                                partition tables / FAT / exFAT volumes and the
 #                                minimized fuzzer crash inputs (fuzz_regress/)
@@ -54,7 +56,8 @@ SEEDS   := $(OUT)/fuzz_seeds
 
 KBD_SRCS := kbdtest.c $(ROOT)/kernel/drivers/keymap.c $(ROOT)/kernel/drivers/keylayouts.c $(ROOT)/kernel/core/unicode.c
 
-all: $(OUT)/fstest $(OUT)/fuzz_replay $(OUT)/kbdtest $(OUT)/hidtest $(OUT)/displaytest $(OUT)/netsim $(OUT)/netstack.so
+all: $(OUT)/fstest $(OUT)/fuzz_replay $(OUT)/kbdtest $(OUT)/hidtest $(OUT)/displaytest $(OUT)/netsim $(OUT)/netstack.so \
+     $(OUT)/hdatest
 
 NETSRCS := $(addprefix $(ROOT)/kernel/net/,socket.c local.c inet.c eth.c ip.c udp.c tcp.c dhcp.c dns.c)
 NETHDRS := $(wildcard $(ROOT)/kernel/net/*.h) $(wildcard $(ROOT)/kernel/core/*.h) netsim.h
@@ -136,7 +139,15 @@ $(OUT)/displaytest: displaytest.c $(ROOT)/kernel/drivers/edid.c $(ROOT)/kernel/d
 hid: $(OUT)/hidtest
 	$(OUT)/hidtest $(HIDARGS)
 
-test: $(OUT)/fstest $(OUT)/displaytest hid
+HDASRCS := $(ROOT)/kernel/sound/drivers/hda_codec.c hdatest.c
+$(OUT)/hdatest: $(HDASRCS) $(ROOT)/kernel/sound/drivers/hda.h $(wildcard $(ROOT)/kernel/core/*.h) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) $(HDASRCS) -o $@
+
+hda: $(OUT)/hdatest
+	$(OUT)/hdatest $(HDAARGS)
+
+test: $(OUT)/fstest $(OUT)/displaytest hid hda
 	$(OUT)/displaytest
 	@rm -rf $(OUT)/work && mkdir -p $(OUT)/work
 	$(OUT)/fstest $(OUT)/work $(ARGS)
@@ -159,4 +170,4 @@ fuzz-run: $(OUT)/fuzz_fs seeds
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all kbd hid test seeds fuzz fuzz-run fuzz-regress net fuzz-net-run fuzz-net-regress clean
+.PHONY: all kbd hid hda test seeds fuzz fuzz-run fuzz-regress net fuzz-net-run fuzz-net-regress clean

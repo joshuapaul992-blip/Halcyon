@@ -54,7 +54,7 @@ int snddev_register(snddev_t *d) {
     if (!d->rate) d->rate = 48000;
     if (!d->period_frames) d->period_frames = d->rate / 100;
     devs[ndevs++] = d;
-    if (def_dev < 0) def_dev = ndevs - 1;
+    if (def_dev < 0 || (devs[def_dev]->fallback && !d->fallback)) def_dev = ndevs - 1;
     gen++;
     kprintf("sound: %s: %s (%s), %d Hz, %s\n", d->name, d->desc, d->driver, d->rate,
             d->output[0] ? d->output : "output");

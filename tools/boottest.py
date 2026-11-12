@@ -71,6 +71,15 @@ or attach a sound card, its output recorded by QEMU's wav backend (48 kHz):
   virtiosnd     virtio-sound-pci (virtio 1.2 sound device; MSI-X)
   es1370        Ensoniq AudioPCI ES1370 (plays at 44.1 kHz)
   sb16          Creative Sound Blaster 16 (ISA, IRQ 5, DMA 5; plays at 44.1 kHz)
+  hda           Intel HD Audio, ICH6 (intel-hda) with QEMU's hda-duplex codec
+                (line out, line in)
+  hda9          Intel HD Audio, ICH9 (ich9-intel-hda) with hda-output (line out)
+  hdamicro      Intel HD Audio, ICH6 with hda-micro (speaker, microphone)
+  hdaimm        as hda, with the driver's test hook making every verb written
+                to the CORB time out: the driver must fall back to the
+                immediate command interface (not in the default matrix)
+  hdalpib       ICH9 with hda-micro, the DMA position buffer off by the test
+                hook: positions from LPIB (not in the default matrix)
           The card's driver must register it as snd0. The recording must
           start with the startup sound (C:\\HALCYON\\MEDIA\\STARTUP.WAV,
           played when the desktop is ready): its loudness envelope must match
@@ -115,7 +124,8 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user", "xhci:bios:sock", "xhci:bios:web",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
-          "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:uefi:virtiosnd", "xhci:bios:audio"]
+          "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:uefi:virtiosnd", "xhci:bios:audio",
+          "xhci:uefi:hda"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
@@ -130,7 +140,13 @@ for _n in NICS:
 SOUNDS = {"ac97": ("-device AC97,audiodev=snd0", "ac97"),
           "virtiosnd": ("-device virtio-sound-pci,audiodev=snd0", "virtio-snd"),
           "es1370": ("-device ES1370,audiodev=snd0", "es1370"),
-          "sb16": ("-device sb16,audiodev=snd0", "sb16")}
+          "sb16": ("-device sb16,audiodev=snd0", "sb16"),
+          "hda": ("-device intel-hda -device hda-duplex,audiodev=snd0", "hda"),
+          "hda9": ("-device ich9-intel-hda -device hda-output,audiodev=snd0", "hda"),
+          "hdamicro": ("-device intel-hda -device hda-micro,audiodev=snd0", "hda"),
+          # the driver's fallbacks, through its test hook (not in the default matrix)
+          "hdaimm": ("-device intel-hda -device hda-duplex,audiodev=snd0 -fw_cfg name=opt/halcyon/hda,string=corbstall", "hda"),
+          "hdalpib": ("-device ich9-intel-hda -device hda-micro,audiodev=snd0 -fw_cfg name=opt/halcyon/hda,string=lpib", "hda")}
 for _n in SOUNDS:
     VARIANTS[_n] = 0
 VARIANTS["audio"] = 0

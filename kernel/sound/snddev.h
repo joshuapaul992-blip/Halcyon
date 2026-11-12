@@ -51,6 +51,8 @@ struct snddev {
      * they do the master volume themselves (hw_volume = 1). */
     int  (*set_volume)(snddev_t *d, int percent, int mute);
     int hw_volume;                  /* the driver applies the master volume in set_volume */
+    int fallback;                   /* only digital outputs (HDMI/DP): never the default
+                                       while another device exists */
     void *priv;                     /* driver */
     int irq_live;                   /* the driver's interrupt works (else the thread polls) */
     struct pci_dev *pci;            /* System Information; may be NULL */
@@ -65,7 +67,8 @@ struct snddev {
 int  snddev_register(snddev_t *d);          /* names it sndN; 0 or E_BUSY */
 int  snddev_count(void);
 snddev_t *snddev_get(int i);
-snddev_t *snd_default(void);                /* the device that plays, or NULL */
+snddev_t *snd_default(void);                /* the device that plays (the first one registered
+                                               that is not a fallback), or NULL */
 /* driver -> core: mix the next `frames` frames for d into out (d->channels
  * interleaved i16); silence when nothing plays */
 void snd_mix(snddev_t *d, i16 *out, int frames);

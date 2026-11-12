@@ -2,6 +2,7 @@
 # Build and run the host tests: the keyboard layouts, the network stack
 # (netsim: simulated computers on a simulated Ethernet, and the fuzzer's
 # seeds replayed), the USB HID report parser, the EDID / video mode choice,
+# the HD Audio codec layer (hdatest.c: synthetic codecs),
 # then the storage stack. Extra arguments
 # are passed to fstest: "-v" for verbose output, scenario names
 # (paths fat12 fat16 fat32 gpt 4k misc random testdisks hostile unicode format

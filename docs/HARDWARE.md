@@ -33,6 +33,12 @@ useful contribution right now, and both a success and a failure are worth report
      and "connected" with the right speed once the cable is in (unplugging it
      should show "cable unplugged" within a second). BOOT.LOG has a `net: eth0:`
      line per adapter and the driver's own lines (`e1000e:`, `r8169:`, ...).
+   - If the PC has speakers or headphones, does Halcyon's sound play, and from the
+     jack you expect (rear line out, front headphones, laptop speakers)? On a
+     laptop, plug headphones in and out while sound plays: the speakers should
+     go quiet and come back. `BOOT.LOG` has the sound card's `hda` lines (the
+     codec, every widget, the paths chosen) and `sound: snd0:` (see "Sound"
+     below); please include them, whatever the result.
    - Turn Off and Restart from the Start menu.
 4. Use Turn Off or Restart, so the log is written, then collect
    **`\HALCYON\BOOT.LOG`** and **`\HALCYON\BOOTPREV.LOG`** from the stick on another
@@ -195,6 +201,7 @@ Sound cards other than HD Audio:
 | `virtio-snd` | virtio sound device (QEMU `virtio-sound-pci`) | 1AF4:1059 (virtio 1.0+ only) | Tested with QEMU 8.2 at 48 kHz: MSI-X, INTx, polled. The first output stream that takes S16 stereo at 48 or 44.1 kHz is used; capture streams, jack remapping and controls are not |
 | `es1370` | Ensoniq AudioPCI ES1370 (Creative Sound Blaster PCI64/PCI128 of 1998) | 1274:5000 | Tested with QEMU `ES1370` (INTx, polled). Plays on DAC2 at 44.1 kHz (48 kHz is not a divider of its clock); the AK4531 mixer is set to 0 dB but was not checked (QEMU does not model it) |
 | `sb16` | Creative Sound Blaster 16 and compatibles with DSP 4.xx (ISA) | ports 0x220 or 0x240 | Tested with QEMU `sb16` on the q35 machine (ISA IRQ 5 edge and level-triggered, PIC, polled; 16-bit DMA channel 5). Plays at 44.1 kHz; IRQ and DMA channel come from the card's mixer registers 0x80/0x81. Probed only when no PCI sound card was found |
+| `ac97` | Intel ICH AC'97 and compatibles | 8086:2415 and others | Tested with QEMU `AC97` |
 | PC speaker | PIT channel 2 and port 0x61 | – | Tested with QEMU's `pcspk-audiodev`. Used for beeps (message boxes, the Command Prompt's BEL) only when there is no sound card; otherwise beeps go through the card |
 
 Not supported: the Ensoniq ES1371/ES1373 and Creative CT5880 (AudioPCI 97,
@@ -205,9 +212,71 @@ driver. On real hardware the Sound Blaster 16 needs its DMA buffer below
 PC; Plug and Play ISA cards that the firmware did not configure (no
 resources assigned) are not found.
 
+HD Audio (the `hda` driver: Intel High Definition Audio, the on-board sound
+of nearly every PC since 2005, and the HDMI audio of graphics cards; plays at
+48 kHz):
+
+| Driver | Controllers | PCI IDs | Status |
+|--------|-------------|---------|--------|
+| `hda` | Intel High Definition Audio, ICH6 and ICH9 | 8086:2668, 8086:293E | Tested with QEMU `intel-hda` / `ich9-intel-hda` and the `hda-duplex`, `hda-output` and `hda-micro` codecs; also the immediate command interface and LPIB positions (test hooks) |
+| `hda` | Intel ICH7/ICH8/ICH10, 5- to 9-series PCH, 100- to 800-series PCH (Skylake to Arrow Lake, desktop and mobile), Bay Trail, Braswell, Apollo/Gemini Lake, Jasper/Elkhart Lake, SCH | 8086:27D8, 284B, 3A3E, 3A6E, 3B56, 1C20, 1D20, 1E20, 8C20, 8CA0, 8D20, 9C20, 9CA0, A170, 9D70, 9D71, A2F0, A348, 9DC8, A3F0, 06C8, 02C8, 34C8, A0C8, 43C8, 4DC8, 7AD0, 51C8-51CF, 54C8, 7A50, 7E28, 7F50, 0F04, 2284, 5A98, 3198, 811B and others | Written to the specification, untested |
+| `hda` | AMD/ATI SB450-SB950, FCH, Zen chipsets and APUs | 1002:437B, 1002:4383, 1022:780D, 1022:1457, 1022:1487, 1022:15E3 | Written to spec, untested |
+| `hda` | NVIDIA nForce MCP51-MCP89; VIA VT8251/VT8237A; SiS 966; ULi M5461 | 10DE:026C-0D97 (list in the driver), 1106:3288, 1039:7502, 10B9:5461 | Written to spec, untested |
+| `hda` | HDMI/DisplayPort audio of graphics cards (NVIDIA, AMD, Intel) and any other PCI class 04/03 device | by class | Written to spec, untested; used only when there is no analog output |
+
+**Codecs.** The HD Audio driver has no per-codec tables: it reads the codec's
+widget graph and the pin configuration the BIOS left (what each jack is and
+where), and drives it to the specification. Analog codecs (Realtek ALC,
+Conexant, IDT/SigmaTel, Analog Devices, VIA, Cirrus Logic) should all play:
+
+- **Outputs.** Laptop speakers, line outs (the front pair: surround jacks stay
+  off) and headphone jacks all play the same stereo stream, each through its own
+  DAC where the codec has enough. Digital outputs (HDMI, DisplayPort, S/PDIF) are
+  used only on a codec with no analog output at all, and a sound card with only
+  those (a graphics card's HDMI audio, such as a GeForce's) never becomes the
+  default device while another card exists. The device reports the output in
+  use as "Speakers", "Line out", "Headphones" or "HDMI" (also in `BOOT.LOG`).
+- **Headphone jack sensing.** While headphones are plugged in, laptop speakers
+  are muted, and so are the other outputs of the headphones' group when the BIOS
+  marks the jack as a headphone redirect (sequence 15, usual for front-panel
+  jacks: on such desktops plugging headphones in front silences the rear line
+  out, as with Windows' own HD Audio driver). Logged as `hda ...: headphones
+  plugged in: playing on Headphones`. QEMU's codecs have no jack sensing, so
+  this is tested only on the host with typical Realtek ALC269, ALC892 and
+  ALC1220 layouts (`tests/host/hdatest.c`).
+- **Volume** is set in the codec's DAC amplifier when it has at least 46 dB of
+  range (full resolution at low volume), otherwise in the mixer. Amplifiers are
+  never set above 0 dB.
+
+What may go wrong on a real PC:
+
+- **Laptops whose speaker amplifier is switched by a codec GPIO pin or a
+  vendor-specific register** (some HP, Dell and Lenovo models) instead of the
+  standard EAPD bit: the speakers stay silent while headphones work. Vendor
+  fix-ups (Realtek coefficient registers, headset mic modes) are not applied.
+- **Codecs that need firmware or a DSP**: Creative CA0132 (Sound Blaster Z, some
+  Alienware), and Intel laptops whose BIOS puts the audio behind the DSP (Smart
+  Sound / SOF, mostly with digital microphones); such controllers may not be
+  usable, or be missing.
+- **HDMI/DisplayPort** audio is written to the specification only (the audio
+  InfoFrame, converter channel count); Intel's display codecs from Haswell on
+  may hide some of their pins without a vendor-specific enable, and a graphics
+  card's HDA function may be switched off by the BIOS when no HDMI display is
+  connected.
+- **Controller quirks** applied as other drivers document them: snooping (PCIe
+  No Snoop off on every controller; the AMD/ATI and NVIDIA MCP coherence bits),
+  Intel TCSEL = TC0 and, from Skylake on, clock gating off during reset; MSI is
+  not used on ATI SB450/SB600, NVIDIA MCP, VIA and SiS; a CORB/RIRB that does not
+  answer falls back to the immediate command interface (logged); a DMA position
+  buffer that stays empty falls back to LPIB (logged).
+- **Crackles or gaps.** The driver keeps about 40 ms queued ahead of the
+  hardware and restarts the stream when the hardware runs dry; if sound
+  stutters, please report the machine with `BOOT.LOG` (a stream that does not
+  move or a descriptor error is logged).
+
 ## Compatibility list
 
 | Machine | Year | Firmware | USB controllers | Result | Notes |
 |---------|------|----------|-----------------|--------|-------|
-| QEMU q35 | – | SeaBIOS / OVMF | UHCI, OHCI, EHCI, EHCI+UHCI, xHCI | Works | All 13 boot configurations pass in CI, including the legacy PIC, no-MSI and no-interrupt modes; network adapters virtio-net, e1000, e1000e (82574L), igb (82576) and rtl8139 |
+| QEMU q35 | – | SeaBIOS / OVMF | UHCI, OHCI, EHCI, EHCI+UHCI, xHCI | Works | All 13 boot configurations pass in CI, including the legacy PIC, no-MSI and no-interrupt modes; network adapters virtio-net, e1000, e1000e (82574L), igb (82576) and rtl8139; sound cards AC'97, Intel HD Audio (ICH6, ICH9), virtio-sound, ES1370 and Sound Blaster 16 |
 | *your PC here* | | | | | |

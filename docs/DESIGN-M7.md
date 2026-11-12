@@ -21,7 +21,9 @@ and `SNDTEST.EXE`. The system sounds are synthesized at build time by
 A sound card driver fills in a `snddev_t` (description, output name, rate,
 channels, period length, and `start` / `stop` / `poll` / `set_volume`
 callbacks) and registers it; the core names it `snd0`, `snd1`... The first
-card registered is the default: every stream plays there. Drivers are probed
+card registered is the default: every stream plays there. A card that sets
+`fallback` (HD Audio with only HDMI/DisplayPort outputs, such as a graphics
+card's) never becomes the default while another card exists. Drivers are probed
 by `sound_init()` from `kmain` once `SETTINGS.INI` has been read, so the saved
 volume applies from the first sound; the boot option "no sound" (part of Safe
 Mode, `BOOTF_NO_SOUND`) skips them.
@@ -39,6 +41,51 @@ set). The PCM-out box walks a 32-entry buffer descriptor list round robin, one
 48 kHz (variable rate is not needed: the mixer resamples) and 0 dB, and the
 master volume is applied by the mixer. INTx or polled. Other drivers (HD
 Audio, virtio-sound, ES1370, SB16, the PC speaker) plug in the same way.
+
+### HD Audio
+
+**HD Audio** is split in two: `drivers/hda.c`, the controller, and
+`drivers/hda_codec.c`, the codecs, which talks to the controller only through
+a "send this verb, return the response" callback so that it runs unmodified
+on the host against synthetic codecs (`tests/host/hdatest.c`).
+
+The controller driver claims Intel ICH6 to 800-series PCHs and Atom SoCs,
+AMD/ATI, NVIDIA MCP, VIA, SiS and ULi controllers by ID and anything else of
+PCI class 04/03 (graphics cards' HDMI functions). It resets the controller,
+probes the codecs that answer, and sends verbs through the CORB/RIRB rings; a
+verb without a response within 20 ms resets the rings and is tried again, and
+then the driver switches to the immediate command interface for good.
+Unsolicited responses (jack events) are collected from the RIRB. Playback
+uses one output stream descriptor with a 32-entry buffer descriptor list, one
+10 ms period per entry and an interrupt on each; unlike AC'97 the DMA engine
+loops round the ring by itself and never stops, so an underrun is detected
+from the position (the DMA position buffer, else LPIB; readings that run
+ahead of the clock are ignored) passing the last period filled, or the
+thread being away for most of the ring, or a position that stands still.
+The period after the last filled one is kept silent, so an underrun plays
+silence rather than old sound; the stream is then reset and primed again.
+The chipset-specific PCI settings (snooping, TCSEL, Skylake clock gating,
+MSI blacklist) are listed with the reasons at the top of `hda.c`.
+
+The codec layer reads the audio function group: widgets, connection lists,
+amplifier capabilities and the pin configuration the BIOS left (device type,
+location, association and sequence). For each output pin worth driving
+(speakers, the lowest-sequence line out of each association, headphones) a
+breadth-first search through the connection lists finds the shortest path
+back to a DAC, preferring an unused one; every DAC gets the same stream, so
+speakers and headphones play together where nothing mutes them. Digital pins
+(HDMI, DisplayPort, S/PDIF) are used only when a codec has no analog output,
+and then the device is a fallback. Along a path, mixer inputs not on it (the
+analog loopback of the microphone and line in) are muted, amps set to 0 dB
+and never above, selectors and pins switched, pins enabled (headphone amp on
+headphone pins), EAPD set; HDMI/DP pins get an audio InfoFrame. Jack sensing
+uses unsolicited responses and a poll every 500 ms while playing: plugged-in
+headphones mute speaker pins, and the other outputs of their association
+when the BIOS marks the jack as a redirect (sequence 15), as Windows' class
+driver does. The master volume goes to the DAC's amplifier when it has at
+least 46 dB of range (`hw_volume`), on the mixer's curve; otherwise the mixer
+scales the samples. `BOOT.LOG` gets the whole widget graph and the chosen
+paths, the main tool for a real machine that stays silent.
 
 ## The mixer and the audio thread
 
@@ -289,7 +336,18 @@ PCI devices that have no driver.
   signal (2 s of 440 Hz and 0.25 s of 1 kHz at the right pitch and length,
   no dropouts, no underruns, the expected interrupt); `audio` checks
   SNDTEST's report and its 660 Hz signal (1 s ± 30 ms, ±1.5 Hz, no
-  dropouts). Both are in the default matrix.
+  dropouts). Both are in the default matrix. `hda`, `hda9` and `hdamicro`
+  (QEMU's ICH6 / ICH9 controllers with each of its three codecs; `hda` in the
+  default matrix) check the same as `ac97`; `hdaimm` and `hdalpib` drive the
+  HD Audio driver's fallbacks (immediate commands after CORB timeouts, LPIB
+  positions) through its test hook.
+- **HD Audio codecs** (`tests/host/hdatest.c`, in `tests/host/run.sh`): the
+  codec layer against synthetic codecs answering verb by verb (Realtek
+  ALC892, ALC1220 and ALC269 layouts with typical BIOS pin configurations,
+  Intel and NVIDIA HDMI codecs, QEMU's, and hostile graphs): the paths
+  chosen, every control set, amps never above 0 dB, volume steps, jack
+  sensing and headphone redirection. QEMU's codecs have no presence detect,
+  so this is the only test of jack sensing.
 
 ## Limitations
 
