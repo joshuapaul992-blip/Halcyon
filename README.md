@@ -19,6 +19,7 @@ its own drivers for USB, SATA and FAT file systems.
 | Interrupts | Local APIC (xAPIC or x2APIC) and I/O APICs from the ACPI MADT, or the 8259 PICs. MSI-X and MSI for xHCI and AHCI. PCI INTx for UHCI, OHCI and EHCI: without an AML interpreter the routing is learned from which device raised an interrupt. The CPU halts when there is nothing to do: a one-shot local APIC (or PIT) timer wakes it for the next deadline. A device whose interrupt does not work is polled. |
 | USB | Host controllers: UHCI and OHCI (USB 1.1), EHCI (USB 2.0, with companion hand-off), and xHCI (USB 3.x, SuperSpeed). Class drivers: hubs (USB 2 and SuperSpeed), HID (report descriptor parsing, report protocol as on Windows, boot protocol as the fallback): keyboards including n-key rollover and wireless receivers with several devices on one interface, multimedia keys (volume, media, browser, mail, calculator, power and sleep), mice and tablets; and mass storage (Bulk-Only Transport plus SCSI). Hot-plug. |
 | Network | Drivers for virtio-net (virtio 1.0 and legacy), Intel e1000 (8254x), e1000e (82574L; 82571/2/3/83 and the on-board I217/I218/I219 to spec), igb (82576; I350/I210/I211 to spec), Realtek RTL8139 and, to spec, RTL8169/8111/8168. MAC address, link state and speed, receive and transmit rings, MSI-X/MSI/INTx or polled, statistics; adapters, link and counters in System Information. The internet stack (IPv4): Ethernet, ARP, IP with fragmentation, reassembly and path MTU, ICMP, a routing table (connected subnets, a default gateway) and the loopback; TCP (RFC 9293 with window scaling, RFC 6298 timers, NewReno congestion control, delayed ACKs, Nagle, zero-window probes, keepalive, RFC 5961 defences, random ISNs and ports), UDP and ping sockets (`IPPROTO_ICMP`, no raw sockets needed) as BSD `AF_INET` sockets; a DHCP client (renewal, rebinding, link changes, DECLINE) or a static configuration from `SETTINGS.INI`; a caching DNS resolver (`resolve()`) with defences against forged answers. `PING`, `IPCONFIG` and `NSLOOKUP`; Network Connections (status, DHCP or a static address, DNS servers) from Control Panel, the Start menu or the network icon in the taskbar; 35-50 MB/s downloads in QEMU. See [docs/DESIGN-M6.md](docs/DESIGN-M6.md). |
+| Sound | Sound cards (AC'97 on Intel ICH and compatible controllers) behind a mixer that plays any number of streams at once: any rate from 8 to 192 kHz, 8 or 16-bit, mono or stereo, resampled, with per-stream and master volume; the card stops when nothing plays. Programs get sound streams as handles (blocking or non-blocking writes, `poll`, drain, pause, seek, status). System sounds of Halcyon's own, synthesized at build time, for startup, shutdown, message boxes, balloons and USB devices, with a sound scheme to turn them off or choose other files. A speaker in the taskbar (popup slider, Mute, tooltip), the keyboard's volume keys with an on-screen indicator, Sounds and Audio Devices in the Control Panel, sound devices in System Information. Media Player (`MPLAYER.EXE`) and `PLAY` play WAV files: PCM 8 to 32-bit, float, IMA ADPCM, mu-law, A-law, any rate and channel count. See [docs/DESIGN-M7.md](docs/DESIGN-M7.md). |
 | Storage | AHCI SATA (LBA48, multiple controllers). NVMe SSDs (MSI-X, MSI, INTx or polled; every active namespace with 512- or 4096-byte blocks becomes a disk, `nvme0`, `nvme1`, ...; flushed when the drive has a volatile cache, shutdown notification on Turn Off/Restart). CD/DVD drives on SATA (ATAPI): read-only drive letters, discs detected when inserted, ejected or swapped, Eject in the drive's right-click menu. Block layer with MBR (including extended partitions), GPT and superfloppy detection. |
 | File systems | FAT12, FAT16 and FAT32, read and write: long file names, create, delete, rename and move, mkdir and rmdir, truncate, FSInfo. exFAT, read and write (USB sticks and SD cards over 32 GB): fragmented and contiguous files, ValidDataLength, the volume's up-case table for case-insensitive names, VolumeDirty handling. DOS drive letters; the boot drive is `C:`. Quick format (FAT12/16/32 and exFAT) from Explorer (right-click a drive) or the `FORMAT` command, with Windows' default cluster sizes. |
 | CD/DVD | ISO 9660 with Joliet (long Unicode names) and Rock Ridge names, multi-sector directories and multi-extent files, hardened against corrupt discs. Hybrid ISO images written to USB sticks or disks mount too. |
@@ -27,7 +28,7 @@ its own drivers for USB, SATA and FAT file systems.
 | GUI | Compositing window manager (move, resize, minimize, maximize), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Theme and wallpaper are kept across restarts (`C:\HALCYON\SETTINGS.INI`). |
 | Display | The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; the QEMU/Bochs/VirtualBox adapter switches at once, with Windows' "keep these settings?" 15-second revert. The frame buffer is write-combining (PAT). |
 | Web | A web browser (Web Browser, `BROWSER.EXE`): HTTP/1.1 and HTTPS, pages with headings, lists, tables, forms and PNG / GIF / BMP images, history, error pages, local files; `WGET.EXE` on the command line. HTTPS through BearSSL (TLS 1.2) with certificates checked against Mozilla's root list. Both are user programs on libweb, a library for URLs, HTTP, TLS and gzip. They reach the network through the internet stack (see Network). See [docs/DESIGN-M6-WEB.md](docs/DESIGN-M6-WEB.md). |
-| Apps | Explorer (My Computer, file management; copies and deletes in a worker thread), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Sonar (a mine-hunting puzzle), Control Panel (with Time Zone), Display Properties, Keyboard settings, Network Connections, About. |
+| Apps | Explorer (My Computer, file management; copies and deletes in a worker thread), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Media Player (WAV files), Sonar (a mine-hunting puzzle), Control Panel (with Time Zone), Display Properties, Keyboard settings, Network Connections, Sounds and Audio Devices, About. |
 
 ## Building
 
@@ -64,6 +65,13 @@ Halcyon from the host):
 
 ```bash
 EXTRA="-netdev user,id=n0 -device virtio-net-pci,netdev=n0" tools/run.sh xhci bios
+```
+
+A sound card (AC'97), its output to the host's speakers (`-audiodev pa` or
+`alsa`), or recorded to a WAV file as the tests do:
+
+```bash
+EXTRA="-audiodev wav,id=snd0,path=out.wav -device AC97,audiodev=snd0" tools/run.sh xhci bios
 ```
 
 `make testdisks` builds sample FAT12, FAT16 and GPT/FAT32 images for testing.
@@ -135,6 +143,12 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   `SOCKTEST.EXE` checks sockets and poll between copies of itself (large
   transfers, datagrams, timeouts, backlogs, peers that crash or are ended,
   per-program and system-wide limits); and
+  sound, with an AC'97 card recorded to a WAV file: the startup sound must be
+  in the recording (its loudness envelope matched against the file), then
+  the kernel's test signal (`ac97`) or `SNDTEST.EXE`'s (`audio`: the sound
+  system calls, limits, blocking, drain timing, poll, programs ended with
+  open streams, then a 660 Hz signal) at the right pitch and length without
+  dropouts; and
   the display: a saved resolution chosen by both loaders, the firmware frame
   buffer alone, and a live mode switch
 - the network stack on the host (`tests/host/netsim.c`, run by `tests/host/run.sh`):
@@ -146,6 +160,10 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   loss), each ending with a memory check; and a libFuzzer target for the
   receive path (`tests/host/fuzz_net.c`)
 - the EDID parser and the loaders' resolution choice (`tests/host/displaytest.c`)
+- the WAV library (`tests/sound/run.sh`), built for Linux with ASan/UBSan:
+  every format against known values and encoders written independently from
+  the standards (G.711, IMA ADPCM), mix-down, odd and truncated files, every
+  rejection, 200,000 mutated files; and the system sounds made at build time
 - the web library and the browser's parser and decoders (`tests/web/run.sh`),
   built for Linux with ASan/UBSan: URLs, the CA list's conversion, inflate
   against Python's zlib/gzip and corrupt streams, PNG / GIF / BMP against
@@ -262,6 +280,20 @@ port, timeout_ms)` combines both. `net_ifinfo`, `net_ifconfig`, `net_ctl`,
 (`IPCONFIG.EXE`; the kernel's Network Connections uses the same operations). `NSLOOKUP.EXE` sends its own DNS queries over UDP. `NETTEST.EXE` checks it against servers on the host (the
 QEMU `net` variant). See [docs/DESIGN-M6.md](docs/DESIGN-M6.md).
 
+Sound: `snd_open(rate, channels, bits, buffer_ms, flags)` gives a stream
+handle (8 to 192 kHz, mono or stereo, 8-bit unsigned or 16-bit signed);
+`snd_write` queues whole frames (waiting while the buffer is full, unless the
+stream is non-blocking, and `poll` reports `POLLOUT` when there is room),
+`snd_drain` waits until it has played, `snd_pause`, `snd_stream_volume`,
+`snd_discard` (a seek) and `snd_status` (frames played, queued, latency)
+control it, `snd_close` stops it or lets it play out. `snd_master` reads and
+sets the master volume, `snd_event` plays a system sound, `snd_devinfo` and
+`snd_info` describe the cards. The WAV library (`userland/lib/wav.c`,
+`wav.h`; linked like libweb, only into the programs that use it) decodes WAV
+files of most kinds to 16-bit samples. `PLAY.EXE` is the short example,
+`MPLAYER.EXE` (Media Player) the full one; `SNDTEST.EXE` checks the calls (the
+QEMU `audio` variant). See [docs/DESIGN-M7.md](docs/DESIGN-M7.md).
+
 ### The web library and the browser
 
 `userland/lib/web/` is **libweb**, a library for HTTP and HTTPS (`web.h`):
@@ -308,12 +340,16 @@ kernel/fs    block layer and partitions, VFS, FAT, exFAT, ISO 9660
 kernel/gui   graphics, window manager, widgets, menus, dialogs, desktop, splash
 kernel/net   sockets and poll (generic layer), local sockets (AF_LOCAL), network
              devices and the IPv4 stack (ARP, IP, ICMP, UDP, TCP, DHCP, DNS); drivers/
+kernel/sound sound devices, the mixer and audio thread, the sound system calls,
+             system sounds; drivers/
 kernel/apps  applications built into the kernel
 userland/    user-mode runtime (crt0, C library subset, GUI calls) and programs;
-             lib/web the web library, third_party BearSSL and the CA list
-tools/       image builder, font and icon generators, QEMU test harness
+             lib/web the web library, lib/wav.c the WAV library, third_party
+             BearSSL and the CA list
+tools/       image builder, font, icon and sound generators, QEMU test harness
 tests/host   host-side storage, keyboard layout, USB HID, display and network tests, fuzzers
 tests/web    host tests of the web library and the browser's parser and decoders
+tests/sound  host tests of the WAV library
 ```
 
 ## Limitations
@@ -323,7 +359,8 @@ tests/web    host tests of the web library and the browser's parser and decoders
   interrupts") programs are not preempted, so one that loops forever hangs the
   desktop.
 - The remaining built-in applications (Command Prompt, System Information,
-  Control Panel, Display, Keyboard and Network settings) still run in the kernel.
+  Control Panel, Display, Keyboard, Network and Sound settings) still run in
+  the kernel.
 - Few permissions between programs: any program can read or write any file and
   use any socket name; ending another program needs the user's OK. Isolation
   protects against crashes, not against a hostile program.
@@ -340,7 +377,11 @@ tests/web    host tests of the web library and the browser's parser and decoders
   fallback and asks for A records only; DHCP and static configuration cover
   one subnet and a default gateway (no static routes). Any program may change
   the network configuration. The time zone is a fixed offset from UTC:
-  summer time is not followed automatically. No audio or isochronous USB.
+  summer time is not followed automatically. No isochronous USB (so no USB
+  audio).
+- Sound is output only: no recording, no MIDI, no MP3 or other compressed
+  formats beyond what WAV files carry (IMA ADPCM, mu-law, A-law). Every stream
+  plays on the first sound card; resampling is linear interpolation.
 - The Web Browser is minimal: HTML without JavaScript and without style
   sheets (a few properties of the `style` attribute only), no italic font,
   no JPEG / WebP / SVG images (their alternative text shows), no `rowspan`,
