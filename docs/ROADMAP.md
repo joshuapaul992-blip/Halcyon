@@ -428,6 +428,119 @@ M12's range carried forward to the same point in time.
   metal).
 - Depends on M12 and, for 3D, M13 and M15.
 
-**1.1 order:** 18 → 19, then a 1.1 release in the style of M17 (release
-candidates, hardware matrix, 1.1 RTM).
+### M20: Several processor cores (SMP)
+
+Halcyon runs on one core today, under one big kernel lock. Firefox (M14) and
+Roblox (M16) are heavily multi-threaded, so this is the biggest performance
+step of 1.1.
+
+- Start the other cores (ACPI MADT, INIT/SIPI), per-core GDT/TSS, local APIC
+  timers and idle; a scheduler with per-core run queues, load balancing and
+  core affinity for user threads.
+- Replace the big kernel lock step by step with finer locks (memory, VFS and
+  block layer, network stack, GUI, sound), so that system calls on different
+  cores run in parallel; TLB shootdowns for shared address spaces.
+- Interrupts spread over cores (MSI-X vectors per core for NICs and NVMe).
+- Tests: the whole CI matrix with 2, 4 and 8 virtual CPUs, stress tests for
+  races (many threads in many programs), and lock-order checking in debug
+  builds.
+- Could move before 1.0 if M14 or M16 turn out too slow on one core.
+
+### M21: ACPI and power management
+
+- An ACPI AML interpreter: the namespace and methods of the firmware's DSDT and
+  SSDTs. With it: PCI interrupt routing from `_PRT` (replacing M2's learned
+  routes), proper power-off and restart on every machine, and the devices
+  ACPI describes.
+- Laptops: battery level and charging (a battery icon in the tray, warnings,
+  the "critical battery" sound M7 left out), the lid switch, the power and
+  sleep buttons, screen brightness keys.
+- Sleep (S3, suspend to RAM) and resume: every driver saves and restores its
+  device; a "Stand By" choice next to Turn Off. Hibernation (S4) later.
+- CPU frequency and power states (P-states, C-states; Intel HWP and AMD CPPC),
+  thermal zones and fan control through ACPI.
+- Depends on M20 for per-core power states.
+
+### M22: Wi-Fi and Bluetooth
+
+- Wi-Fi: Intel Wi-Fi 5/6 adapters (the most common in laptops and desktops
+  with Wi-Fi; they need Intel's redistributable firmware) and a common USB
+  Wi-Fi stick family (Realtek or MediaTek); scanning, WPA2-Personal and
+  WPA3-Personal (SAE), a "Wireless Network Connection" list in the tray and in
+  Network Connections, saved networks.
+- Bluetooth: USB and on-board controllers (HCI), pairing (Secure Simple
+  Pairing), keyboards and mice (HID), game controllers, and headphones (A2DP
+  audio through M7's mixer).
+- Tests: QEMU has no Wi-Fi adapter; the WPA handshake and the 802.11 frame
+  handling get host tests against recorded and generated traffic, the drivers
+  real hardware.
+
+### M23: Networking 2: IPv6 and Windows file sharing
+
+- IPv6 (M6 left it out; DESIGN-M6 lists what it needs): addresses through
+  SLAAC and DHCPv6, neighbour discovery, dual-stack sockets and name lookup
+  (AAAA), privacy addresses, IPv6 in Firefox and the browser.
+- Windows file sharing: an SMB 2/3 client, so that "My Network Places" in
+  Explorer shows shared folders on Windows PCs and NAS boxes, with copying
+  and opening files in place; NTLMv2 sign-in, signing and encryption.
+- Local name discovery (mDNS / LLMNR), so other computers show up by name.
+- A firewall for incoming connections (on by default), now that Halcyon has
+  servers and shares.
+
+### M24: USB and devices 2
+
+- Isochronous USB transfers (left out since M1): USB audio devices (headsets,
+  DACs, microphones) and webcams (USB Video Class).
+- Game controllers: Xbox (XInput, wired and the wireless adapter),
+  PlayStation (DualShock 4, DualSense) and generic HID gamepads, with a
+  controller API for programs and Xenithium (M16).
+- USB Attached SCSI (UASP) for fast external disks, USB 3.2 and USB-C details
+  (the xHCI driver's newer features), Thunderbolt 3/4 and USB4 docks at least
+  as far as their USB and display parts go.
+- Printers: IPP Everywhere over the network and over USB, with a print dialog
+  for Notepad, Paint and the browser.
+
+### M25: Media 2: recording, codecs and video
+
+- Recording: microphone input on HD Audio, AC'97 and USB audio, a Sound
+  Recorder, and capture streams in the sound system calls.
+- Codecs written for Halcyon or vendored under permissive licences: MP3, AAC,
+  FLAC, Ogg Vorbis and Opus in Media Player and for programs.
+- Video playback: H.264 and VP9 (and AV1 where fast enough) decoded in
+  software, using the cores from M20; hardware decoding on the M18/M19 GPUs
+  later. Media Player plays video files; the browser's own decoder stays for
+  Firefox to provide.
+- A webcam viewer for M24's cameras.
+
+### M26: Disks 2: Disk Management and Linux disks
+
+- Disk Management: list disks and partitions (MBR and GPT), create, delete,
+  format, resize (FAT, exFAT, NTFS) and label partitions, with clear warnings.
+- Check Disk for FAT, exFAT and NTFS: find and repair the inconsistencies a
+  crash or a pulled USB stick leaves.
+- Linux disks: ext4 read and write (journal replayed or refused like NTFS's),
+  so dual-boot machines can share files both ways.
+- The installer (M8, M17) uses Disk Management to make room next to Windows
+  or Linux.
+
+### M27: Release: Halcyon 1.1 RTM
+
+As M17 for 1.0: no new big features, finishing, fixing and testing.
+
+- Feature freeze, release candidates from a release branch, the full CI and
+  a hardware matrix that now includes Turing/Ampere, Intel Gen11/12 and AMD
+  Vega/RDNA graphics, Wi-Fi and Bluetooth adapters, laptops (sleep, battery),
+  and multi-core machines.
+- Upgrade from 1.0 in place with the M17 update mechanism, settings and files
+  kept; a rollback path.
+- Performance pass on SMP (no regressions against 1.0 on one core), power
+  use on laptops, and the firmware pack (M18, M19, M22) checked for licences
+  and versions.
+- Release notes, known issues, the license audit and THIRD_PARTY_NOTICES
+  for everything new; the RTM build is tagged `v1.1` and drops the
+  pre-release watermark.
+- Depends on M18 to M26.
+
+**1.1 order:** 18 → 19 → 20 → 21 → 22 → 23 → 24 → 25 → 26 → 27 (M20, SMP,
+may move to the front if Firefox and Roblox need it sooner).
 
