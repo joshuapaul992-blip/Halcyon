@@ -229,6 +229,7 @@ static void uw_resize(window_t *w) {
         if (u->canvas != u->mapped) surface_free(u->canvas);
     }
     u->canvas = n;
+    if (w->direct) w->direct = n;
     hal_event_t ev = { 0 };
     ev.win = u->handle;
     ev.x = n->w; ev.y = n->h;
@@ -265,6 +266,7 @@ static void job_create(void *a) {
     window_t *w = wm_create(j->title, ICON_FILE_APP, -1, -1, j->cw, j->ch, f);
     if (!w) return;
     if (j->host) { w->owner = j->host; w->restore = j->box; }
+    if (f & WF_FULLSCREEN) w->direct = j->u->canvas;   /* drawn straight from the canvas */
     j->u->w = w;
     w->data = j->u;
     w->on_paint = uw_paint;
@@ -943,6 +945,26 @@ static long usergui_syscall_more(proc_t *p, int nr, u64 a1, u64 a2, u64 a3, u64 
     uwin_t *u;
     gc_t g;
     switch (nr) {
+    case SYS_WIN_INVALIDATE_RECT: {
+        /* only that part of the canvas changed: it is copied into the
+         * window as it is and only it is drawn again (screen savers) */
+        if (!(u = uwin(p, (int)a1)) || !u->canvas) return E_INVAL;
+        window_t *w = u->w;
+        rect_t r = rect_intersect(unpack_rect(a2), mkrect(0, 0, u->canvas->w, u->canvas->h));
+        if (rect_empty(r)) return 0;
+        if (w->needs_paint || !w->client || w->widgets || w->menubar || w->client->w != u->canvas->w ||
+            w->client->h != u->canvas->h + u->top) {
+            wm_invalidate(w);                 /* controls are drawn over the canvas: all of it */
+            return 0;
+        }
+        if (w->direct != u->canvas) {          /* (a full-screen window is drawn from the canvas itself) */
+            g = gc_for(w->client);
+            gfx_blit(&g, r.x, r.y + u->top, u->canvas, r);
+        }
+        rect_t c = wm_client_rect(w);
+        wm_invalidate_rect(mkrect(c.x + r.x, c.y + u->top + r.y, r.w, r.h));
+        return 0;
+    }
     case SYS_MENU_SET: {
         /* items, count; count 0 removes the bar */
         if (!(u = uwin(p, (int)a1))) return E_INVAL;

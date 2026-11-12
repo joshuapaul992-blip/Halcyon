@@ -19,6 +19,7 @@ typedef struct {
 } shape_t;
 static shape_t sh[SHAPES];
 static int hue;
+static int bx0, by0, bx1, by1, have_box;    /* what the last frame drew */
 
 static void saver_start(saver_t *s) {
     sv_clear(s, 0x000000);
@@ -35,6 +36,7 @@ static void saver_start(saver_t *s) {
         }
     }
     hue = sv_range(0, 1535);
+    have_box = 0;
 }
 
 static void ribbon(saver_t *s, const pt_t *q, unsigned c) {
@@ -76,6 +78,26 @@ static int saver_frame(saver_t *s, int dt) {
         if (a->count < TRAIL) a->count++;
     }
     for (int k = 0; k < SHAPES; k++) draw_trail(s, &sh[k], hue + k * 768, 0);
+    /* the part of the screen that changed: the old trails and the new */
+    int x0 = s->w, y0 = s->h, x1 = 0, y1 = 0;
+    for (int k = 0; k < SHAPES; k++)
+        for (int n = 0; n < sh[k].count; n++)
+            for (int i = 0; i < CORNERS; i++) {
+                pt_t *p = &sh[k].hist[(sh[k].head - n + TRAIL) % TRAIL][i];
+                if (p->x < x0) x0 = p->x;
+                if (p->y < y0) y0 = p->y;
+                if (p->x > x1) x1 = p->x;
+                if (p->y > y1) y1 = p->y;
+            }
+    int ux0 = x0, uy0 = y0, ux1 = x1, uy1 = y1;
+    if (have_box) {
+        if (bx0 < ux0) ux0 = bx0;
+        if (by0 < uy0) uy0 = by0;
+        if (bx1 > ux1) ux1 = bx1;
+        if (by1 > uy1) uy1 = by1;
+    }
+    sv_dirty(s, ux0, uy0, ux1 - ux0 + 1, uy1 - uy0 + 1);
+    bx0 = x0; by0 = y0; bx1 = x1; by1 = y1; have_box = 1;
     return 1;
 }
 

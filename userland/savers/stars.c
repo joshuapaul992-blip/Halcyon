@@ -3,11 +3,12 @@
  * viewer and projected onto the screen; near stars are bigger, brighter and
  * leave a short streak. Only the pixels drawn in the last frame are cleared,
  * so a frame costs a few thousand pixels whatever the resolution. */
+#define SAVER_MS 40                      /* 25 frames a second: every frame is the whole screen */
 #include "saver.h"
 
 SAVER_NAME("Starfield");
 
-#define MAXSTARS 1600
+#define MAXSTARS 2400
 #define ZFAR 4096
 typedef struct { int x, y, z; int px, py, pz, size; unsigned tint; } star_t;
 static star_t st[MAXSTARS];
@@ -25,7 +26,7 @@ static void star_spawn(saver_t *s, star_t *t, int anyz) {
 static void saver_start(saver_t *s) {
     sv_clear(s, 0x000000);
     long area = (long)s->w * s->h;
-    nstars = (int)(area / 900);
+    nstars = (int)(area / 600);
     if (nstars > MAXSTARS) nstars = MAXSTARS;
     if (nstars < 40) nstars = 40;
     speed = s->preview ? 900 : 1300;           /* depth units per second */
@@ -53,7 +54,7 @@ static int saver_frame(saver_t *s, int dt) {
         int sx = cx + t->x * f / t->z / 4, sy = cy + t->y * f / t->z / 4;
         if (sx < 0 || sy < 0 || sx >= s->w || sy >= s->h) { star_spawn(s, t, 0); continue; }
         int near = ZFAR - t->z;                       /* 0 far .. ZFAR near */
-        int b = 40 + near * 215 / ZFAR;
+        int b = 70 + near * 185 / ZFAR;
         t->px = sx; t->py = sy;
         t->size = s->preview ? 1 : near > ZFAR * 85 / 100 ? 3 : near > ZFAR * 55 / 100 ? 2 : 1;
         plot(s, t, sv_mix(0, t->tint, b), 0);

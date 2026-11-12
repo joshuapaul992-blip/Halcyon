@@ -87,7 +87,7 @@ static void saver_start(saver_t *s) {
 
 static int saver_frame(saver_t *s, int dt) {
     int bw = L > text_w ? L : text_w, bh = L + text_h + L / 12;
-    if (drawn) sv_fill(s, ox, oy, bw, bh, 0x000000);
+    if (drawn) { sv_fill(s, ox, oy, bw, bh, 0x000000); sv_dirty(s, ox, oy, bw, bh); }
     x += vx / 1000 * dt;
     y += vy / 1000 * dt;
     int maxx = (s->w - bw) << 8, maxy = (s->h - bh) << 8, bounced = 0;
@@ -109,6 +109,7 @@ static int saver_frame(saver_t *s, int dt) {
     }
     gfx_text(s->win, px + (bw - text_w) / 2, py + L + L / 12, title, 0xF2F6FF, font);
     ox = px; oy = py; drawn = 1;
+    sv_dirty(s, px, py, bw, bh);
     return 1;
 }
 

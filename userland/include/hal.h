@@ -208,6 +208,11 @@ typedef struct { int x, y, w, h; } hal_rect_t;
 #define RGB(r, g, b) ((unsigned)(((r) << 16) | ((g) << 8) | (b)))
 int  win_create(const char *title, int w, int h, int flags);   /* client size; window handle */
 int  win_create_preview(const char *title, int handle);           /* a screen saver's "/p <handle>" window (WIN_PREVIEW) */
+/* only the rectangle x, y, w, h of the canvas changed: cheaper than win_invalidate (no controls over it) */
+static inline void win_invalidate_rect(int win, int x, int y, int w, int h) {
+    SC2(SYS_WIN_INVALIDATE_RECT, win, (long)((unsigned long)(unsigned short)x << 48 | (unsigned long)(unsigned short)y << 32 |
+                                             (unsigned long)(unsigned short)w << 16 | (unsigned short)h));
+}
 void win_destroy(int win);
 void win_set_title(int win, const char *title);
 void win_invalidate(int win);                                    /* repaint the client area */

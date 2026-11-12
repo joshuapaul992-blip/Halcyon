@@ -529,6 +529,7 @@ void app_display(void) {
     for (int i = 0; i < n && items; i++) kfree(items[i]);
     kfree(items);
     lb->value = d->sel;
+    lb->top = MAX(0, MIN(d->sel - 2, n - 5));          /* the mode in use in view */
     lb->on_change = on_select;
     make_thumb(d);
 

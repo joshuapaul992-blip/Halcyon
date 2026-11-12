@@ -33,6 +33,8 @@ typedef struct saver {
     int fullscreen;             /* /s */
     uint64_t t0;                /* time_ms() when it started */
     unsigned frame;
+    int ndirty;                 /* sv_dirty() rectangles of this frame */
+    int dirty[8][4];
 } saver_t;
 
 static void saver_start(saver_t *s);
@@ -99,6 +101,28 @@ static __attribute__((unused)) unsigned sv_hue(int h) {
     return (unsigned)(r << 16 | g << 8 | b);
 }
 
+/* only these parts changed this frame (else saver_frame's 1 means all of
+ * it): far less for the window manager to copy. More than 8 become one. */
+static __attribute__((unused)) void sv_dirty(saver_t *s, int x, int y, int w, int h) {
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > s->w) w = s->w - x;
+    if (y + h > s->h) h = s->h - y;
+    if (w <= 0 || h <= 0) return;
+    if (s->ndirty == 8) {
+        int *u = s->dirty[0];
+        for (int i = 1; i < 8; i++) {
+            int *d = s->dirty[i];
+            int x1 = u[0] + u[2] > d[0] + d[2] ? u[0] + u[2] : d[0] + d[2], y1 = u[1] + u[3] > d[1] + d[3] ? u[1] + u[3] : d[1] + d[3];
+            u[0] = u[0] < d[0] ? u[0] : d[0]; u[1] = u[1] < d[1] ? u[1] : d[1];
+            u[2] = x1 - u[0]; u[3] = y1 - u[1];
+        }
+        s->ndirty = 1;
+    }
+    int *d = s->dirty[s->ndirty++];
+    d[0] = x; d[1] = y; d[2] = w; d[3] = h;
+}
+
 static __attribute__((unused)) void sv_map(saver_t *s) {
     hal_canvas_t c;
     if (win_canvas(s->win, &c) == 0) { s->px = c.pixels; s->w = c.w; s->h = c.h; s->stride = c.stride; }
@@ -158,7 +182,11 @@ int main(int argc, char **argv) {
             last = now;
             if (dt > 200) dt = 200;              /* after a stall, no huge jumps */
             s.frame++;
-            if (saver_frame(&s, dt)) win_invalidate(s.win);
+            s.ndirty = 0;
+            int changed = saver_frame(&s, dt);
+            if (s.ndirty)
+                for (int i = 0; i < s.ndirty; i++) win_invalidate_rect(s.win, s.dirty[i][0], s.dirty[i][1], s.dirty[i][2], s.dirty[i][3]);
+            else if (changed) win_invalidate(s.win);
             /* a preview whose box has gone: stop */
             hal_rect_t wr;
             if (s.frame % 16 == 0 && win_get_rect(s.win, &wr) < 0) return 0;

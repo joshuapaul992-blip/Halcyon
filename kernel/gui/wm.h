@@ -132,6 +132,7 @@ struct window {
     window_t *next;           /* z-order, bottom to top */
     char place_key[40];       /* "window.<key>" in SETTINGS.INI keeps its place and size (wm_place_restore) */
     int place_top;            /* height not counted in the saved size (a user program's menu bar) */
+    surface_t *direct;        /* a full-screen program's canvas, drawn as it is (no copy into client) */
 };
 
 enum { CURSOR_ARROW = 0, CURSOR_IBEAM, CURSOR_BUSY, CURSOR_RESIZE_NWSE, CURSOR_RESIZE_H, CURSOR_RESIZE_V, CURSOR_HAND, CURSOR_CROSS };

@@ -50,7 +50,8 @@ enum {
      *   164     SYS_VOLUME_SET_WRITE: drive properties (core/syscall.c)
      *   168-169 Explorer: built-in shell tools, file details (core/syscall.c)
      *   170-171 programs' settings in SETTINGS.INI (core/syscall.c)
-     *   176     SYS_KEEP_AWAKE: no screen saver while a program plays (gui/saver.c) */
+     *   176     SYS_KEEP_AWAKE: no screen saver while a program plays (gui/saver.c)
+     *   177     SYS_WIN_INVALIDATE_RECT (gui/usergui.c) */
     SYS_WIN_CANVAS = 160,
     SYS_DATETIME = 161, SYS_VOLUME_INFO, SYS_VFS_GENERATION,
     SYS_VOLUME_SET_WRITE = 164, /* (drive, allow): allow Halcyon to write to an NTFS volume on an
@@ -62,8 +63,9 @@ enum {
     SYS_SETTING_SET = 171,      /* (key, value or NULL to remove): keys "<program>.*" only (E_PERM);
                                    saved in SETTINGS.INI a moment later (changes are coalesced) */
     SYS_KEEP_AWAKE = 176,       /* (on): while on (and the program runs) the screen saver does not start */
+    SYS_WIN_INVALIDATE_RECT = 177,  /* (win, x << 48 | y << 32 | w << 16 | h): only that part of the canvas changed */
     SYS_SOUND_FIRST = 140, SYS_SOUND_LAST = 151,
-    SYS_COUNT = 177
+    SYS_COUNT = 178
 };
 
 /* SYS_SHM_OPEN flags */

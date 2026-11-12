@@ -30,13 +30,13 @@ typedef struct {
 
 static void conf_load(conf_t *c) {
     if (setting_get("marquee.text", c->text, sizeof c->text) <= 0) strlcpy(c->text, DEFAULT_TEXT, sizeof c->text);
-    c->font = setting_get_int("marquee.font", 3);
+    c->font = setting_get_int("marquee.font", 4);
     c->color = setting_get_int("marquee.color", 1);
-    c->size = setting_get_int("marquee.size", 2);
+    c->size = setting_get_int("marquee.size", 3);
     c->speed = setting_get_int("marquee.speed", 4);
-    if (c->font < 0 || c->font >= NFONTS) c->font = 3;
+    if (c->font < 0 || c->font >= NFONTS) c->font = 4;
     if (c->color < 0 || c->color >= NCOLORS) c->color = 1;
-    if (c->size < 1 || c->size > 4) c->size = 2;
+    if (c->size < 1 || c->size > 4) c->size = 3;
     if (c->speed < 1 || c->speed > 10) c->speed = 4;
 }
 
@@ -104,7 +104,7 @@ static unsigned shade(mq_t *m, int u, int v) {
 }
 
 static int mq_frame(saver_t *s, mq_t *m, int dt) {
-    if (m->drawn) sv_fill(s, m->dx, m->dy, m->dw, m->dh, 0x000000);
+    if (m->drawn) { sv_fill(s, m->dx, m->dy, m->dw, m->dh, 0x000000); sv_dirty(s, m->dx, m->dy, m->dw, m->dh); }
     int pps = (30 + m->c.speed * 34) * (s->preview ? 1 : (s->w + 512) / 1024 + 1);   /* pixels per second */
     m->x -= pps * 256 / 1000 * dt;
     m->phase += dt;
@@ -135,6 +135,7 @@ static int mq_frame(saver_t *s, mq_t *m, int dt) {
         }
     }
     m->dx = px; m->dy = py; m->dw = tw; m->dh = th; m->drawn = 1;
+    sv_dirty(s, px, py, tw, th);
     return 1;
 }
 
@@ -167,7 +168,7 @@ static void saver_config(void) {
     int win = win_create("Scrolling Text Settings", DW, DH, WIN_DIALOG);
     if (win < 0) return;
     win_set_icon(win, HICON_DISPLAY);
-    ctl_create(win, CTL_LABEL, 14, 16, 60, 18, "&Text:", 0, 0);
+    ctl_create(win, CTL_LABEL, 14, 16, 60, 18, "Text:", 0, 0);
     ctl_create(win, CTL_TEXTBOX, 80, 13, DW - 94, 23, c.text, C_TEXT, 0);
     ctl_create(win, CTL_GROUP, 12, 46, 190, 118, "Font", 0, 0);
     ctl_create(win, CTL_LISTBOX, 24, 66, 166, 5 * 18 + 2, "", C_FONT, 0);

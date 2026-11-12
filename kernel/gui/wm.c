@@ -524,7 +524,8 @@ static void draw_frame(gc_t *g, window_t *w, int active) {
 static void paint_client(window_t *w) {
     if (!w->client) return;
     gc_t g = gc_for(w->client);
-    gfx_fill(&g, mkrect(0, 0, w->client->w, w->client->h), g_theme->face);
+    if (!(w->flags & WF_FULLSCREEN))        /* (a full-screen program covers all of it) */
+        gfx_fill(&g, mkrect(0, 0, w->client->w, w->client->h), g_theme->face);
     if (w->on_paint) w->on_paint(w, &g);
     widgets_paint(w, &g);
     if (w->menubar) menubar_paint(w, &g);
@@ -958,19 +959,34 @@ static void handle_input(void) {
 static void compose(rect_t r) {
     gc_t g = gc_for(g_screen);
     g.clip = r;
-    desktop_paint(&g, r);
+    /* a full-screen window (a screen saver, a video) that covers r hides
+     * everything under it: start there */
+    window_t *from = windows;
+    int covered = 0;
+    for (window_t *w = windows; w; w = w->next)
+        if ((w->flags & WF_FULLSCREEN) && w->state != WS_MINIMIZED && w->client) {
+            rect_t c = wm_client_rect(w), i = rect_intersect(c, r);
+            if (i.x == r.x && i.y == r.y && i.w == r.w && i.h == r.h) { from = w; covered = 1; }
+        }
+    if (!covered) desktop_paint(&g, r);
     window_t *active = wm_active();
-    int taskbar_drawn = 0;
-    for (window_t *w = windows; w; w = w->next) {
+    int taskbar_drawn = covered;
+    for (window_t *w = from; w; w = w->next) {
         if (w->state == WS_MINIMIZED || (w->flags & WF_EMBED)) continue;
         if (!taskbar_drawn && is_overlay(w)) { taskbar_paint(&g, r); taskbar_drawn = 1; }
         rect_t vr = vis_rect(w);
         if (rect_empty(rect_intersect(vr, r))) continue;
         if (framed(w)) draw_frame(&g, w, w == active);
         else if (!(w->flags & WF_NOSHADOW)) gfx_shadow(&g, w->frame, 4, 80);
-        if (w->needs_paint) paint_client(w);
         rect_t c = wm_client_rect(w);
-        if (w->client) gfx_blit(&g, c.x, c.y, w->client, mkrect(0, 0, w->client->w, w->client->h));
+        surface_t *d = w->direct;
+        if (d && !w->widgets && !w->menubar && w->client && d->w == w->client->w && d->h == w->client->h) {
+            gfx_blit(&g, c.x, c.y, d, mkrect(0, 0, d->w, d->h));     /* a full-screen program's canvas */
+            w->needs_paint = 0;
+        } else {
+            if (w->needs_paint) paint_client(w);
+            if (w->client) gfx_blit(&g, c.x, c.y, w->client, mkrect(0, 0, w->client->w, w->client->h));
+        }
         /* previews drawn inside this window (clipped to its client area) */
         for (window_t *e = windows; e; e = e->next) {
             if (!(e->flags & WF_EMBED) || e->owner != w || e->state == WS_MINIMIZED || !e->client) continue;
