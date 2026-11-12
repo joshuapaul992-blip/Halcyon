@@ -84,7 +84,9 @@ Two display engines cover all eight generations, so the work splits by engine:
 
 - **10a, identification:** PCI ID and the chip ID register, the video BIOS
   (DCB: which connectors exist), EDID over the card's I2C buses. Shown in System
-  Information. Low risk, useful for every later step.
+  Information. Low risk, useful for every later step. Written (tested on the
+  host and with a simulated card in QEMU; NVREPORT collects the data from
+  the GTX 1070): see [DESIGN-M10-NVIDIA.md](DESIGN-M10-NVIDIA.md).
 - **10b, Tesla to Pascal modesetting:** the NV50 "EVO" display engine (a command
   channel to the display; small changes per generation). Covers five
   generations and most cards still in use. No firmware needed.

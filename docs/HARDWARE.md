@@ -293,6 +293,59 @@ What may go wrong on a real PC:
   stutters, please report the machine with `BOOT.LOG` (a stream that does not
   move or a descriptor error is logged).
 
+## NVIDIA graphics cards
+
+Halcyon draws on every graphics card through the frame buffer the firmware
+set up (VESA on a BIOS, GOP on UEFI). For NVIDIA cards a native driver is
+being written (milestone M10); its first step only **identifies** the card
+and reads, never changes, what is on screen. "Tested" below means with
+generated video BIOS images and simulated I2C / DisplayPort buses on the
+host (`tests/host/nvtest.c`) and a simulated card in QEMU; no real NVIDIA
+card has run this code yet.
+
+| Generation | Cards | Identified | Video BIOS read from | Monitors (EDID) | Native modesetting |
+|------------|-------|------------|----------------------|-----------------|--------------------|
+| Celsius, Kelvin, Rankine, Curie (NV1x-NV4x, G7x) | GeForce 256 to GeForce 7 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C through the CRTC registers (C51: its own I2C) | Deferred (M10c) |
+| Tesla (G80-GT21x, MCP7x) | GeForce 8, 9, 200, 300 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C ports; DisplayPort AUX from G94 on | M10b |
+| Fermi, Kepler, Maxwell, Pascal | GeForce 400 to GeForce 10 | Yes (untested; the GTX 1070 is the test card) | PRAMIN, PROM (with IFR data), ROM BAR, C0000 | I2C ports, hybrid pads, DisplayPort AUX (GM200 layout from GM20x) | M10b |
+| Volta, Turing and later | Titan V, GeForce 16, RTX | Named only: "Turing or later: not supported until Halcyon 1.1" | - | - | - |
+
+What it finds is in System Information (an "NVIDIA graphics" book with the
+card and every connector's monitor) and in `BOOT.LOG` (lines starting with
+`nv0:`).
+
+**Please run NVREPORT** on a PC with an NVIDIA card (the GTX 1070 first):
+
+1. Start Halcyon from the stick (UEFI is fine; the card's GOP driver sets the
+   screen up).
+2. Open the Command Prompt and type `NVREPORT` (or double-click
+   `C:\PROGRAMS\NVREPORT.EXE`). It asks before measuring how fast the screen
+   can be drawn: the screen flickers grey for about a second. `NVREPORT
+   /nospeed` skips that.
+3. Turn Off from the Start menu, then copy the folder `\HALCYON\NVREPORT`
+   from the stick, and `\HALCYON\BOOT.LOG`, to another computer and send
+   them back. `README.TXT` in the folder says what each file is:
+   `REPORT.TXT` (the card, its video BIOS tables, the monitors, a dump of
+   the display registers, the speed test), `VBIOS_*.ROM` (the video BIOS
+   as read from each place) and `EDIDn.BIN` (each monitor's EDID). They
+   describe the card and the monitors only; an EDID holds the monitor's
+   model and serial number (leave the EDID files out if you prefer).
+
+If Halcyon misbehaves while starting on such a PC (the last line of a
+verbose boot starts with `nv`), add `nv.disable=1` to
+`\HALCYON\SETTINGS.INI` on the stick, or use F8 Safe Mode, and send
+`BOOT.LOG`. `nv.i2c=0` skips only the monitor part (I2C and DisplayPort
+AUX), `nv.prom=0` and `nv.rombar=0` two of the places the video BIOS is
+read from.
+
+What may go wrong: the register addresses come from nouveau (Linux's
+open-source driver) and are used the way it uses them, but nothing here has
+run on a real card yet. Each step that times out or reads a strange value
+is logged and given up, and the few registers it must write to read (the
+PRAMIN window, the PROM enable bit, an I2C port or pad, an AUX channel's
+request bits) are put back right away. Laptops whose NVIDIA GPU has no
+outputs of its own (Optimus) show the card with no connectors.
+
 ## Compatibility list
 
 | Machine | Year | Firmware | USB controllers | Result | Notes |

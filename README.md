@@ -35,7 +35,7 @@ when there is no sound card) behind a mixer that plays any number of streams at 
 | Keyboard | 20 layouts that follow Windows': US, US-International, UK, German, Swiss German, French, Belgian (AZERTY), Spanish, Italian, Portuguese, Brazilian (ABNT2), Swedish/Finnish, Norwegian, Danish, Dutch, Polish (Programmers), Czech, Turkish Q, Russian and Greek. AltGr (Right Alt, or Ctrl+Alt), dead keys (a dead key followed by a key it does not compose with gives the accent, then the key), Caps Lock per key, the ISO key next to left Shift and the ABNT2 keys. Ctrl shortcuts go by the letter on the key (Ctrl+A is the AZERTY "A"; US letters on Russian and Greek). Several layouts can be installed: Left Alt+Shift or the indicator on the taskbar switches; Keyboard settings in the Control Panel or the `KEYBOARD` command. Characters reach programs as Unicode code points. |
 | Unicode | File names and text are UTF-8 throughout; FAT long names are stored as UTF-16 (including characters outside the BMP), with Unicode case-insensitive lookup. The fonts cover Latin, Greek, Cyrillic and common symbols; other characters are kept and drawn as a replacement box. |
 | GUI | Compositing window manager (move, resize, minimize, maximize), drag and drop between windows of any program and the desktop (a drag image, copy / move / no-entry feedback, a right-drag menu), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Screen savers (Blank, Starfield, Drifting Lines, Halcyon Logo, Scrolling Text: `C:\PROGRAMS\*.SCR` programs started after a wait, ended by any key, click or real mouse movement, which never reaches the window underneath; kept away by full-screen programs and while Media Player plays). Every choice survives a restart in `C:\HALCYON\SETTINGS.INI`, written atomically (a temporary copy, a backup, recovery at boot, so a power cut cannot lose it) and coalesced: theme, wallpaper, the places, sizes and maximized state of windows, dragged desktop icons, the mouse, Paint's colours and tools, the last folder of Open / Save dialogs, Sonar's level and best times. See [docs/DESIGN-M8-SCREENSAVER-SETTINGS.md](docs/DESIGN-M8-SCREENSAVER-SETTINGS.md). |
-| Display | The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; the QEMU/Bochs/VirtualBox adapter switches at once, with Windows' "keep these settings?" 15-second revert. The frame buffer is write-combining (PAT). |
+| Display | The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; the QEMU/Bochs/VirtualBox adapter switches at once, with Windows' "keep these settings?" 15-second revert. The frame buffer is write-combining (PAT). NVIDIA cards from the GeForce 256 to the GeForce 10 series are identified (M10a): chip and family, video memory, the PCI Express link, the video BIOS (read from the GPU's shadow, its flash chip or the ROM BAR, checked) with its output, I2C, connector and GPIO tables, and each connector's monitor (EDID over I2C or DisplayPort AUX), in System Information; `NVREPORT` saves a report, the video BIOS and the EDIDs for the native driver to come. See [docs/DESIGN-M10-NVIDIA.md](docs/DESIGN-M10-NVIDIA.md). |
 | Web | A web browser (Web Browser, `BROWSER.EXE`): HTTP/1.1 and HTTPS, pages with headings, lists, tables, forms and PNG / GIF / BMP images, history, error pages, local files; `WGET.EXE` on the command line. HTTPS through BearSSL (TLS 1.2) with certificates checked against Mozilla's root list. Both are user programs on libweb, a library for URLs, HTTP, TLS and gzip. They reach the network through the internet stack (see Network). See [docs/DESIGN-M6-WEB.md](docs/DESIGN-M6-WEB.md). |
 | Apps | Explorer (My Computer with drive properties and a padlock on read-only drives, file management; copies and deletes in a worker thread; multiple selection with Ctrl and Shift clicks, a rubber band and the keyboard; drag and drop between Explorer windows, the desktop, Notepad, Paint and Media Player; the Recycle Bin: per-drive, restore, empty, a size limit; view and sort order kept; see [docs/DESIGN-M8-EXPLORER.md](docs/DESIGN-M8-EXPLORER.md)), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB, multi-level undo and redo, word wrap, Replace, Go To, a choice of fonts), Help and Support (contents, index and full-text search of Halcyon's own help pages; F1 in every program), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Media Player (WAV files), Sonar (a mine-hunting puzzle), Control Panel (with Time Zone and Mouse), Display Properties (Screen Saver with a live preview, and resolution), Keyboard settings, Network Connections, Sounds and Audio Devices, About. |
 
@@ -218,7 +218,10 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   dropouts (`ac97+dusk`, `hda+tide`: the Halcyon Dusk or Tide scheme chosen in
   SETTINGS.INI, so the recording must start with its startup sound instead); and
   the display: a saved resolution chosen by both loaders, the firmware frame
-  buffer alone, and a live mode switch; and the screen saver (`saver`): it
+  buffer alone, and a live mode switch; a simulated NVIDIA card (`nvfake`,
+  a QEMU-only test hook: QEMU has no NVIDIA GPU) whose video BIOS and EDID
+  must reach System Information's data, BOOT.LOG and `NVREPORT.EXE`'s files
+  unchanged; and the screen saver (`saver`): it
   starts after the test hook's wait, a screendump shows the stars, the click
   that ends it never reaches the window under it (`GUIDEMO.EXE` logs its
   input), the next click does, a key and a mouse movement end it too
@@ -231,6 +234,15 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   loss), each ending with a memory check; and a libFuzzer target for the
   receive path (`tests/host/fuzz_net.c`)
 - the EDID parser and the loaders' resolution choice (`tests/host/displaytest.c`)
+- the NVIDIA identification (`tests/host/nvtest.c`, run by `tests/host/run.sh`,
+  about 96,000 checks): the chip table for every family, VRAM sizing against
+  simulated registers, the video BIOS parser on generated images of 11
+  layouts (BMP, DCB 1.5 to 4.1, Pascal-style image chains with NPDE, IFR
+  headers) cut at every length, mutated and damaged on purpose, the EDID
+  timings, and the I2C master and the DisplayPort AUX channel (both register
+  layouts) against simulated buses with an EDID EEPROM and a DisplayPort
+  sink: NAKs, clock stretching, stuck lines, DEFERs, timeouts; and its
+  fuzzer's seeds (`tests/host/fuzz_nv.c`)
 - the installer's partition tables (`tests/host/parttest.c`): new MBRs and
   GPTs (512 and 4096-byte sectors, up to 3 TiB) and partitions added next to
   Windows-like layouts, checked with sfdisk, sgdisk and an independent
@@ -260,6 +272,8 @@ The partition, FAT, exFAT, ISO 9660 and NTFS code can also be fuzzed with libFuz
 ```bash
 make -C tests/host fuzz-run FUZZ_TIME=900 FUZZ_JOBS=2
 ```
+
+The NVIDIA video BIOS parser has its own target: `make -C tests/host fuzz-nv-run`.
 
 Each boot must reach the desktop, mount the boot stick and a SATA disk, and write
 `BOOT.LOG`. A USB keyboard and tablet sit on the controller under test: the
@@ -304,7 +318,9 @@ into the window's mapped pixels (`win_canvas`), and a BMP reader that checks
 every size and offset of the file. `SELFTEST.EXE` checks the
 system calls (`selftest` in the Command Prompt; the QEMU `user` test variant
 runs it). `GUIDEMO.EXE` (GUI Demo) uses every part of the window API below
-and logs each event it gets.
+and logs each event it gets. `NVREPORT.EXE` saves what Halcyon found out
+about an NVIDIA graphics card in `C:\HALCYON\NVREPORT` (`nv_query()`,
+`SYS_NV_QUERY`; see [docs/HARDWARE.md](docs/HARDWARE.md)).
 
 The window API in `hal.h` (comments there give the details):
 
@@ -444,7 +460,8 @@ sample pages); the shell opens `.htm` / `.html` files with it. See
 boot/        MBR, BIOS stage 2, bootinfo contract shared with the kernel
 efi/         UEFI loader
 kernel/core  entry, CPU and timing, interrupts and idle, memory, library, panic screen
-kernel/drivers  PCI, PS/2, input, AHCI (disks and CD/DVD), NVMe, ACPI
+kernel/drivers  PCI, PS/2, input, AHCI (disks and CD/DVD), NVMe, ACPI, EDID;
+             nv/ NVIDIA GPU identification (chip, video BIOS, I2C / DP AUX, EDIDs)
 kernel/usb   USB core, hub/HID/MSC class drivers, UHCI/OHCI/EHCI/xHCI
 kernel/fs    block layer and partitions, VFS, FAT, exFAT, ISO 9660, NTFS (driver and formatter)
 kernel/gui   graphics, window manager, widgets, menus, dialogs, desktop, splash
@@ -479,8 +496,9 @@ tests/sound  host tests of the WAV library
 - PCI INTx routes are learned, not read from ACPI (no AML interpreter). A device
   that shares its line with a device that has no driver may stay polled.
 - x2APIC mode is written to spec but QEMU 8.2's emulator cannot run it.
-- Real graphics cards have no driver yet (NVIDIA, Intel and AMD come in later
-  milestones): resolution changes need a restart there, refresh rates are
+- Real graphics cards have no driver yet (NVIDIA cards are identified, their
+  native driver, Intel and AMD come in later milestones): resolution changes
+  need a restart there, refresh rates are
   whatever the firmware chose, and there is one monitor. OVMF (QEMU's UEFI)
   reports no EDID, so the UEFI loader's choice was only tested with a saved
   setting; real UEFI firmware usually provides it.

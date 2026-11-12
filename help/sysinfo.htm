@@ -1,5 +1,5 @@
 <html><head><title>System Information</title>
-<meta name="keywords" content="System Information; devices; device manager; hardware; drivers; interrupts#details; kernel log#details; which sound card; which network adapter">
+<meta name="keywords" content="System Information; devices; device manager; hardware; drivers; interrupts#details; kernel log#details; which sound card; which network adapter; NVIDIA#nvidia; graphics card#nvidia; NVREPORT#nvidia; monitor name#nvidia">
 </head><body>
 <h2 style="color:#1f4e9a">System Information</h2>
 <p>System Information shows what is inside your computer and how Halcyon is
@@ -22,6 +22,27 @@ and how often: useful when a device does not respond.</li>
 </ul>
 <p>If a device you have is missing from the list, Halcyon has no driver for it
 yet. Please report it, with your <a href="bootlog.htm">boot log</a>.</p>
+
+<h3 id="nvidia">NVIDIA graphics cards</h3>
+<p>On a computer with an NVIDIA graphics card (the GeForce 256 and GeForce2 up to
+the GeForce 10 series) System Information has an <b>NVIDIA graphics</b>
+book: the card's name, its chip and family, the video memory, the version of
+its video BIOS and the PCI Express link. Below the card, every connector on
+its back (DisplayPort, HDMI, DVI, VGA) with the monitor plugged into it: the
+monitor's name and its native resolution, read from the monitor itself.
+Newer cards (GeForce 16, RTX) are named but not looked at further yet.</p>
+<p>Halcyon still draws on these cards through the frame buffer the firmware
+set up; changing the resolution at once, several monitors and a hardware
+pointer come with the native driver. To help write it, type
+<b>NVREPORT</b> in the <a href="cmd.htm">Command Prompt</a>: it saves a
+report, the video BIOS and the monitors' EDIDs in
+<b>C:\HALCYON\NVREPORT</b> (the screen flickers grey for a second while it
+measures how fast it can be drawn). Please send that folder back; its
+README.TXT says what is in it. The files describe the card and the monitors
+only.</p>
+<p>If starting Halcyon misbehaves on an NVIDIA card, add the line
+<b>nv.disable=1</b> to <b>\HALCYON\SETTINGS.INI</b>, or start in Safe Mode
+(F8), and send your <a href="bootlog.htm">boot log</a>.</p>
 
 <p><b>Related topics:</b> <a href="taskmgr.htm">Task Manager</a> &middot;
 <a href="troubleshoot.htm">Solving startup problems</a></p>
