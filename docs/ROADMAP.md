@@ -208,11 +208,11 @@ WebKit. Ladybird, a new independent engine, is promising but not yet complete.
   file system, and a handler for app links (needed by M16).
 - Depends on M14 (and M6, M5; M7 for sound).
 
-### M16: A Roblox launcher (Sober-style)
+### M16: Xenithium, a Roblox client for Halcyon (Sober-style)
 
-Runs the official Roblox client, unmodified, the way Sober does on Linux: the
-Windows client cannot work (its anti-tamper protection rejects compatibility
-layers), so the launcher runs the x86-64 build of the Android app.
+Xenithium runs the official Roblox client, unmodified, the way Sober does on
+Linux: the Windows client cannot work (its anti-tamper protection rejects
+compatibility layers), so Xenithium runs the x86-64 build of the Android app.
 
 - An Android runtime for one app: load the app's native libraries, provide the
   Android C library (bionic) interfaces, and a stand-in for the Java side
@@ -222,15 +222,42 @@ layers), so the launcher runs the x86-64 build of the Android app.
 - Graphics: OpenGL ES 3 or Vulkan through Mesa (M12). Audio through M7,
   input (mouse lock, keyboard, controllers), the window through M14's
   compositor.
-- Browser integration: roblox.com's "Play" buttons and app links open the
-  launcher through M15's link handler; parts of the app that show web pages
+- Browser integration: roblox.com's "Play" buttons and app links open
+  Xenithium through M15's link handler; parts of the app that show web pages
   (Android WebView) can be served by M15's engine.
-- Getting the client: the launcher downloads the official app package; how to
-  obtain it in a legitimate way is part of the design.
+- Automatic client updates (a setting, "Keep the Roblox client up to date",
+  on by default):
+  - Xenithium checks an APK download site for a newer Roblox release when it
+    starts and every few hours while it runs, and downloads it in the
+    background. The site is a setting: a download site that verifies
+    developers' signatures is the default, and others (or "choose an APK
+    file...") can be used instead. Which site, and that its terms allow
+    automated downloads, is decided in the design; scraping a page breaks when
+    the site changes, so an API or a stable feed is preferred.
+  - The site is not what makes an update trusted. Before anything is
+    installed, Xenithium checks that the package is `com.roblox.client`, that
+    its APK signature (scheme v2/v3) is valid and signed with Roblox's
+    certificate, whose fingerprint Xenithium ships with, that its version is
+    newer than the installed one (no downgrades from the site), and that it
+    has x86-64 native libraries. Split packages (a base APK plus
+    configuration APKs, as many sites serve them) are checked file by file.
+    Anything that fails is deleted and reported, never run.
+  - The new version is installed next to the old one and used from the next
+    start. If it fails to start or crashes at once (often the case when Roblox
+    calls Java classes the runtime does not have yet), Xenithium goes back to
+    the previous version, marks the new one as not working, and says so;
+    the last two working versions are kept.
+  - Xenithium's own updates can add the classes a new client needs. A list
+    of client versions known to work, published with Xenithium, lets the
+    updater wait for a version that runs rather than install one that will
+    not.
+  - With the setting off, Xenithium only reports that an update is available.
 - Risks: Roblox ships a new client every week, so the runtime needs constant
   upkeep (Sober is maintained by a dedicated team). Roblox does not support
   unofficial runtimes and could block them, and running one may conflict with
-  its terms of use, with a risk to the account.
+  its terms of use, with a risk to the account. APK sites redistribute the
+  app without Roblox's involvement; the signature check guards against a
+  tampered package, but not against the site disappearing or being blocked.
 - Depends on M14, M15, M7 and M12.
 
 **Recommended order:** 5 → 9 → 6 → 7 → 8 → 10 → 11 → 13 → 14 → 15 → 12 → 16
