@@ -31,7 +31,7 @@ typedef struct edid_timing {
     int block;               /* 0 base, 1.. extension block */
     int preferred;           /* DisplayID's preferred flag, or the base block's first timing */
 } edid_timing_t;
-int  edid_timings(const u8 *e, int size, edid_timing_t *out, int max);
+int  edid_detailed_timings(const u8 *e, int size, edid_timing_t *out, int max);
 int  edid_block_count(const u8 *e, int size);       /* blocks present (1 + extensions read), 0 if no EDID */
 const char *edid_ext_name(u8 tag);                  /* "CEA-861", "DisplayID", "block map" ... */
 /* "1920x1080 at 60 Hz (148.50 MHz)" */

@@ -218,10 +218,13 @@ void menu_popup(window_t *owner, menu_t *m, int x, int y) {
             if (tw > wdt) wdt = tw;
         }
     }
-    wdt = MIN(wdt, screen_w());
-    if (x + wdt > screen_w()) x = screen_w() - wdt;
-    if (y + h > screen_h()) y = MAX(0, y - h);
-    x = MAX(0, x);
+    /* on the monitor where it opens */
+    int mi = mon_at(x, y);
+    rect_t mr = mon_rect(mi < 0 ? mon_of(mkrect(x, y, 1, 1)) : mi);
+    wdt = MIN(wdt, mr.w);
+    if (x + wdt > mr.x + mr.w) x = mr.x + mr.w - wdt;
+    if (y + h > mr.y + mr.h) y = MAX(mr.y, y - h);
+    x = MAX(mr.x, x);
     window_t *w = wm_create("", -1, x, y, wdt, h, WF_POPUP | WF_TOPMOST);
     popup_t *p = kzalloc(sizeof *p);
     if (!w || !p) { if (w) wm_destroy(w); kfree(p); return; }

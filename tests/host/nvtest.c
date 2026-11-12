@@ -694,7 +694,7 @@ static void test_edid(void) {
           i.native_w, i.native_h, i.name);
     CHECK(edid_block_count(e, n) == 3, "blocks %d", edid_block_count(e, n));
     edid_timing_t t[8];
-    int k = edid_timings(e, n, t, 8);
+    int k = edid_detailed_timings(e, n, t, 8);
     CHECK(k == 4, "timings %d", k);
     CHECK(t[0].w == 1920 && t[0].h == 1200 && t[0].preferred && t[0].hz == 60, "t0 %dx%d@%d", t[0].w, t[0].h, t[0].hz);
     CHECK(t[1].w == 1920 && t[1].h == 1080 && t[1].block == 1 && t[2].w == 1280, "cea %dx%d %dx%d", t[1].w, t[1].h, t[2].w, t[2].h);
@@ -704,13 +704,13 @@ static void test_edid(void) {
     char s[64];
     edid_timing_str(&t[0], s, sizeof s);
     CHECK(!strcmp(s, "1920x1200 at 60 Hz (153.50 MHz)"), "str '%s'", s);
-    CHECK(edid_block_count(e, 200) == 1 && edid_timings(e, 0, t, 8) == 0, "short");
+    CHECK(edid_block_count(e, 200) == 1 && edid_detailed_timings(e, 0, t, 8) == 0, "short");
     /* garbage extension blocks must not crash */
     for (int r = 0; r < 20000; r++) {
         make_edid(e, 3);
         for (int f = 0; f < 6; f++) e[128 + rnd() % 384] = (u8)rnd();
         if (r & 1) e[126] = (u8)rnd();
-        edid_timings(e, 384, t, 8);
+        edid_detailed_timings(e, 384, t, 8);
     }
 }
 

@@ -174,8 +174,9 @@ static void pop_destroy(window_t *w) {
 }
 
 static void pop_open(rect_t icon) {
-    int x = CLAMP(icon.x + icon.w / 2 - POP_W / 2, 0, screen_w() - POP_W);
-    int y = screen_h() - TASKBAR_H - POP_H - 2;
+    rect_t tb = taskbar_rect();
+    int x = CLAMP(icon.x + icon.w / 2 - POP_W / 2, tb.x, tb.x + tb.w - POP_W);
+    int y = tb.y - POP_H - 2;
     pop = wm_create("Volume", -1, x, y, POP_W, POP_H, WF_POPUP | WF_TOPMOST);
     if (!pop) return;
     pop->on_paint = pop_paint;
@@ -233,7 +234,7 @@ static void tip_text(char *out, int n) {
 static u64 osd_t0;
 static int osd_on;
 
-static rect_t osd_rect(void) { return mkrect((screen_w() - OSD_W) / 2, screen_h() - TASKBAR_H - OSD_H - 70, OSD_W, OSD_H); }
+static rect_t osd_rect(void) { rect_t tb = taskbar_rect(); return mkrect(tb.x + (tb.w - OSD_W) / 2, tb.y - OSD_H - 70, OSD_W, OSD_H); }
 
 static void osd_show(void) {
     osd_on = 1;
@@ -320,7 +321,8 @@ void volume_tick(void) {
             char t[40];
             tip_text(t, sizeof t);
             int w = gfx_text_width(&font_ui, t) + 12, h = font_ui.height + 6;
-            tip_rect = mkrect(CLAMP(tip_icon.x + tip_icon.w / 2 - w / 2, 0, screen_w() - w), tip_icon.y - h - 2, w, h);
+            rect_t tb = taskbar_rect();
+            tip_rect = mkrect(CLAMP(tip_icon.x + tip_icon.w / 2 - w / 2, tb.x, tb.x + tb.w - w), tip_icon.y - h - 2, w, h);
             tip_shown = 1;
             wm_invalidate_rect(tip_rect);
         } else idle_wake_at(tip_since + TIP_DELAY_MS);

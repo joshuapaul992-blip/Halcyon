@@ -4,22 +4,9 @@
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
+#include "drivers/display.h"
 
 surface_t *g_screen;
-
-rect_t rect_intersect(rect_t a, rect_t b) {
-    int x0 = MAX(a.x, b.x), y0 = MAX(a.y, b.y);
-    int x1 = MIN(a.x + a.w, b.x + b.w), y1 = MIN(a.y + a.h, b.y + b.h);
-    if (x1 <= x0 || y1 <= y0) return mkrect(0, 0, 0, 0);
-    return mkrect(x0, y0, x1 - x0, y1 - y0);
-}
-rect_t rect_union(rect_t a, rect_t b) {
-    if (rect_empty(a)) return b;
-    if (rect_empty(b)) return a;
-    int x0 = MIN(a.x, b.x), y0 = MIN(a.y, b.y);
-    int x1 = MAX(a.x + a.w, b.x + b.w), y1 = MAX(a.y + a.h, b.y + b.h);
-    return mkrect(x0, y0, x1 - x0, y1 - y0);
-}
 
 surface_t *surface_new(int w, int h) {
     surface_t *s = kzalloc(sizeof *s);
@@ -363,6 +350,38 @@ int gfx_text_n(gc_t *g, const font_t *f, int x, int y, const char *s, int n, col
 }
 int gfx_text(gc_t *g, const font_t *f, int x, int y, const char *s, color_t c) { return gfx_text_n(g, f, x, y, s, 1 << 30, c); }
 
+/* text enlarged by scale/16 (bilinear on the glyphs' coverage): the big
+ * monitor numbers of Display Properties' Identify */
+static u32 glyph_alpha(const font_t *f, const glyph_t *gl, int x, int y) {
+    if (x < 0 || y < 0 || x >= gl->w || y >= gl->h) return 0;
+    return f->bitmap[gl->off + y * gl->w + x];
+}
+int gfx_text_scaled(gc_t *g, const font_t *f, int x, int y, const char *s, color_t c, int scale16) {
+    int pos = 0, n = 1 << 30;
+    while (s[pos]) {
+        const glyph_t *gl = glyph_cp(f, utf8_get(s, n, &pos));
+        int gw = gl->w * scale16 / 16, gh = gl->h * scale16 / 16;
+        int gx = x + gl->xoff * scale16 / 16 + g->ox, gy = y + gl->yoff * scale16 / 16 + g->oy;
+        rect_t r = rect_intersect(mkrect(gx, gy, gw, gh), g->clip);
+        for (int j = r.y; j < r.y + r.h && gl->w; j++) {
+            int sy = ((j - gy) * 16 * 256) / scale16 - 128, y0 = sy >> 8, fy = sy & 255;
+            u32 *dp = g->s->px + j * g->s->stride;
+            for (int i = r.x; i < r.x + r.w; i++) {
+                int sx = ((i - gx) * 16 * 256) / scale16 - 128, x0 = sx >> 8, fx = sx & 255;
+                u32 a00 = glyph_alpha(f, gl, x0, y0), a10 = glyph_alpha(f, gl, x0 + 1, y0);
+                u32 a01 = glyph_alpha(f, gl, x0, y0 + 1), a11 = glyph_alpha(f, gl, x0 + 1, y0 + 1);
+                u32 top = a00 * (256 - fx) + a10 * fx, bot = a01 * (256 - fx) + a11 * fx;
+                u32 a = (top * (256 - fy) + bot * fy) >> 16;
+                if (!a) continue;
+                dp[i] = a >= 255 ? c : blend(dp[i], c, a);
+            }
+        }
+        x += gl->adv * scale16 / 16;
+    }
+    return x;
+}
+int gfx_text_scaled_width(const font_t *f, const char *s, int scale16) { return gfx_text_width(f, s) * scale16 / 16; }
+
 /* bytes of s that fit in width w (whole characters) */
 int gfx_text_fit(const font_t *f, const char *s, int w) {
     int pos = 0, acc = 0;
@@ -419,55 +438,41 @@ int gfx_text_wrap_height(const font_t *f, int width, const char *s) {
     return wrap_impl(NULL, f, mkrect(0, 0, width, 0), s, 0, 0);
 }
 
-/* ---- screen ---- */
-int screen_w(void) { return (int)g_bootinfo.fb_width; }
-int screen_h(void) { return (int)g_bootinfo.fb_height; }
-
-static int fb_native;   /* 32bpp with R at 16, G at 8, B at 0 */
+/* ---- screen ----
+ * g_screen is the whole desktop: the bounding box of the monitors'
+ * arrangement (one monitor: its mode). The display core copies what changed
+ * into each monitor's scanout buffer (drivers/display.c). */
+int screen_w(void) { int w, h; if (g_screen) return g_screen->w; display_desktop_size(&w, &h); return w; }
+int screen_h(void) { int w, h; if (g_screen) return g_screen->h; display_desktop_size(&w, &h); return h; }
 
 void screen_init(void) {
     if (g_screen) return;
-    g_screen = surface_new((int)g_bootinfo.fb_width, (int)g_bootinfo.fb_height);
+    int w, h;
+    display_desktop_size(&w, &h);
+    g_screen = surface_new(w, h);
     if (!g_screen) panic("cannot allocate the screen back buffer");
-    fb_native = g_bootinfo.fb_bpp == 32 && g_bootinfo.fb_red_pos == 16 && g_bootinfo.fb_green_pos == 8 && g_bootinfo.fb_blue_pos == 0;
+    display_set_source(g_screen->px, g_screen->w, g_screen->h, g_screen->stride);
 }
 
-/* the mode changed (g_bootinfo.fb_*): a new back buffer of the new size */
+/* the arrangement or a mode changed: a back buffer of the new size */
 int screen_resize(void) {
-    int w = (int)g_bootinfo.fb_width, h = (int)g_bootinfo.fb_height;
+    int w, h;
+    display_desktop_size(&w, &h);
     if (g_screen && g_screen->w == w && g_screen->h == h) return 0;
     surface_t *n = surface_new(w, h);
     if (!n) return E_NOMEM;
+    memset(n->px, 0, (size_t)w * h * 4);
+    display_set_source(n->px, n->w, n->h, n->stride);
     surface_free(g_screen);
     g_screen = n;
-    fb_native = g_bootinfo.fb_bpp == 32 && g_bootinfo.fb_red_pos == 16 && g_bootinfo.fb_green_pos == 8 && g_bootinfo.fb_blue_pos == 0;
     return 0;
 }
 
 void screen_present(rect_t r) {
     r = rect_intersect(r, mkrect(0, 0, g_screen->w, g_screen->h));
     if (rect_empty(r)) return;
-    u8 *fb = (u8 *)(uptr)g_bootinfo.fb_addr;
-    u32 pitch = g_bootinfo.fb_pitch;
-    for (int y = r.y; y < r.y + r.h; y++) {
-        u32 *src = g_screen->px + y * g_screen->stride + r.x;
-        if (fb_native) {
-            memcpy(fb + (u64)y * pitch + (u64)r.x * 4, src, (size_t)r.w * 4);
-        } else if (g_bootinfo.fb_bpp == 32) {
-            u32 *dst = (u32 *)(fb + (u64)y * pitch) + r.x;
-            for (int x = 0; x < r.w; x++) {
-                u32 c = src[x];
-                dst[x] = (((c >> 16) & 255) << g_bootinfo.fb_red_pos) | (((c >> 8) & 255) << g_bootinfo.fb_green_pos) |
-                         ((c & 255) << g_bootinfo.fb_blue_pos);
-            }
-        } else {
-            u8 *dst = fb + (u64)y * pitch + (u64)r.x * 3;
-            for (int x = 0; x < r.w; x++) {
-                u32 c = src[x];
-                u32 v = (((c >> 16) & 255) << g_bootinfo.fb_red_pos) | (((c >> 8) & 255) << g_bootinfo.fb_green_pos) |
-                        ((c & 255) << g_bootinfo.fb_blue_pos);
-                dst[x * 3] = (u8)v; dst[x * 3 + 1] = (u8)(v >> 8); dst[x * 3 + 2] = (u8)(v >> 16);
-            }
-        }
-    }
+    display_present(r.x, r.y, r.w, r.h);
 }
+
+/* the end of a frame: flushes and page flips */
+void screen_commit(void) { display_commit(); }

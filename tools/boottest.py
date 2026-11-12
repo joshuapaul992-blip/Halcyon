@@ -54,6 +54,47 @@ interrupts on, get a working interrupt:
   fwvideo no display adapter driver (boot flag): the firmware frame buffer only
   switch  switch the display mode to 1600 x 900 once the desktop is up (QEMU
           fw_cfg test hook; needs the live QEMU/Bochs display driver)
+  vgpu    one virtio GPU head as the only display (-vga virtio, the device
+          with a VGA part for the firmware): the virtio-gpu driver must take
+          the firmware frame buffer's place, use the hardware cursor and
+          complete page flips at its (emulated) vertical blank; a screendump
+          must show the desktop and the taskbar
+  dual    two monitors on one virtio GPU (virtio-vga,max_outputs=2: the
+          firmware's frame buffer is head 1's VGA part, which the driver takes
+          over; virtio-gpu-pci has no VGA, and OVMF's GOP on it offers no
+          linear frame buffer, so the UEFI loader cannot start there): QEMU
+          enables output 2 only when a display back end asks for it, so a VNC
+          server bound to head 1 gets a SetDesktopSize of 1024 x 768 from
+          tools/vnc_ctl.py as QEMU starts. Monitor 2 is set to 800 x 600 by
+          the setmode test hook ("Virtual-2:800x600"). Checked: both
+          connectors, the desktop spanning both, each head's screendump
+          (QMP screendump device/head) of its size, the taskbar only on the
+          primary, the hardware cursor on both heads, page flips on both;
+          GUIDEMO.EXE's window dragged by its title bar onto monitor 2 shows
+          there, and a double click maximizes it to monitor 2's size; then
+          hotplug through VNC: monitor 2 resized to 1024 x 768 (the desktop
+          follows, the configuration-change interrupt seen) to 1280 x 1024,
+          switched off (the window moves onto monitor 1, the desktop
+          shrinks) and on again; and the screen saver (fw_cfg screensaver,
+          30 s) must cover both monitors
+  arrange the dual variant's two monitors with an arrangement saved in
+          SETTINGS.INI as Display Properties writes it: monitor 2
+          (Virtual-2) is the primary one at 800 x 600, monitor 1 right of
+          it, lower by 100 pixels; and GUIDEMO's window saved at a place on
+          a monitor that is not there (x 3000): the arrangement must be
+          restored, the taskbar be on monitor 2, and the window open inside
+          the primary monitor
+  multi   two display adapters: QEMU's std-vga (Bochs driver, the firmware's
+          frame buffer, the primary monitor) and a virtio-gpu-pci with one
+          output (monitor 2): the desktop spans both adapters, the taskbar
+          is on the Bochs screen only, and the cursor is drawn in software
+          (the Bochs adapter has no hardware cursor)
+  gpufail the virtio GPU's mode set fails (fw_cfg displayfail test hook) after
+          it programmed the device: the driver must give the device back (a
+          reset: virtio-vga shows its VGA part again) and the desktop come up
+          on the firmware frame buffer, visible in a screendump
+  gpuoff  display.disable=virtio-gpu in SETTINGS.INI: the driver is not
+          started, the firmware frame buffer is used
   ntfsrw  an internal SATA disk (one MBR partition of type 7) with an NTFS
           volume made on the host by mkntfs and ntfs-3g (tests/host/
           ntfs_mkimg.py, needs root): it has \\Windows\\System32, so it
@@ -179,11 +220,12 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:cd", "xhci:bios:user", "xhci:bios:help", "uhci:uefi:user", "xhci:bios:sock", "xhci:bios:web",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
+          "xhci:bios:vgpu", "xhci:uefi:dual", "xhci:bios:arrange", "xhci:bios:multi", "xhci:bios:gpufail", "xhci:uefi:gpuoff",
           "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:bios:ac97+dusk", "xhci:uefi:hda+tide", "xhci:uefi:virtiosnd", "xhci:bios:audio",
           "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:bios:recycle", "xhci:bios:saver", "xhci:uefi:nvfake",
           "xhci:uefi:install", "xhci:bios:install"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "help": 0, "sock": 0, "web": 0,
-            "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0,
+            "fwvideo": 0x800, "res": 0, "switch": 0, "vgpu": 0, "dual": 0, "arrange": 0, "multi": 0, "gpufail": 0, "gpuoff": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0,
             "recycle": 0, "saver": 0, "nvfake": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
@@ -373,6 +415,195 @@ def saver_test(log):
     ctl("move:200,150", "move:600,500")
     if not wait_log(log, "screensaver: stopped (mouse moved)", start, 8):
         fails.append("mouse movement did not end the screen saver")
+    return fails
+
+
+def qmp_heads(device, n):
+    """screendumps of heads 0..n-1 of a display device (QMP screendump with
+    device and head), as PIL images (None where it failed)"""
+    import json
+    import socket as so
+    from PIL import Image
+    s = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+    s.connect(os.path.join(BUILD, "qmp.sock"))
+    f = s.makefile("rw")
+    f.readline()
+
+    def cmd(name, **args):
+        f.write(json.dumps({"execute": name, "arguments": args}) + "\n")
+        f.flush()
+        while True:
+            r = json.loads(f.readline())
+            if "return" in r or "error" in r:
+                return r
+    cmd("qmp_capabilities")
+    out = []
+    for h in range(n):
+        ppm = os.path.abspath(os.path.join(BUILD, "ci_head%d.ppm" % h))
+        if os.path.exists(ppm):
+            os.remove(ppm)
+        r = cmd("screendump", filename=ppm, device=device, head=h)
+        im = None
+        if "return" in r:
+            for _ in range(20):
+                if os.path.exists(ppm) and os.path.getsize(ppm) > 0:
+                    break
+                time.sleep(0.1)
+            time.sleep(0.1)
+            im = Image.open(ppm).convert("RGB")
+            im.save(os.path.join(BUILD, "ci_head%d.png" % h))
+        out.append(im)
+    s.close()
+    return out
+
+
+def blue_share(im, box):
+    """share of the pixels in box in the taskbar's or a title bar's saturated blue"""
+    px = im.crop(box).tobytes()
+    n = len(px) // 3 or 1
+    return sum(1 for i in range(0, len(px) - 2, 3) if px[i + 2] > 150 and px[i] < 120 and px[i + 2] - px[i] > 90) / n
+
+
+def light_share(im, box):
+    """share of the pixels in box that are light (a window's face or white client area, not the sky)"""
+    px = im.crop(box).tobytes()
+    n = len(px) // 3 or 1
+    return sum(1 for i in range(0, len(px) - 2, 3) if px[i] > 200 and px[i + 1] > 200 and px[i + 2] > 180) / n
+
+
+def dark_share(im):
+    h = im.convert("L").histogram()
+    return sum(h[:24]) / (sum(h) or 1)
+
+
+def vnc_resize(sock, w, h, wait=10):
+    """resize / connect / disconnect a virtio GPU output through the VNC
+    server bound to it (tools/vnc_ctl.py)"""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import vnc_ctl
+    t0 = time.time()
+    while not os.path.exists(sock) and time.time() - t0 < wait:
+        time.sleep(0.05)
+    vnc_ctl.resize(sock, w, h)
+
+
+def dual_test(log, polled=False):
+    """two monitors on a virtio GPU (see the dual variant); polled: no
+    interrupts (noirq), hotplug must be found by polling"""
+    mon = os.path.join(BUILD, "mon.sock")
+    vnc = os.path.abspath(os.path.join(BUILD, "vnc1.sock"))
+    fails = []
+
+    def offset():
+        return len(open(log, errors="replace").read())
+
+    def ctl(screen, *cmds):
+        subprocess.run([sys.executable, "tools/qemu_ctl.py", mon] + list(cmds), stdout=subprocess.DEVNULL,
+                       env=dict(os.environ, SCREEN="%dx%d" % screen))
+
+    if not wait_log(log, "gui: test mode switch to", 0, 10):
+        return ["the setmode test hook did not run"]
+    text = open(log, errors="replace").read()
+    last = text.rfind("monitor 1: Virtual-1")
+    m1 = re.search(r"monitor 1: Virtual-1 \(.*?\) (\d+)x(\d+) at 0,0 .*primary", text[last:])
+    m2 = re.search(r"monitor 2: Virtual-2 \(.*?\) (\d+)x(\d+) at (\d+),(\d+)", text[last:])
+    if last < 0 or not m1 or not m2:
+        return ["two monitors not set up"]
+    w0, h0 = int(m1.group(1)), int(m1.group(2))
+    w1, h1, x1, y1 = (int(v) for v in m2.groups())
+    if (w1, h1) != (800, 600):
+        fails.append("monitor 2 not switched to 800x600 by the test hook (%dx%d)" % (w1, h1))
+    if x1 != w0 or y1 != 0:
+        fails.append("monitor 2 not right of monitor 1 (%d,%d)" % (x1, y1))
+    desk = (max(w0, x1 + w1), max(h0, y1 + h1))
+    if "desktop %dx%d on 2 monitors" % desk not in text:
+        fails.append("desktop does not span both monitors (want %dx%d)" % desk)
+    if not wait_log(log, "hardware cursor in use on Virtual-1, Virtual-2", 0, 10):
+        fails.append("hardware cursor not used on both heads")
+    for c in ("Virtual-1", "Virtual-2"):
+        if not wait_log(log, "%s: 1 page flips completed at vertical blank" % c, 0, 10):
+            fails.append("no page flip completed on " + c)
+    time.sleep(1)
+    ims = qmp_heads("gpu0", 2)
+    if not ims[0] or not ims[1]:
+        return fails + ["screendump of a head failed"]
+    if ims[0].size != (w0, h0) or ims[1].size != (w1, h1):
+        fails.append("head sizes %s %s" % (ims[0].size, ims[1].size))
+    t0 = blue_share(ims[0], (200, h0 - 26, w0 - 200, h0 - 4))
+    t1 = blue_share(ims[1], (0, h1 - 26, w1, h1 - 4))
+    if t0 < 0.8 or t1 > 0.3:
+        fails.append("taskbar: %.0f%% on monitor 1, %.0f%% on monitor 2" % (t0 * 100, t1 * 100))
+    if dark_share(ims[1]) > 0.5:
+        fails.append("monitor 2 shows no wallpaper")
+    # GUIDEMO's window onto monitor 2 by its title bar
+    if not wait_log(log, "guidemo: window client at", 0, 30):
+        return fails + ["GUIDEMO.EXE did not start"]
+    g = re.search(r"guidemo: window client at (-?\d+),(-?\d+) size (\d+)x(\d+)", open(log, errors="replace").read())
+    gx, gy, gw, gh = (int(v) for v in g.groups())
+    tx, ty = gx + gw // 2, gy - 20 - 13          # the title bar (above the menu bar)
+    dx, dy = x1 + w1 // 2, 60
+    before = light_share(ims[1], (dx - x1 - 100, dy + 40, dx - x1 + 100, dy + 150))
+    ctl(desk, "drag:%d,%d,%d,%d" % (tx, ty, dx, dy), "sleep:0.8")
+    ims = qmp_heads("gpu0", 2)
+    there = light_share(ims[1], (dx - x1 - 100, dy + 40, dx - x1 + 100, dy + 150))
+    left = light_share(ims[0], (tx - 100, gy + 20, tx + 100, gy + 130))
+    if there < 0.6 or before > 0.3 or left > 0.3:
+        fails.append("the window did not move onto monitor 2 (window there %.0f%% (before %.0f%%), %.0f%% where it was)"
+                     % (there * 100, before * 100, left * 100))
+    start = offset()
+    ctl(desk, "dclick:%d,%d" % (dx, dy))
+    if not wait_log(log, "state 2", start, 5):
+        fails.append("double click on the title bar did not maximize the window")
+    else:
+        r = re.search(r"guidemo: resized to \d+x\d+, on screen (-?\d+),(-?\d+) (\d+)x(\d+) state 2",
+                      open(log, errors="replace").read()[start:])
+        if not r or abs(int(r.group(1)) - x1) > 8 or abs(int(r.group(3)) - w1) > 16:
+            fails.append("maximized, but not to monitor 2 (%s)" % (r.group(0) if r else "?"))
+        time.sleep(0.5)
+        ims = qmp_heads("gpu0", 2)
+        if light_share(ims[1], (40, 100, w1 - 40, 200)) < 0.6:
+            fails.append("the maximized window does not fill monitor 2")
+        ctl(desk, "dclick:%d,%d" % (dx, 12))           # back to its normal size
+    # hotplug: resize, switch off, switch on
+    start = offset()
+    vnc_resize(vnc, 1280, 1024)
+    want = "hotplug: reconfigured (desktop %dx%d)" % (w0 + 1280, max(h0, 1024))
+    if not wait_log(log, "Virtual-2: monitor changed (1280x1024)", start, 8):
+        fails.append("hotplug: monitor 2's new size not followed")
+    elif not wait_log(log, want, start, 20):
+        fails.append("hotplug: no '%s'" % want)
+    elif "configuration changed (%s)" % ("polled" if polled else "interrupt") not in open(log, errors="replace").read()[start:]:
+        fails.append("hotplug not seen %s" % ("by polling" if polled else "through its interrupt"))
+    time.sleep(0.5)
+    ims = qmp_heads("gpu0", 2)
+    if ims[1] is None or ims[1].size != (1280, 1024):
+        fails.append("head 2 not 1280x1024 after hotplug (%s)" % (ims[1].size if ims[1] else None,))
+    start = offset()
+    vnc_resize(vnc, 0, 0)
+    if not wait_log(log, "Virtual-2: monitor disconnected", start, 8):
+        fails.append("hotplug: monitor 2's removal not seen")
+    elif not wait_log(log, "hotplug: reconfigured (desktop %dx%d)" % (w0, h0), start, 20):
+        fails.append("hotplug: desktop not back to monitor 1 alone")
+    if not wait_log(log, '"GUI Demo": its monitor went away, moved onto monitor 1', start, 3):
+        fails.append("the window on monitor 2 did not move onto monitor 1")
+    start = offset()
+    vnc_resize(vnc, 1024, 768)
+    if not wait_log(log, "Virtual-2: monitor connected (1024x768)", start, 8) or \
+            not wait_log(log, "hotplug: reconfigured (desktop %dx%d)" % (w0 + 1024, max(h0, 768)), start, 20):
+        fails.append("hotplug: monitor 2 not back")
+    # the screen saver covers both monitors
+    start = offset()
+    if not wait_log(log, "screensaver: STARS.SCR is showing", start, 50):
+        return fails + ["screen saver did not start"]
+    time.sleep(1.5)
+    ims = qmp_heads("gpu0", 2)
+    for i, im in enumerate(ims):
+        if im is None or dark_share(im) < 0.9:
+            fails.append("screen saver does not cover monitor %d (%.0f%% dark)" % (i + 1, dark_share(im) * 100 if im else 0))
+    start = offset()
+    ctl(desk, "move:200,150", "move:600,500")
+    if not wait_log(log, "screensaver: stopped", start, 8):
+        fails.append("the screen saver did not stop")
     return fails
 
 
@@ -1333,6 +1564,61 @@ def run(cfg):
             with open(argf, "w") as f:
                 f.write("C:/PROGRAMS/GUIDEMO.EXE")
             extra += " -fw_cfg name=opt/halcyon/autorun,file=" + argf
+    vnc_thread = None
+    if "vgpu" in opts or "gpufail" in opts or "gpuoff" in opts:
+        extra += " -vga virtio"
+        checks.append(("virtio GPU found", "display: found Virtio GPU (1 output) (virtio-gpu), shows the firmware frame buffer"))
+    if "vgpu" in opts:
+        checks.append(("virtio GPU in use", "monitor 1: Virtual-1"))
+        checks.append(("firmware frame buffer retired", "display: Default: off"))
+        checks.append(("hardware cursor", "display: hardware cursor in use on Virtual-1 (64x64)"))
+        checks.append(("page flips", "Virtual-1: 1 page flips completed at vertical blank"))
+    if "gpufail" in opts:
+        extra += " -fw_cfg name=opt/halcyon/displayfail,string=virtio-gpu:setmode"
+        checks.append(("failure test hook", "virtio-gpu: setmode fails (test hook)"))
+        checks.append(("device given back", "virtio-gpu: device reset (back to the firmware's frame buffer)"))
+        checks.append(("firmware frame buffer kept", "monitor 1: Default (Default Monitor)"))
+    if "gpuoff" in opts:
+        checks.append(("driver disabled by the setting", "(virtio-gpu) not started: disabled in SETTINGS.INI"))
+        checks.append(("firmware frame buffer kept", "changes apply at the next start"))
+    if "arrange" in opts:
+        vsock = os.path.abspath(os.path.join(BUILD, "vnc1.sock"))
+        if os.path.exists(vsock):
+            os.remove(vsock)
+        extra += (" -vga none -device virtio-vga,id=gpu0,max_outputs=2"
+                  " -vnc unix:%s,id=v1,display=gpu0,head=1" % vsock)
+        checks.append(("saved primary monitor", "monitor 2: Virtual-2 (QEMU Monitor) 800x600 at 0,0 on Virtio GPU (2 outputs), primary"))
+        checks.append(("saved place of monitor 1", "monitor 1: Virtual-1 (QEMU Monitor) 1280x800 at 800,100"))
+        checks.append(("desktop of the saved arrangement", "desktop 2080x900 on 2 monitors"))
+        argf = os.path.abspath(os.path.join(BUILD, "ci_autorun.txt"))
+        with open(argf, "w") as f:
+            f.write("C:/PROGRAMS/GUIDEMO.EXE")
+        extra += " -fw_cfg name=opt/halcyon/autorun,file=" + argf
+        vnc_thread = threading.Thread(target=vnc_resize, args=(vsock, 1024, 768), daemon=True)
+    if "dual" in opts:
+        vsock = os.path.abspath(os.path.join(BUILD, "vnc1.sock"))
+        if os.path.exists(vsock):
+            os.remove(vsock)
+        extra += (" -vga none -device virtio-vga,id=gpu0,max_outputs=2"
+                  " -vnc unix:%s,id=v1,display=gpu0,head=1" % vsock)
+        extra += " -fw_cfg name=opt/halcyon/setmode,string=Virtual-2:800x600"
+        extra += " -fw_cfg name=opt/halcyon/screensaver,string=30:STARS.SCR"
+        checks.append(("virtio GPU with two outputs", "Virtio GPU (2 outputs) (virtio-gpu)"))
+        checks.append(("monitor 2 connected", "virtio-gpu Virtual-2: connected"))
+        checks.append(("monitor 2 switched by the test hook", "gui: test mode switch to 800x600: ok"))
+        if not prog:
+            argf = os.path.abspath(os.path.join(BUILD, "ci_autorun.txt"))
+            with open(argf, "w") as f:
+                f.write("C:/PROGRAMS/GUIDEMO.EXE")
+            extra += " -fw_cfg name=opt/halcyon/autorun,file=" + argf
+        vnc_thread = threading.Thread(target=vnc_resize, args=(vsock, 1024, 768), daemon=True)
+    if "multi" in opts:
+        extra += " -device virtio-gpu-pci,id=gpu1"
+        checks.append(("Bochs adapter on the firmware's frame buffer", "display: found QEMU/Bochs display adapter (bochs), shows the firmware frame buffer"))
+        checks.append(("second adapter", "display: found Virtio GPU (1 output) (virtio-gpu)\n"))
+        checks.append(("primary on the Bochs adapter", "monitor 1: VGA-1"))
+        checks.append(("monitor 2 on the virtio GPU", "monitor 2: Virtual-1"))
+        checks.append(("desktop on two monitors", "on 2 monitors"))
     if "switch" in opts:
         extra += " -fw_cfg name=opt/halcyon/setmode,string=1600x900"
         checks.append(("live mode switch", "test mode switch to 1600x900: ok (desktop 1600x900)"))
@@ -1351,6 +1637,13 @@ def run(cfg):
     subprocess.run(["cp", os.path.join(BUILD, "halcyon.img"), img], check=True)
     if "res" in opts:
         ini_lines += ["display.width=1280", "display.height=1024"]
+    if "gpuoff" in opts:
+        ini_lines += ["display.disable=virtio-gpu"]
+    if "arrange" in opts:
+        ini_lines += ["display.primary=Virtual-2", "display.virtual-2.width=800", "display.virtual-2.height=600",
+                      "display.virtual-2.x=0", "display.virtual-2.y=0", "display.virtual-2.attach=1",
+                      "display.virtual-1.width=1280", "display.virtual-1.height=800", "display.virtual-1.x=800",
+                      "display.virtual-1.y=100", "display.virtual-1.attach=1", "window.guidemo=3000,100,560,380,0"]
     if ini_lines:
         ini = os.path.join(BUILD, "ci_settings.ini")
         with open(ini, "w") as f:
@@ -1360,6 +1653,8 @@ def run(cfg):
     errlog = os.path.join(BUILD, "qemu.err")
     p = subprocess.Popen(["sh", "tools/run.sh", hc, fw], env=env,
                          stdout=subprocess.DEVNULL, stderr=open(errlog, "w"))
+    if vnc_thread:                       # output 2 on before the guest looks
+        vnc_thread.start()
     client = None
     if net and "loss" not in opts:
         client = {"err": "not run"}
@@ -1417,10 +1712,60 @@ def run(cfg):
             text = open(log, errors="replace").read()
     idle = None
     saver_fails = []
+    gpu_fails = []
+    if "dual" in opts and p.poll() is None and "gui: desktop ready" in text:
+        gpu_fails = dual_test(log, "noirq" in opts)
+        text = open(log, errors="replace").read()
+    if "arrange" in opts and p.poll() is None and "gui: desktop ready" in text:
+        if not wait_log(log, "guidemo: window client at", 0, 30):
+            gpu_fails.append("GUIDEMO.EXE did not start")
+        else:
+            g = re.search(r"guidemo: window client at (-?\d+),(-?\d+) size (\d+)x(\d+)", open(log, errors="replace").read())
+            gx, gw = int(g.group(1)), int(g.group(3))
+            if gx < 0 or gx + gw > 800:
+                gpu_fails.append("the saved window place was not moved onto the primary monitor (x %d, width %d)" % (gx, gw))
+        time.sleep(1)
+        ims = qmp_heads("gpu0", 2)
+        if not ims[0] or not ims[1]:
+            gpu_fails.append("screendump of a head failed")
+        else:
+            t1 = blue_share(ims[1], (100, ims[1].size[1] - 26, ims[1].size[0] - 100, ims[1].size[1] - 4))
+            t0 = blue_share(ims[0], (0, ims[0].size[1] - 26, ims[0].size[0], ims[0].size[1] - 4))
+            if ims[1].size != (800, 600) or t1 < 0.8 or t0 > 0.3:
+                gpu_fails.append("taskbar not on monitor 2 (%s: %.0f%%, monitor 1 %.0f%%)" % (ims[1].size, t1 * 100, t0 * 100))
+        text = open(log, errors="replace").read()
+    if "multi" in opts and p.poll() is None and "gui: desktop ready" in text:
+        time.sleep(1.5)
+        if "hardware cursor in use" in text:
+            gpu_fails.append("a hardware cursor although the Bochs adapter has none")
+        png = os.path.abspath(os.path.join(BUILD, "ci_gpu.png"))
+        subprocess.run([sys.executable, "tools/qemu_ctl.py", os.path.join(BUILD, "mon.sock"), "png:" + png],
+                       stdout=subprocess.DEVNULL)
+        from PIL import Image
+        vga = Image.open(png).convert("RGB")
+        virt = qmp_heads("gpu1", 1)[0]
+        if not virt:
+            gpu_fails.append("no screendump of the virtio GPU")
+        else:
+            tv = blue_share(vga, (200, vga.size[1] - 26, vga.size[0] - 200, vga.size[1] - 4))
+            tg = blue_share(virt, (0, virt.size[1] - 26, virt.size[0], virt.size[1] - 4))
+            if tv < 0.8 or tg > 0.3 or dark_share(virt) > 0.5:
+                gpu_fails.append("taskbar %.0f%% on the Bochs screen, %.0f%% on the virtio one (%.0f%% dark)"
+                                 % (tv * 100, tg * 100, dark_share(virt) * 100))
+    if ("vgpu" in opts or "gpufail" in opts or "gpuoff" in opts) and p.poll() is None and "gui: desktop ready" in text:
+        time.sleep(1.5)
+        png = os.path.abspath(os.path.join(BUILD, "ci_gpu.png"))
+        subprocess.run([sys.executable, "tools/qemu_ctl.py", os.path.join(BUILD, "mon.sock"), "png:" + png],
+                       stdout=subprocess.DEVNULL)
+        from PIL import Image
+        im = Image.open(png).convert("RGB")
+        if dark_share(im) > 0.5 or blue_share(im, (200, im.size[1] - 26, im.size[0] - 200, im.size[1] - 4)) < 0.8:
+            gpu_fails.append("screendump shows no desktop with its taskbar (%.0f%% dark)" % (dark_share(im) * 100))
     if "saver" in opts and p.poll() is None and "gui: desktop ready" in text:
         saver_fails = saver_test(log)
         text = open(log, errors="replace").read()
-    if p.poll() is None and "gui: desktop ready" in text and not prog and "saver" not in opts:
+    if p.poll() is None and "gui: desktop ready" in text and not prog and "saver" not in opts and "dual" not in opts \
+            and "arrange" not in opts:
         time.sleep(2)
         c0 = cpu_seconds(p.pid)
         time.sleep(4)
@@ -1457,6 +1802,7 @@ def run(cfg):
         failures += cd_fails
     failures += kbd_fails
     failures += saver_fails
+    failures += gpu_fails
     if ntfs_disk:
         failures += ntfs_failures(text, ntfs_disk)
     if ntfsrw_disk:

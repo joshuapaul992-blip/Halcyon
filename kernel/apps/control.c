@@ -42,7 +42,7 @@ static void trimmed(const char *s, char *out, int outsz) {
 static surface_t *thumbnail(cpanel_t *c, int style) {
     if (style < 0 || style >= NWP) return NULL;
     if (c->thumb[style]) return c->thumb[style];
-    int sw = screen_w(), sh = screen_h();
+    int sw = mon_rect(0).w, sh = mon_rect(0).h;
     surface_t *full = surface_new(sw, sh);
     surface_t *t = surface_new(TH_W, TH_H);
     if (!full || !t) { surface_free(full); surface_free(t); return NULL; }
@@ -302,7 +302,7 @@ static void cp_paint(window_t *w, gc_t *g) {
     if (!cpu[0]) trimmed(cpu_vendor(), cpu, sizeof cpu);
     snprintf(mem, sizeof mem, "%u MB", (unsigned)((st.total_ram + (1 << 19)) >> 20));
     snprintf(heap, sizeof heap, "%u of %u MB in use", (unsigned)(st.heap_used >> 20), (unsigned)(st.heap_size >> 20));
-    snprintf(disp, sizeof disp, "%d x %d, %u-bit", screen_w(), screen_h(), (unsigned)g_bootinfo.fb_bpp);
+    snprintf(disp, sizeof disp, "%d x %d, %u-bit", mon_rect(0).w, mon_rect(0).h, (unsigned)g_bootinfo.fb_bpp);
     strlcpy(boot, g_bootinfo.boot_type == BOOT_TYPE_UEFI ? "UEFI" : "BIOS", sizeof boot);
     int y = sg.y + 22;
     gfx_icon(g, sg.x + 12, y, &icons32[ICON_COMPUTER]);

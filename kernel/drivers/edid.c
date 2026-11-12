@@ -103,7 +103,7 @@ int edid_block_count(const u8 *e, int size) {
     return MIN(n, size / 128);
 }
 
-int edid_timings(const u8 *e, int size, edid_timing_t *out, int max) {
+int edid_detailed_timings(const u8 *e, int size, edid_timing_t *out, int max) {
     int blocks = edid_block_count(e, size), n = 0;
     for (int b = 0; b < blocks && n < max; b++) {
         const u8 *p = e + b * 128;

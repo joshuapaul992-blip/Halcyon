@@ -65,7 +65,7 @@ static void about_paint(window_t *w, gc_t *g) {
     if (!cpu[0]) strlcpy(cpu, "Unknown x86-64 processor", sizeof cpu);
     strlcpy(boot, g_bootinfo.boot_type == BOOT_TYPE_UEFI ? "UEFI" : g_bootinfo.boot_type == BOOT_TYPE_BIOS ? "BIOS (legacy)" : "Unknown",
             sizeof boot);
-    snprintf(disp, sizeof disp, "%d x %d, %u-bit colour", screen_w(), screen_h(), (unsigned)g_bootinfo.fb_bpp);
+    snprintf(disp, sizeof disp, "%d x %d, %u-bit colour%s", mon_rect(0).w, mon_rect(0).h, (unsigned)g_bootinfo.fb_bpp, mon_count() > 1 ? ", several monitors" : "");
     const char *labels[4] = { "Physical memory:", "Processor:", "Boot mode:", "Display:" };
     const char *values[4] = { mem, cpu, boot, disp };
     for (int i = 0; i < 4; i++) {

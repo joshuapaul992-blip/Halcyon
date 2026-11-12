@@ -410,7 +410,7 @@ static void monitors(sb_t *s, nv_device_t *d) {
         int blocks = edid_block_count(c->edid, c->edid_len);
         for (int k = 1; k < blocks; k++) sp(s, "    block %d: %s\n", k, edid_ext_name(c->edid[k * 128]));
         edid_timing_t t[24];
-        int n = edid_timings(c->edid, c->edid_len, t, 24);
+        int n = edid_detailed_timings(c->edid, c->edid_len, t, 24);
         for (int k = 0; k < n; k++) {
             char ts[64];
             edid_timing_str(&t[k], ts, sizeof ts);

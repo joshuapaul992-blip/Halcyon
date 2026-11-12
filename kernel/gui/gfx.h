@@ -9,14 +9,7 @@ typedef u32 color_t;             /* 0xAARRGGBB (alpha only used where noted) */
 #define RGB(r, g, b) ((color_t)(0xFF000000u | ((u32)(r) << 16) | ((u32)(g) << 8) | (u32)(b)))
 #define HEX(h) ((color_t)(0xFF000000u | (u32)(h)))
 
-typedef struct rect { int x, y, w, h; } rect_t;
-
-static inline rect_t mkrect(int x, int y, int w, int h) { rect_t r = { x, y, w, h }; return r; }
-static inline int rect_empty(rect_t r) { return r.w <= 0 || r.h <= 0; }
-static inline int rect_contains(rect_t r, int x, int y) { return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h; }
-rect_t rect_intersect(rect_t a, rect_t b);
-rect_t rect_union(rect_t a, rect_t b);
-static inline rect_t rect_inset(rect_t r, int d) { return mkrect(r.x + d, r.y + d, r.w - 2 * d, r.h - 2 * d); }
+#include "rect.h"
 
 typedef struct surface {
     u32 *px;
@@ -70,6 +63,9 @@ void gfx_icon_alpha(gc_t *g, int x, int y, const icon_t *ic, int alpha);
 int  gfx_text(gc_t *g, const font_t *f, int x, int y, const char *s, color_t c);       /* returns end x */
 int  gfx_text_n(gc_t *g, const font_t *f, int x, int y, const char *s, int n, color_t c);   /* text is UTF-8, n in bytes */
 int  gfx_text_width(const font_t *f, const char *s);
+/* text enlarged scale16/16 times (smoothly): big numbers */
+int  gfx_text_scaled(gc_t *g, const font_t *f, int x, int y, const char *s, color_t c, int scale16);
+int  gfx_text_scaled_width(const font_t *f, const char *s, int scale16);
 int  gfx_text_width_n(const font_t *f, const char *s, int n);
 int  gfx_char_width(const font_t *f, u32 codepoint);
 int  gfx_text_fit(const font_t *f, const char *s, int width);   /* bytes (whole UTF-8 characters) that fit */
@@ -83,7 +79,8 @@ int  gfx_text_wrap_height(const font_t *f, int width, const char *s);
 /* ---- screen ---- */
 extern surface_t *g_screen;      /* back buffer */
 void screen_init(void);
-void screen_present(rect_t r);   /* copy part of the back buffer to the framebuffer */
+void screen_present(rect_t r);   /* part of the back buffer changed: to the monitors */
+void screen_commit(void);         /* the end of a frame: flushes, page flips */
 int  screen_resize(void);         /* after a mode change: back buffer of the new size */
 int  screen_w(void);
 int  screen_h(void);

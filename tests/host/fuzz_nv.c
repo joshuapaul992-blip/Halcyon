@@ -35,7 +35,7 @@ int LLVMFuzzerTestOneInput(const u8 *data, size_t size) {
     for (int i = 0; i < b.ngpio; i++) nv_gpio_func_str(b.gpio[i].func);
     for (u32 i = 0; i < 64; i++) nv_rom_rd32(&b.rom, b.dcb_offset + i * 4, NULL);
     edid_timing_t t[16];
-    edid_timings(copy, (int)(size - 1), t, 16);
+    edid_detailed_timings(copy, (int)(size - 1), t, 16);
     edid_info_t ei;
     edid_parse(copy, (int)(size - 1), &ei);
     free(copy);

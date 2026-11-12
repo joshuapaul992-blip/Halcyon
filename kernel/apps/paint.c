@@ -1012,8 +1012,8 @@ void app_paint(const char *path) {
     p->fg = HEX(0x000000);
     p->bg = HEX(0xFFFFFF);
     for (int i = 0; i < 28; i++) p->pal[i] = HEX(default_palette[i]);
-    int cw = MIN(TOOL_W + DEF_W + 2 * PAD + SB + 4, screen_w() - 40);
-    int ch = MIN(MENUBAR_H + DEF_H + 2 * PAD + SB + PAL_H + STATUS_H + 4, screen_h() - TASKBAR_H - 60);
+    int cw = MIN(TOOL_W + DEF_W + 2 * PAD + SB + 4, mon_work(0).w - 40);
+    int ch = MIN(MENUBAR_H + DEF_H + 2 * PAD + SB + PAL_H + STATUS_H + 4, mon_work(0).h - 60);
     window_t *w = wm_create("Untitled - Paint", ICON_PAINT, -1, -1, cw, ch, WF_RESIZABLE);
     if (w) w->help = "paint";              /* F1 */
     w->data = p;

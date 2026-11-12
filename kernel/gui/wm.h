@@ -136,9 +136,22 @@ struct window {
     char place_key[40];       /* "window.<key>" in SETTINGS.INI keeps its place and size (wm_place_restore) */
     int place_top;            /* height not counted in the saved size (a user program's menu bar) */
     surface_t *direct;        /* a full-screen program's canvas, drawn as it is (no copy into client) */
+    rect_t max_mon;           /* maximized: the monitor it fills (desktop coordinates) */
 };
 
 enum { CURSOR_ARROW = 0, CURSOR_IBEAM, CURSOR_BUSY, CURSOR_RESIZE_NWSE, CURSOR_RESIZE_H, CURSOR_RESIZE_V, CURSOR_HAND, CURSOR_CROSS };
+
+/* monitors (docs/DESIGN-M10-DISPLAY.md): the desktop spans every monitor;
+ * monitor 0 is the primary one, with the taskbar and the desktop icons */
+int    mon_count(void);
+rect_t mon_rect(int i);                /* desktop coordinates */
+rect_t mon_work(int i);                /* without the taskbar (the primary) */
+int    mon_at(int x, int y);           /* the monitor at a point, -1 between monitors */
+int    mon_of(rect_t r);               /* the monitor showing most of r (or the nearest) */
+int    mon_of_window(window_t *w);     /* the monitor a window is on */
+void   mon_refresh(void);              /* the arrangement changed */
+rect_t wm_fullscreen_rect(int whole);  /* a full-screen window: the primary monitor, or (whole) every monitor */
+rect_t wm_keep_on_monitor(rect_t f);   /* f moved (not resized) into the work area of the monitor showing most of it */
 
 window_t *wm_create(const char *title, int icon, int x, int y, int cw, int ch, u32 flags);  /* client size; x/y < 0 = auto */
 void wm_destroy(window_t *w);

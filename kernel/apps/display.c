@@ -1,5 +1,5 @@
-/* Halcyon OS - Display Properties: the screen saver and the screen
- * resolution, on two tabs.
+/* Halcyon OS - Display Properties: the screen saver and the monitors, on
+ * two tabs.
  *
  * Screen Saver: the installed savers (C:\PROGRAMS\*.SCR, by the display
  * names in their files) in a drop-down list, the chosen one running in the
@@ -7,12 +7,20 @@
  * gui/saver.c), Settings... ("/c"), Preview (full screen until input) and
  * the wait in minutes; Apply / OK keep them in SETTINGS.INI (screensaver.*).
  *
- * Settings: with an adapter that switches modes at once (display_live),
- * Apply changes the mode and asks "Do you want to keep these settings?" for
- * 15 seconds, going back if nobody answers (a mode the monitor cannot show
- * leaves the screen black). With only the firmware frame buffer, the choice
- * is saved and the loader sets it at the next start. */
+ * Settings (docs/DESIGN-M10-DISPLAY.md): a picture of the monitors as they
+ * are arranged, numbered; drag one to put it elsewhere (it snaps to an edge
+ * of the others), click one (or pick it in the Display list) to choose its
+ * resolution from its own list (its EDID and the adapter's limits), make it
+ * the primary monitor (the taskbar and the desktop icons) or extend the
+ * desktop onto it. Identify shows each monitor's number on it. Apply sets
+ * everything at once on adapters that switch live and asks "Do you want to
+ * keep these settings?" for 15 seconds, going back if nobody answers (a
+ * mode the monitor cannot show leaves it black); the arrangement is kept in
+ * SETTINGS.INI (display.<connector>.*, display.primary). With only the
+ * firmware frame buffer the choice is saved and the loader sets it at the
+ * next start. */
 #include "gui/wm.h"
+#include "gui/layout.h"
 #include "fonts.h"
 #include "core/lib.h"
 #include "core/mm.h"
@@ -23,27 +31,45 @@
 
 #define DW 400
 #define TY 36                      /* the page starts below the tabs */
-#define DH (452 + TY - 8)
+#define DH (476 + TY)
 #define DP_LIST 10
 #define DP_OK 11
 #define DP_CANCEL 12
 #define DP_APPLY 13
+#define DP_PRIMARY 14
+#define DP_EXTEND 15
+#define DP_IDENTIFY 16
 #define SS_SETTINGS 20
 #define SS_PREVIEW 21
 #define SS_WAIT 22
 #define PREV_W 168
 #define PREV_H 104
 #define MON_Y (TY + 12)            /* the monitor's top */
+#define MENU_MON 100               /* Display list: 100 + monitor */
+#define MAXMON (DISPLAY_MAX_ADAPTERS * DISPLAY_MAX_CONNECTORS)
 
 enum { TAB_SAVER = 0, TAB_SETTINGS, NTABS };
 static const char *const tab_names[NTABS] = { "Screen Saver", "Settings" };
 
+/* a monitor as Display Properties shows it: the settings it would get */
+typedef struct dmon {
+    display_connector_t *conn;
+    int attach, w, h, x, y;        /* pending */
+    rect_t box;                    /* in the arrangement picture (client coordinates) */
+    surface_t *thumb;              /* its wallpaper, box sized */
+} dmon_t;
+
 typedef struct disp {
     int tab;
-    int sel;                   /* mode index selected in the list */
-    int applied_w, applied_h;  /* the mode in use (or saved for the next start) */
-    surface_t *thumb;
-    int thumb_w, thumb_h;
+    /* the settings tab */
+    dmon_t mon[MAXMON];
+    int nmon;                      /* the connected (or attached) ones come first */
+    int npic;                      /* how many are in the picture */
+    int msel;                      /* the selected one */
+    display_connector_t *primary;  /* pending */
+    display_conf_t applied;        /* in use (or saved for the next start) */
+    int scale256, offx, offy;      /* desktop -> picture: x * scale / 256 + off */
+    int drag, drag_i, drag_dx, drag_dy, drag_moved, drag_x0, drag_y0;
     /* the screen saver tab */
     saver_info_t savers[SAVER_MAX];
     int nsavers;
@@ -66,25 +92,11 @@ static rect_t page_rect(void) { return mkrect(6, TY - 4, DW - 12, DH - TY - 40);
 static rect_t mon_screen(void) { return mkrect(DW / 2 - PREV_W / 2, MON_Y + 12, PREV_W, PREV_H); }
 static rect_t combo_rect(void) { return mkrect(24, MON_Y + 186, 190, 22); }
 static rect_t spin_rect(int up) { return mkrect(108, MON_Y + 218 + (up ? 0 : 11), 15, 11); }
+/* the settings tab */
+static rect_t arr_rect(void) { return mkrect(16, TY + 34, DW - 32, 136); }
+static rect_t dcombo_rect(void) { return mkrect(16, TY + 202, DW - 32, 22); }
 
-static void mode_text(display_mode_t m, int native, char *out, int n) {
-    snprintf(out, (size_t)n, "%d by %d pixels%s", m.w, m.h, native ? "  (recommended)" : "");
-}
-
-static void make_thumb(disp_t *d) {
-    display_mode_t m = display_mode(d->sel);
-    if (!m.w) return;
-    /* the preview screen has the selected mode's shape */
-    int tw = PREV_W, th = PREV_W * m.h / m.w;
-    if (th > PREV_H) { th = PREV_H; tw = PREV_H * m.w / m.h; }
-    if (d->thumb && d->thumb_w == tw && d->thumb_h == th) return;
-    if (d->thumb) surface_free(d->thumb);
-    d->thumb = surface_new(tw, th);
-    d->thumb_w = tw; d->thumb_h = th;
-    if (d->thumb) desktop_wallpaper_render(desktop_wallpaper_style(), d->thumb);
-}
-
-/* the monitor around the preview screen (both tabs) */
+/* the monitor around the preview screen (the screen saver tab) */
 static void draw_monitor(gc_t *g) {
     int mx = DW / 2, my = MON_Y;
     rect_t bezel = mkrect(mx - PREV_W / 2 - 14, my, PREV_W + 28, PREV_H + 30);
@@ -167,29 +179,183 @@ static void paint_saver_tab(window_t *w, gc_t *g, disp_t *d) {
     (void)w;
 }
 
-static void paint_settings_tab(window_t *w, gc_t *g, disp_t *d) {
-    draw_monitor(g);
-    rect_t scr = mon_screen();
-    if (d->thumb) {
-        int tx = scr.x + (PREV_W - d->thumb_w) / 2, ty = scr.y + (PREV_H - d->thumb_h) / 2;
-        gfx_blit(g, tx, ty, d->thumb, mkrect(0, 0, d->thumb_w, d->thumb_h));
-        /* a little taskbar */
-        gfx_fill(g, mkrect(tx, ty + d->thumb_h - 5, d->thumb_w, 5), g_theme->taskbar_top);
-        gfx_fill(g, mkrect(tx, ty + d->thumb_h - 5, 14, 5), HEX(0x3C9A3C));
-    }
-    /* display line */
-    char mon[64], line[160];
-    edid_describe(display_monitor(), mon, sizeof mon);
-    snprintf(line, sizeof line, "%s on %s", mon, display_adapter());
-    gfx_text(g, &font_ui_bold, 16, TY + 170, "Display:", HEX(0x000000));
-    gfx_text_box(g, &font_ui, mkrect(16, TY + 188, DW - 32, 16), line, HEX(0x000000), 0);
 
-    draw_group(g, mkrect(12, TY + 214, DW - 24, 170), "Screen resolution");
-    gfx_text(g, &font_ui, 24, TY + 348, "Color quality: Highest (32 bit)", HEX(0x000000));
-    const char *note = display_live()
-        ? "The new resolution is used as soon as you click Apply."
-        : "Your display adapter takes the new resolution when Halcyon starts.";
-    gfx_text_box(g, &font_small, mkrect(24, TY + 366, DW - 48, 14), note, HEX(0x6A6A6A), 0);
+/* ---------------- the settings tab: monitors ---------------- */
+static void mon_name(dmon_t *m, char *out, int n) {
+    char mn[64];
+    display_connector_t *c = m->conn;
+    if (c->status == CONN_DISCONNECTED && !m->attach) strlcpy(mn, "(no monitor connected)", sizeof mn);
+    else edid_describe(&c->monitor, mn, sizeof mn);
+    snprintf(out, (size_t)n, "%d. %s on %s", c->number, mn, c->adapter->name);
+}
+
+static int mon_index(disp_t *d, display_connector_t *c) {
+    for (int i = 0; i < d->nmon; i++) if (d->mon[i].conn == c) return i;
+    return -1;
+}
+
+/* the monitors from a configuration */
+static void load_monitors(disp_t *d, const display_conf_t *cf) {
+    for (int i = 0; i < d->nmon; i++) if (d->mon[i].thumb) surface_free(d->mon[i].thumb);
+    d->nmon = 0;
+    /* connected or attached ones first (in the picture), the others after (in the list) */
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < cf->n && d->nmon < MAXMON; i++) {
+            const display_conf_out_t *o = &cf->out[i];
+            int shown = o->attach || o->conn->status != CONN_DISCONNECTED;
+            if (shown != (pass == 0) || !o->conn->nmodes) continue;
+            dmon_t *m = &d->mon[d->nmon++];
+            memset(m, 0, sizeof *m);
+            m->conn = o->conn;
+            m->attach = o->attach;
+            m->w = o->w; m->h = o->h;
+            m->x = o->x; m->y = o->y;
+            if (pass == 0) d->npic = d->nmon;
+        }
+    d->primary = cf->primary;
+    if (d->msel >= d->nmon) d->msel = 0;
+}
+
+static void conf_from(disp_t *d, display_conf_t *cf) {
+    display_get_conf(cf);
+    for (int i = 0; i < cf->n; i++) {
+        int k = mon_index(d, cf->out[i].conn);
+        if (k < 0) continue;
+        dmon_t *m = &d->mon[k];
+        cf->out[i].attach = m->attach;
+        cf->out[i].w = m->w; cf->out[i].h = m->h;
+        cf->out[i].x = m->x; cf->out[i].y = m->y;
+    }
+    cf->primary = d->primary;
+}
+
+static int conf_differs(const display_conf_t *a, const display_conf_t *b) {
+    if (a->primary != b->primary) return 1;
+    for (int i = 0; i < a->n; i++)
+        for (int k = 0; k < b->n; k++) {
+            if (a->out[i].conn != b->out[k].conn) continue;
+            const display_conf_out_t *p = &a->out[i], *q = &b->out[k];
+            if (p->attach != q->attach || (p->attach && (p->w != q->w || p->h != q->h || p->x != q->x || p->y != q->y))) return 1;
+        }
+    return 0;
+}
+
+/* the attached monitors in a valid arrangement (they touch, nothing
+ * overlaps); the primary keeps its place */
+static void arrange(disp_t *d) {
+    rect_t r[LAYOUT_MAX];
+    int idx[LAYOUT_MAX], n = 0, p = -1;
+    for (int i = 0; i < d->npic && n < LAYOUT_MAX; i++) {
+        if (!d->mon[i].attach) continue;
+        if (d->mon[i].conn == d->primary) p = n;
+        idx[n] = i;
+        r[n++] = mkrect(d->mon[i].x, d->mon[i].y, d->mon[i].w, d->mon[i].h);
+    }
+    layout_normalize(r, n, p < 0 ? 0 : p, NULL, NULL);
+    for (int k = 0; k < n; k++) { d->mon[idx[k]].x = r[k].x; d->mon[idx[k]].y = r[k].y; }
+    /* the others to the right of them, where they would go */
+    rect_t b = layout_bounds(r, n);
+    int x = b.x + b.w + 24;
+    for (int i = 0; i < d->npic; i++)
+        if (!d->mon[i].attach) { d->mon[i].x = x; d->mon[i].y = b.y; x += d->mon[i].w + 24; }
+}
+
+/* desktop -> picture scale, fitting every monitor in the box */
+static void picture_scale(disp_t *d) {
+    rect_t a = arr_rect(), b = mkrect(0, 0, 0, 0);
+    for (int i = 0; i < d->npic; i++) b = rect_union(b, mkrect(d->mon[i].x, d->mon[i].y, d->mon[i].w, d->mon[i].h));
+    if (rect_empty(b)) b = mkrect(0, 0, 1024, 768);
+    int sx = (a.w - 40) * 256 / b.w, sy = (a.h - 28) * 256 / b.h;
+    d->scale256 = MAX(4, MIN(MIN(sx, sy), 256 * 120 / 1024));      /* a single monitor: about 120 pixels wide */
+    d->offx = a.x + (a.w - b.w * d->scale256 / 256) / 2 - b.x * d->scale256 / 256;
+    d->offy = a.y + (a.h - b.h * d->scale256 / 256) / 2 - b.y * d->scale256 / 256;
+}
+
+static void place_boxes(disp_t *d) {
+    for (int i = 0; i < d->npic; i++) {
+        dmon_t *m = &d->mon[i];
+        if (d->drag && i == d->drag_i) continue;
+        rect_t nb = mkrect(d->offx + m->x * d->scale256 / 256, d->offy + m->y * d->scale256 / 256,
+                           MAX(12, m->w * d->scale256 / 256), MAX(10, m->h * d->scale256 / 256));
+        if (nb.w != m->box.w || nb.h != m->box.h) { surface_free(m->thumb); m->thumb = NULL; }
+        m->box = nb;
+    }
+}
+
+static void refresh_picture(disp_t *d) {
+    picture_scale(d);
+    place_boxes(d);
+}
+
+static void draw_mon(gc_t *g, disp_t *d, int i) {
+    dmon_t *m = &d->mon[i];
+    rect_t b = m->box, s = rect_inset(b, 3);
+    int sel = i == d->msel;
+    if (m->attach) {
+        if (!m->thumb && s.w > 2 && s.h > 2) {
+            m->thumb = surface_new(s.w, s.h);
+            if (m->thumb) desktop_wallpaper_render(desktop_wallpaper_style(), m->thumb);
+        }
+        gfx_fill(g, b, HEX(0x1E2430));
+        if (m->thumb) gfx_blit(g, s.x, s.y, m->thumb, mkrect(0, 0, m->thumb->w, m->thumb->h));
+        if (m->conn == d->primary)              /* the taskbar */
+            gfx_fill(g, mkrect(s.x, s.y + s.h - MAX(2, s.h / 14), s.w, MAX(2, s.h / 14)), g_theme->taskbar_top);
+    } else {
+        /* not part of the desktop: a dim, hatched outline */
+        gfx_fill(g, b, HEX(0xD4D2CA));
+        gc_t hg = *g;
+        hg.clip = rect_intersect(g->clip, mkrect(b.x + g->ox, b.y + g->oy, b.w, b.h));
+        for (int k = -b.h; k < b.w; k += 6) gfx_line(&hg, b.x + k, b.y + b.h - 1, b.x + k + b.h - 1, b.y, HEX(0xC4C2BA));
+        gfx_rect(g, b, HEX(0x8C8A82));
+    }
+    gfx_rect(g, b, sel ? g_theme->select : HEX(0x3A3F4B));
+    if (sel) gfx_rect(g, rect_inset(b, 1), g_theme->select);
+    /* the number */
+    char num[8];
+    snprintf(num, sizeof num, "%d", m->conn->number);
+    int scale = CLAMP(b.h * 16 / 60, 8, 32);
+    int tw = gfx_text_scaled_width(&font_huge, num, scale), th = font_huge.height * scale / 16;
+    int tx = b.x + (b.w - tw) / 2, ty = b.y + (b.h - th) / 2;
+    if (m->attach) {
+        gfx_text_scaled(g, &font_huge, tx + 1, ty + 1, num, HEX(0x000000), scale);
+        gfx_text_scaled(g, &font_huge, tx, ty, num, HEX(0xFFFFFF), scale);
+    } else {
+        gfx_text_scaled(g, &font_huge, tx, ty, num, HEX(0x8C8A82), scale);
+    }
+}
+
+static void paint_settings_tab(window_t *w, gc_t *g, disp_t *d) {
+    gfx_text_wrap(g, &font_ui, mkrect(16, TY + 4, DW - 32, 30),
+                  d->npic > 1 ? "Drag the monitor icons to match the physical arrangement of your monitors."
+                              : "This is the monitor Halcyon shows its desktop on. Choose its resolution below.",
+                  HEX(0x000000));
+    rect_t a = arr_rect();
+    gfx_sunken_field(g, a, color_lighten(g_theme->face, 30));
+    gc_t ag = gc_sub(g, mkrect(0, 0, DW, DH));
+    ag.clip = rect_intersect(ag.clip, rect_inset(mkrect(a.x + ag.ox, a.y + ag.oy, a.w, a.h), 2));
+    for (int i = 0; i < d->npic; i++) if (i != d->msel) draw_mon(&ag, d, i);
+    if (d->msel < d->npic) draw_mon(&ag, d, d->msel);         /* the selected one on top */
+    /* the Display list */
+    gfx_text(g, &font_ui_bold, 16, TY + 184, "Display:", HEX(0x000000));
+    rect_t c = dcombo_rect();
+    gfx_sunken_field(g, c, HEX(0xFFFFFF));
+    char line[160] = "";
+    if (d->msel < d->nmon) mon_name(&d->mon[d->msel], line, sizeof line);
+    gfx_text_box(g, &font_ui, mkrect(c.x + 5, c.y, c.w - 26, c.h), line, HEX(0x000000), 0);
+    rect_t bt = mkrect(c.x + c.w - 19, c.y + 2, 17, c.h - 4);
+    gfx_rounded(g, bt, 2, 15, color_lighten(g_theme->sidebar_top, 140), color_lighten(g_theme->sidebar_bottom, 60));
+    gfx_rounded_outline(g, bt, 2, 15, color_lighten(g_theme->sidebar_bottom, 20));
+    for (int i = 0; i < 4; i++) gfx_hline(g, bt.x + bt.w / 2 - 3 + i, bt.y + bt.h / 2 - 1 + i, 7 - 2 * i, HEX(0x4D6185));
+
+    draw_group(g, mkrect(12, TY + 232, DW - 24, 128), "Screen resolution");
+    dmon_t *m = d->msel < d->nmon ? &d->mon[d->msel] : NULL;
+    char cq[96] = "Color quality: Highest (32 bit)";
+    if (m && m->conn->head && m->conn->head->mode.hz)
+        snprintf(cq, sizeof cq, "Color quality: Highest (32 bit), %d Hertz", m->conn->head->mode.hz);
+    gfx_text(g, &font_ui, 24, TY + 338, cq, HEX(0x000000));
+    const char *note = "The new settings are used as soon as you click Apply.";
+    if (m && !m->conn->adapter->live) note = "This display adapter takes a new resolution when Halcyon starts.";
+    gfx_text_box(g, &font_small, mkrect(16, TY + 414, DW - 32, 14), note, HEX(0x6A6A6A), 0);
     (void)w;
 }
 
@@ -201,6 +367,7 @@ static void dp_paint(window_t *w, gc_t *g) {
     else paint_settings_tab(w, g, d);
 }
 
+/* ---------------- the screen saver tab ---------------- */
 /* ---------------- the screen saver tab ---------------- */
 static int saver_pending(disp_t *d) {
     const char *cur = settings_get("screensaver.file", "LOGO.SCR");
@@ -230,11 +397,15 @@ static void preview_start(window_t *w) {
 }
 
 static void update_buttons(window_t *w);
+static int settings_event(window_t *w, gui_event_t *e);
+static void select_monitor(window_t *w, int i);
 static void show_tab(window_t *w, int tab) {
     disp_t *d = w->data;
     d->tab = tab;
+    d->drag = 0;
     for (widget_t *wd = w->widgets; wd; wd = wd->next) {
-        int t = (wd->id == DP_LIST) ? TAB_SETTINGS : (wd->id >= SS_SETTINGS && wd->id <= SS_WAIT) ? TAB_SAVER : -1;
+        int t = (wd->id >= DP_PRIMARY && wd->id <= DP_IDENTIFY) || wd->id == DP_LIST ? TAB_SETTINGS :
+                (wd->id >= SS_SETTINGS && wd->id <= SS_WAIT) ? TAB_SAVER : -1;
         if (t < 0) continue;
         if (t == tab) wd->style &= ~WS_HIDDEN;
         else wd->style |= WS_HIDDEN;
@@ -245,6 +416,7 @@ static void show_tab(window_t *w, int tab) {
     else preview_stop(d);
     update_buttons(w);
 }
+
 
 static void saver_widgets(window_t *w) {
     disp_t *d = w->data;
@@ -309,7 +481,9 @@ static void combo_open(window_t *w) {
     menu_popup(w, &ss_menu, cl.x + c.x, cl.y + c.y + c.h);
 }
 
+
 static void dp_menu(window_t *w, int id) {
+    if (id >= MENU_MON) { select_monitor(w, id - MENU_MON); return; }
     if (id == 1) select_saver(w, -1);
     else if (id >= 2) select_saver(w, id - 2);
 }
@@ -325,6 +499,7 @@ static void dp_event(window_t *w, gui_event_t *e) {
             if (rect_contains(spin_rect(0), e->x, e->y)) { set_wait(w, d->ss_wait - 1); return; }
         }
     }
+    if (d->tab == TAB_SETTINGS && settings_event(w, e)) return;
     if (e->type == GE_KEY && e->key.pressed && (e->key.mods & MOD_CTRL) && e->key.key == KEY_TAB) {
         show_tab(w, (d->tab + 1) % NTABS);   /* Ctrl+Tab: the next tab */
         return;
@@ -363,17 +538,6 @@ static int apply_saver(window_t *w) {
 }
 
 /* ---------------- the settings tab ---------------- */
-static void update_buttons(window_t *w) {
-    disp_t *d = w->data;
-    display_mode_t m = display_mode(d->sel);
-    widget_t *ap = widget_find(w, DP_APPLY);
-    int pending = (m.w && (m.w != d->applied_w || m.h != d->applied_h)) || saver_pending(d);
-    if (ap) {
-        if (pending) ap->style &= ~WS_DISABLED;
-        else ap->style |= WS_DISABLED;
-    }
-    wm_invalidate(w);
-}
 
 /* ---- "Do you want to keep these settings?" ---- */
 typedef struct keep { volatile int done; int keep; u64 deadline; window_t *w; } keep_t;
@@ -419,19 +583,238 @@ static int ask_keep(window_t *owner) {
     return k.keep;
 }
 
-static int apply_mode(window_t *w) {
+
+/* ---------------- the settings tab: choosing ---------------- */
+static void update_buttons(window_t *w) {
     disp_t *d = w->data;
-    display_mode_t m = display_mode(d->sel);
-    if (!m.w || (m.w == d->applied_w && m.h == d->applied_h)) return 1;
-    if (!display_live()) {
-        int r = display_save_mode(m.w, m.h);
+    display_conf_t cf;
+    conf_from(d, &cf);
+    widget_t *ap = widget_find(w, DP_APPLY);
+    int pending = conf_differs(&cf, &d->applied) || saver_pending(d);
+    if (ap) {
+        if (pending) ap->style &= ~WS_DISABLED;
+        else ap->style |= WS_DISABLED;
+    }
+    wm_invalidate(w);
+}
+
+static void mode_text(const display_mode_t *m, char *out, int n) {
+    snprintf(out, (size_t)n, "%d by %d pixels%s", m->w, m->h, (m->flags & DT_PREFERRED) ? "  (recommended)" : "");
+}
+
+/* the widgets show the selected monitor */
+static void select_monitor(window_t *w, int i) {
+    disp_t *d = w->data;
+    if (i < 0 || i >= d->nmon) return;
+    d->msel = i;
+    dmon_t *m = &d->mon[i];
+    display_connector_t *c = m->conn;
+    widget_t *lb = widget_find(w, DP_LIST);
+    if (lb) {
+        char **items = kzalloc(sizeof(char *) * (size_t)(c->nmodes + 1));
+        int sel = 0;
+        for (int k = 0; k < c->nmodes && items; k++) {
+            items[k] = kmalloc(64);
+            if (items[k]) mode_text(&c->modes[k], items[k], 64);
+            if (c->modes[k].w == m->w && c->modes[k].h == m->h) sel = k;
+        }
+        if (items) widget_list_set(w, lb, items, c->nmodes);
+        for (int k = 0; k < c->nmodes && items; k++) kfree(items[k]);
+        kfree(items);
+        lb->value = sel;
+        lb->top = MAX(0, MIN(sel - 2, c->nmodes - 4));      /* the mode in use in view */
+    }
+    widget_t *p = widget_find(w, DP_PRIMARY), *x = widget_find(w, DP_EXTEND);
+    int is_primary = c == d->primary, gone = c->status == CONN_DISCONNECTED && !m->attach;
+    if (p) {
+        p->value = is_primary;
+        if (is_primary || gone) p->style |= WS_DISABLED; else p->style &= ~WS_DISABLED;
+    }
+    if (x) {
+        x->value = m->attach;
+        if (is_primary || gone) x->style |= WS_DISABLED; else x->style &= ~WS_DISABLED;
+    }
+    update_buttons(w);
+}
+
+static void on_select(window_t *w, widget_t *lb) {
+    disp_t *d = w->data;
+    if (d->msel >= d->nmon) return;
+    dmon_t *m = &d->mon[d->msel];
+    if (lb->value < 0 || lb->value >= m->conn->nmodes) return;
+    m->w = m->conn->modes[lb->value].w;
+    m->h = m->conn->modes[lb->value].h;
+    arrange(d);
+    refresh_picture(d);
+    update_buttons(w);
+}
+
+static void on_primary(window_t *w, widget_t *cb) {
+    disp_t *d = w->data;
+    if (d->msel >= d->nmon) return;
+    dmon_t *m = &d->mon[d->msel];
+    if (cb->value) {
+        d->primary = m->conn;
+        m->attach = 1;
+    }
+    arrange(d);
+    refresh_picture(d);
+    select_monitor(w, d->msel);
+}
+
+static void on_extend(window_t *w, widget_t *cb) {
+    disp_t *d = w->data;
+    if (d->msel >= d->nmon) return;
+    dmon_t *m = &d->mon[d->msel];
+    if (m->conn == d->primary) { cb->value = 1; return; }
+    m->attach = cb->value;
+    if (m->attach) {
+        /* it joins on the right of the others */
+        rect_t b = mkrect(0, 0, 0, 0);
+        for (int i = 0; i < d->npic; i++) if (d->mon[i].attach && i != d->msel) b = rect_union(b, mkrect(d->mon[i].x, d->mon[i].y, d->mon[i].w, d->mon[i].h));
+        m->x = b.x + b.w; m->y = b.y;
+    }
+    arrange(d);
+    refresh_picture(d);
+    select_monitor(w, d->msel);
+}
+
+/* ---- Identify: each monitor's number on it for a few seconds ---- */
+typedef struct ident { char num[8]; u64 until; } ident_t;
+static void ident_paint(window_t *w, gc_t *g) {
+    ident_t *id = w->data;
+    rect_t r = mkrect(0, 0, w->client->w, w->client->h);
+    gfx_gradient_v(g, r, HEX(0x3D7BE0), HEX(0x1B48A8));
+    gfx_rect(g, r, HEX(0x0A1E4A));
+    gfx_rect(g, rect_inset(r, 1), HEX(0xFFFFFF));
+    int scale = 72;
+    int tw = gfx_text_scaled_width(&font_huge, id->num, scale), th = font_huge.height * scale / 16;
+    int tx = (r.w - tw) / 2, ty = (r.h - th) / 2;
+    gfx_text_scaled(g, &font_huge, tx + 4, ty + 4, id->num, HEX(0x0A1E4A), scale);
+    gfx_text_scaled(g, &font_huge, tx, ty, id->num, HEX(0xFFFFFF), scale);
+}
+static void ident_tick(window_t *w) {
+    ident_t *id = w->data;
+    if (time_ms() >= id->until) wm_destroy(w);
+}
+static void ident_event(window_t *w, gui_event_t *e) { if (e->type == GE_MOUSE_DOWN) wm_destroy(w); }
+static void ident_destroy(window_t *w) { kfree(w->data); w->data = NULL; }
+
+static void on_identify(window_t *w, widget_t *b) {
+    (void)w; (void)b;
+    display_output_t o[DISPLAY_MAX_OUTPUTS];
+    int n = display_outputs(o, DISPLAY_MAX_OUTPUTS);
+    for (int i = 0; i < n; i++) {
+        ident_t *id = kzalloc(sizeof *id);
+        if (!id) continue;
+        snprintf(id->num, sizeof id->num, "%d", o[i].conn->number);
+        id->until = time_ms() + 3000;
+        int ww = 200, wh = 220;
+        window_t *iw = wm_create("", -1, o[i].x + 48, o[i].y + (o[i].h - wh) / 3, ww, wh, WF_POPUP | WF_TOPMOST);
+        if (!iw) { kfree(id); continue; }
+        iw->data = id;
+        iw->on_paint = ident_paint;
+        iw->on_tick = ident_tick;
+        iw->on_event = ident_event;
+        iw->on_destroy = ident_destroy;
+    }
+    kprintf("display: identify: %d monitor%s\n", n, n == 1 ? "" : "s");
+}
+
+/* ---- the picture: click to select, drag to arrange ---- */
+static int pic_hit(disp_t *d, int x, int y) {
+    if (d->msel < d->npic && rect_contains(d->mon[d->msel].box, x, y)) return d->msel;
+    for (int i = d->npic - 1; i >= 0; i--) if (rect_contains(d->mon[i].box, x, y)) return i;
+    return -1;
+}
+
+static void pic_drop(window_t *w) {
+    disp_t *d = w->data;
+    dmon_t *m = &d->mon[d->drag_i];
+    d->drag = 0;
+    if (!d->drag_moved) { refresh_picture(d); return; }
+    /* picture -> desktop, then onto an edge of the others */
+    m->x = (m->box.x - d->offx) * 256 / d->scale256;
+    m->y = (m->box.y - d->offy) * 256 / d->scale256;
+    if (!m->attach && m->conn->status != CONN_DISCONNECTED) m->attach = 1;   /* dragged next to them: extend onto it */
+    if (m->attach) {
+        rect_t r[LAYOUT_MAX];
+        int idx[LAYOUT_MAX], n = 0, me = -1;
+        for (int i = 0; i < d->npic && n < LAYOUT_MAX; i++) {
+            if (!d->mon[i].attach) continue;
+            if (i == d->drag_i) me = n;
+            idx[n] = i;
+            r[n++] = mkrect(d->mon[i].x, d->mon[i].y, d->mon[i].w, d->mon[i].h);
+        }
+        if (me >= 0) layout_snap(r, n, me);
+        for (int k = 0; k < n; k++) { d->mon[idx[k]].x = r[k].x; d->mon[idx[k]].y = r[k].y; }
+    }
+    arrange(d);
+    refresh_picture(d);
+    select_monitor(w, d->drag_i);
+}
+
+static menu_item_t dm_items[MAXMON];
+static menu_t dm_menu = { "Display", dm_items, 0 };
+static char dm_text[MAXMON][96];
+static void dcombo_open(window_t *w) {
+    disp_t *d = w->data;
+    int n = 0;
+    for (int i = 0; i < d->nmon && n < MAXMON; i++) {
+        mon_name(&d->mon[i], dm_text[n], sizeof dm_text[n]);
+        dm_items[n] = (menu_item_t){ dm_text[n], NULL, MENU_MON + i, d->msel == i ? MI_CHECKED : 0, 0 };
+        n++;
+    }
+    dm_menu.count = n;
+    rect_t c = dcombo_rect(), cl = wm_client_rect(w);
+    menu_popup(w, &dm_menu, cl.x + c.x, cl.y + c.y + c.h);
+}
+
+static int settings_event(window_t *w, gui_event_t *e) {
+    disp_t *d = w->data;
+    if (e->type == GE_MOUSE_DOWN && e->button == MOUSE_LEFT) {
+        if (rect_contains(dcombo_rect(), e->x, e->y)) { dcombo_open(w); return 1; }
+        int i = pic_hit(d, e->x, e->y);
+        if (i >= 0) {
+            select_monitor(w, i);
+            d->drag = 1;
+            d->drag_i = i;
+            d->drag_moved = 0;
+            d->drag_dx = e->x - d->mon[i].box.x;
+            d->drag_dy = e->y - d->mon[i].box.y;
+            d->drag_x0 = e->x; d->drag_y0 = e->y;
+            return 1;
+        }
+    }
+    if (e->type == GE_MOUSE_MOVE && d->drag) {
+        dmon_t *m = &d->mon[d->drag_i];
+        if (!d->drag_moved && (e->x - d->drag_x0) * (e->x - d->drag_x0) + (e->y - d->drag_y0) * (e->y - d->drag_y0) < 9) return 1;
+        d->drag_moved = 1;
+        rect_t a = rect_inset(arr_rect(), 2);
+        m->box.x = CLAMP(e->x - d->drag_dx, a.x - m->box.w / 2, a.x + a.w - m->box.w / 2);
+        m->box.y = CLAMP(e->y - d->drag_dy, a.y - m->box.h / 2, a.y + a.h - m->box.h / 2);
+        wm_invalidate(w);
+        return 1;
+    }
+    if (e->type == GE_MOUSE_UP && d->drag) { pic_drop(w); return 1; }
+    return 0;
+}
+
+/* ---- Apply ---- */
+static int apply_display(window_t *w) {
+    disp_t *d = w->data;
+    display_conf_t cf;
+    conf_from(d, &cf);
+    if (!conf_differs(&cf, &d->applied)) return 1;
+    if (!display_conf_live(&cf)) {
+        int r = display_save_conf(&cf);
         if (r) {
             char msg[160];
-            snprintf(msg, sizeof msg, "The setting could not be saved (%s).", strerror(r));
+            snprintf(msg, sizeof msg, "The settings could not be saved (%s).", strerror(r));
             msgbox(w, "Display Properties", msg, ICON_ERROR, MB_OK);
             return 0;
         }
-        d->applied_w = m.w; d->applied_h = m.h;
+        d->applied = cf;
         update_buttons(w);
         if (msgbox(w, "System Settings Change",
                    "Your display adapter can only change the resolution when Halcyon starts.\n\n"
@@ -439,54 +822,58 @@ static int apply_mode(window_t *w) {
             desktop_restart();
         return 1;
     }
-    int ow = screen_w(), oh = screen_h();
+    display_conf_t old;
+    display_get_conf(&old);
     wm_set_busy(1);
-    int r = display_set_mode(m.w, m.h);
+    int r = display_set_conf(&cf);
     wm_set_busy(0);
     if (r) {
         char msg[160];
-        snprintf(msg, sizeof msg, "Halcyon could not switch to %d by %d pixels (%s).", m.w, m.h, strerror(r));
+        snprintf(msg, sizeof msg, "Halcyon could not use these display settings (%s).", strerror(r));
         msgbox(w, "Display Properties", msg, ICON_ERROR, MB_OK);
+        if (wm_alive(w)) { display_get_conf(&d->applied); load_monitors(d, &d->applied); arrange(d); refresh_picture(d); select_monitor(w, d->msel); }
         return 0;
     }
+    kprintf("display: Display Properties applied new settings\n");
     if (!ask_keep(w)) {
-        display_set_mode(ow, oh);
+        display_set_conf(&old);
+        kprintf("display: settings not kept: back to the old ones\n");
         if (wm_alive(w)) {
-            int i = display_find(ow, oh);
-            widget_t *lb = widget_find(w, DP_LIST);
-            if (i >= 0 && lb) { d->sel = lb->value = i; make_thumb(d); }
-            update_buttons(w);
+            display_get_conf(&d->applied);
+            load_monitors(d, &d->applied);
+            arrange(d);
+            refresh_picture(d);
+            select_monitor(w, d->msel);
         }
         return 0;
     }
-    display_save_mode(m.w, m.h);
+    /* as applied (the core normalized the places) */
+    display_conf_t now;
+    display_get_conf(&now);
+    display_save_conf(&now);
     if (!wm_alive(w)) return 1;
-    d->applied_w = m.w; d->applied_h = m.h;
-    update_buttons(w);
+    d->applied = now;
+    load_monitors(d, &now);
+    arrange(d);
+    refresh_picture(d);
+    select_monitor(w, d->msel);
     return 1;
 }
 
 static int apply(window_t *w) {
     if (!apply_saver(w)) return 0;
-    return wm_alive(w) ? apply_mode(w) : 1;
+    return wm_alive(w) ? apply_display(w) : 1;
 }
 
 static void on_ok(window_t *w, widget_t *b) { (void)b; if (apply(w) && wm_alive(w)) wm_close(w); }
 static void on_cancel(window_t *w, widget_t *b) { (void)b; wm_close(w); }
 static void on_apply(window_t *w, widget_t *b) { (void)b; apply(w); }
-static void on_select(window_t *w, widget_t *lb) {
-    disp_t *d = w->data;
-    if (lb->value < 0 || lb->value >= display_mode_count()) return;
-    d->sel = lb->value;
-    make_thumb(d);
-    update_buttons(w);
-}
 
 static void dp_destroy(window_t *w) {
     disp_t *d = w->data;
     if (d) {
         preview_stop(d);
-        if (d->thumb) surface_free(d->thumb);
+        for (int i = 0; i < d->nmon; i++) if (d->mon[i].thumb) surface_free(d->mon[i].thumb);
         if (d->desk) surface_free(d->desk);
         kfree(d);
     }
@@ -509,30 +896,36 @@ void app_display(void) {
     w->on_menu = dp_menu;
     w->on_tick = dp_tick;
 
-    /* the mode in use, or the one saved for the next start */
-    d->applied_w = screen_w(); d->applied_h = screen_h();
+    /* the monitors as they are (or as saved for the next start) */
+    display_get_conf(&d->applied);
     if (!display_live()) {
         int sw = settings_get_int("display.width", 0), sh = settings_get_int("display.height", 0);
-        if (sw && sh && display_find(sw, sh) >= 0) { d->applied_w = sw; d->applied_h = sh; }
+        for (int i = 0; i < d->applied.n; i++)
+            if (d->applied.out[i].conn == d->applied.primary && sw && sh &&
+                modes_find(d->applied.out[i].conn->modes, d->applied.out[i].conn->nmodes, sw, sh) >= 0) {
+                d->applied.out[i].w = sw; d->applied.out[i].h = sh;
+            }
     }
-    int n = display_mode_count(), nw = 0, nh = 0;
-    display_native(&nw, &nh);
-    char **items = kzalloc(sizeof(char *) * (size_t)(n + 1));
-    for (int i = 0; i < n && items; i++) {
-        items[i] = kmalloc(64);
-        if (!items[i]) continue;
-        display_mode_t m = display_mode(i);
-        mode_text(m, m.w == nw && m.h == nh, items[i], 64);
-        if (m.w == d->applied_w && m.h == d->applied_h) d->sel = i;
-    }
-    widget_t *lb = widget_add(w, W_LISTBOX, mkrect(24, TY + 236, DW - 48, 104), "", DP_LIST);
-    if (items) widget_list_set(w, lb, items, n);
-    for (int i = 0; i < n && items; i++) kfree(items[i]);
-    kfree(items);
-    lb->value = d->sel;
-    lb->top = MAX(0, MIN(d->sel - 2, n - 5));          /* the mode in use in view */
+    load_monitors(d, &d->applied);
+    arrange(d);
+    display_conf_t cf;
+    conf_from(d, &cf);
+    /* (the hidden ones' places as arranged count as the applied ones) */
+    for (int i = 0; i < cf.n; i++)
+        for (int k = 0; k < d->applied.n; k++)
+            if (d->applied.out[k].conn == cf.out[i].conn && !cf.out[i].attach) { d->applied.out[k].x = cf.out[i].x; d->applied.out[k].y = cf.out[i].y; }
+    refresh_picture(d);
+    d->msel = MAX(0, mon_index(d, d->primary));
+
+    widget_t *lb = widget_add(w, W_LISTBOX, mkrect(24, TY + 250, DW - 48, 82), "", DP_LIST);
     lb->on_change = on_select;
-    make_thumb(d);
+    widget_t *idb = widget_add(w, W_BUTTON, mkrect(DW - 16 - 75, TY + 175, 75, 23), "Identify", DP_IDENTIFY);
+    idb->on_click = on_identify;
+    strlcpy(idb->tip, "Shows each monitor's number on it", sizeof idb->tip);
+    widget_t *pc = widget_add(w, W_CHECKBOX, mkrect(16, TY + 368, DW - 32, 18), "Use this device as the primary monitor.", DP_PRIMARY);
+    pc->on_change = on_primary;
+    widget_t *xc = widget_add(w, W_CHECKBOX, mkrect(16, TY + 390, DW - 32, 18), "Extend my desktop onto this monitor.", DP_EXTEND);
+    xc->on_change = on_extend;
 
     /* the screen saver tab */
     d->nsavers = saver_list(d->savers, SAVER_MAX);
@@ -560,6 +953,7 @@ void app_display(void) {
     cn->style |= WS_CANCEL; cn->on_click = on_cancel;
     widget_t *ap = widget_add(w, W_BUTTON, mkrect(DW - 12 - 75, DH - 33, 75, 23), "Apply", DP_APPLY);
     ap->on_click = on_apply;
+    select_monitor(w, d->msel);
     show_tab(w, TAB_SETTINGS);
     wm_place_restore(w, "display");
 }

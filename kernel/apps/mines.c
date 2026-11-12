@@ -486,10 +486,8 @@ static void set_level(window_t *w, sonar_t *s, int lvl) {
     if (w->client && (w->client->w != cw || w->client->h != ch)) {
         wm_resize_client(w, cw, ch);
         /* keep the window on screen */
-        rect_t f = w->frame;
-        int nx = MIN(f.x, screen_w() - f.w), ny = MIN(f.y, screen_h() - TASKBAR_H - f.h);
-        if (nx < 0) nx = 0;
-        if (ny < 0) ny = 0;
+        rect_t f = w->frame, g = wm_keep_on_monitor(f);
+        int nx = g.x, ny = g.y;
         if (nx != f.x || ny != f.y) {
             wm_invalidate_rect(mkrect(f.x, f.y, f.w + 8, f.h + 8));
             w->frame.x = nx; w->frame.y = ny;
