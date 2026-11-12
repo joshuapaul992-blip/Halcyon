@@ -24,7 +24,13 @@
  * without interrupts. Control commands are synchronous: queued and the used
  * ring polled (QEMU answers at once; half a second is allowed, after which
  * the queue is not used again). Interrupts (MSI-X, or INTx with the ISR
- * read to clear) only wake the GUI thread. */
+ * read to clear) only wake the GUI thread.
+ *
+ * Refresh rates: the device has none (one mode per size). The QEMU test
+ * hook opt/halcyon/vgpuedid (fw_cfg file: an EDID, e.g. modetest
+ * --write-edid qemu) replaces the first output's EDID and offers its
+ * refresh rates as a native driver would; a rate is "applied" by the
+ * emulated vertical blank's timer only (tools/boottest.py rates). */
 #include "display.h"
 #include "pci.h"
 #include "core/kernel.h"
@@ -148,6 +154,8 @@ typedef struct vgpu {
     u64 last_cfg_ms;
     u32 cmds, errors;
     int dead;
+    u8 *test_edid;                   /* test hook: the first output's EDID (refresh rates) */
+    int test_edid_len;
     irq_handle_t irq;
     char irq_name[32];
 } vgpu_t;
@@ -330,6 +338,10 @@ static void vg_detect(display_adapter_t *a) {
             }
         }
         int on = info.pm[i].enabled != 0;
+        if (k == 0 && v->test_edid) {
+            elen = v->test_edid_len;
+            memcpy(edid, v->test_edid, (size_t)elen);
+        }
         display_connector_update(cn, on ? CONN_CONNECTED : CONN_DISCONNECTED, elen ? edid : NULL, elen,
                                  on ? (int)info.pm[i].r.w : 0, on ? (int)info.pm[i].r.h : 0);
     }
@@ -675,6 +687,18 @@ static void vg_attach(pci_dev_t *pd) {
     a->max_h = 2160;
     a->vram = 128ull << 20;                  /* per head; QEMU's host memory limit is 256 MiB by default */
     a->owns_fw_fb = fw_fb_in_ram();
+    /* test hook: an EDID with several refresh rates for the first output */
+    u8 *te = kmalloc(DISPLAY_EDID_MAX);
+    int tl = te ? qemu_fw_blob("opt/halcyon/vgpuedid", te, DISPLAY_EDID_MAX) : -1;
+    if (tl >= 128) {
+        v->test_edid = te;
+        v->test_edid_len = MIN(tl, DISPLAY_EDID_MAX) & ~127;
+        a->rates = 1;
+        kprintf("virtio-gpu: test hook: Virtual-1 gets a %d-byte EDID and its refresh rates (applied to the emulated vertical blank only)\n",
+                v->test_edid_len);
+    } else {
+        kfree(te);
+    }
     int nh = (int)MIN(v->nscanouts, (u32)DISPLAY_MAX_HEADS);
     for (int i = 0; i < nh; i++) {
         display_add_head(a, HEAD_CAP_CURSOR | HEAD_CAP_FLIP | HEAD_CAP_VBLANK, 64);

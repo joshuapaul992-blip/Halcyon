@@ -103,6 +103,24 @@ interrupts on, get a working interrupt:
   guardblock  the same with display.virtio-gpu.guard=start already in
           SETTINGS.INI (a start that did not finish): the driver is not
           started, the marker becomes "blocked"
+  rates   refresh rates on the virtio GPU (-vga virtio) through its test
+          hook (fw_cfg vgpuedid: modetest --write-edid qemu, 1280 x 800 at
+          60 Hz preferred, 75 and 120 Hz in the CEA block, 144 Hz in a
+          DisplayID block; the rate is applied to the emulated vertical
+          blank only): the connector's rates logged, the loader's 1024 x 768
+          at the preferred 60 Hz at the start;
+          the Display Properties test hook (fw_cfg displaytest) picks
+          1152 x 864 (only 75 Hz there: the highest is taken), 1280 x 800
+          (the preferred 60 Hz again) and 75 Hz from the Refresh rate
+          drop-down, a screendump shows the dialog, Apply sets 1280 x 800
+          at 75 Hz, "keep these settings?" is answered Yes, and
+          SETTINGS.INI must hold display.virtual-1.hz=75
+  ratesave the same EDID with display.virtual-1.hz=120 in SETTINGS.INI:
+          the saved rate is restored at the start; with the start guard
+          (displayguard hook) and a configuration confirmed at 60 Hz, the
+          new rate is a new configuration that asks again
+  ratefall the same EDID with display.virtual-1.hz=85 saved (not offered):
+          the preferred 60 Hz is used and BOOT.LOG says why
   ntfsrw  an internal SATA disk (one MBR partition of type 7) with an NTFS
           volume made on the host by mkntfs and ntfs-3g (tests/host/
           ntfs_mkimg.py, needs root): it has \\Windows\\System32, so it
@@ -239,10 +257,12 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:bios:ac97+dusk", "xhci:uefi:hda+tide", "xhci:uefi:virtiosnd", "xhci:bios:audio",
           "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:bios:recycle", "xhci:bios:saver", "xhci:uefi:nvfake",
           "xhci:bios:nvfake+nvoff", "xhci:bios:nvfake+nvset", "xhci:bios:guard", "xhci:uefi:guardblock",
+          "xhci:bios:rates", "xhci:uefi:ratesave", "xhci:bios:ratefall",
           "xhci:uefi:install", "xhci:bios:install"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "help": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "vgpu": 0, "dual": 0, "arrange": 0, "multi": 0, "gpufail": 0, "gpuoff": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0,
-            "recycle": 0, "saver": 0, "nvfake": 0, "nvoff": 0, "nvset": 0, "guard": 0, "guardblock": 0}
+            "recycle": 0, "saver": 0, "nvfake": 0, "nvoff": 0, "nvset": 0, "guard": 0, "guardblock": 0,
+            "rates": 0, "ratesave": 0, "ratefall": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -1388,6 +1408,30 @@ def make_nvfake():
     return rom, edid
 
 
+def make_rates_edid():
+    """the QEMU test EDID with several refresh rates (tests/host/modetest)"""
+    subprocess.run(["make", "-C", "tests/host", "../../build/hosttest/modetest"], check=True, stdout=subprocess.DEVNULL)
+    edid = os.path.abspath(os.path.join(BUILD, "ci_rates_edid.bin"))
+    subprocess.run([os.path.join(BUILD, "hosttest", "modetest"), "--write-edid", "qemu", edid], check=True)
+    return edid
+
+
+def image_file(img, path):
+    """a file on the boot image (mtools), "" if it is not there"""
+    r = subprocess.run(["mtype", "-i", img + "@@1M", path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                       env=dict(os.environ, MTOOLS_SKIP_CHECK="1"))
+    return r.stdout.decode(errors="replace")
+
+
+def rates_failures(img, variant):
+    """SETTINGS.INI and BOOT.LOG after a refresh rate test"""
+    if variant == "rates" and "display.virtual-1.hz=75" not in image_file(img, "::/HALCYON/SETTINGS.INI"):
+        return ["SETTINGS.INI lacks display.virtual-1.hz=75"]
+    if variant == "ratefall" and "85 Hz at 1280x800 is not offered any more" not in image_file(img, "::/HALCYON/BOOT.LOG"):
+        return ["BOOT.LOG does not say that 85 Hz is not offered"]
+    return []
+
+
 def guard_failures(img, want):
     """SETTINGS.INI after a guard test: the marker as it must be"""
     r = subprocess.run(["mtype", "-i", img + "@@1M", "::/HALCYON/SETTINGS.INI"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -1679,6 +1723,34 @@ def run(cfg):
         checks.append(("primary on the Bochs adapter", "monitor 1: VGA-1"))
         checks.append(("monitor 2 on the virtio GPU", "monitor 2: Virtual-1"))
         checks.append(("desktop on two monitors", "on 2 monitors"))
+    rates = next((v for v in opts if v in ("rates", "ratesave", "ratefall")), None)
+    if rates:
+        extra += " -vga virtio -fw_cfg name=opt/halcyon/vgpuedid,file=%s" % make_rates_edid()
+        checks.append(("the EDID test hook", "virtio-gpu: test hook: Virtual-1 gets a 384-byte EDID and its refresh rates"))
+        checks.append(("the monitor", "virtio-gpu Virtual-1: connected, QEMU RATES"))
+        checks.append(("its rates at 1280x800", "display:   1280x800 at 60, 75, 120, 144 Hz"))
+        checks.append(("its rates at 1024x768", "display:   1024x768 at 60, 70, 75 Hz"))
+    if rates == "rates":
+        extra += " -fw_cfg name=opt/halcyon/displaytest,string=1152x864,,1280x800@75"
+        # (the loader's 1024 x 768 stays at the start: the preferred rate, 60 Hz, is offered there)
+        checks.append(("the preferred rate at the start", "monitor 1: Virtual-1 (QEMU RATES) 1024x768@60 at 0,0"))
+        checks.append(("the drop-down", "display test: opened: Virtual-1 1024x768, refresh rate 60 Hertz (offered: 60, 70, 75 Hertz), "
+                                        "drop-down enabled"))
+        checks.append(("1152x864: its only rate", "display test: resolution chosen: Virtual-1 1152x864, refresh rate 75 Hertz (offered: 75 Hertz)"))
+        checks.append(("1280x800: the preferred rate", "display test: resolution chosen: Virtual-1 1280x800, refresh rate 60 Hertz"))
+        checks.append(("75 Hz chosen", "display test: refresh rate chosen: Virtual-1 1280x800, refresh rate 75 Hertz"))
+        checks.append(("75 Hz set", "display: Virtual-1: 1280x800@75 88.88 MHz"))
+        checks.append(("kept", "\"keep these settings?\" answered Yes"))
+        checks.append(("applied and saved", "display test: applied (kept): Virtual-1 1280x800 at 75 Hz, display.virtual-1.hz=75"))
+        checks.append(("the new rate in the log", "monitor 1: Virtual-1 (QEMU RATES) 1280x800@75 at 0,0"))
+    if rates == "ratesave":
+        extra += " -fw_cfg name=opt/halcyon/displayguard,string=virtio-gpu"
+        checks.append(("saved rate restored", "monitor 1: Virtual-1 (QEMU RATES) 1280x800@120 at 0,0"))
+        checks.append(("its timing", "display: Virtual-1: 1280x800@120 142.21 MHz"))
+        checks.append(("a new rate is a new configuration", "new configuration (Virtual-1 1280x800@120 fc;): the picture will be confirmed"))
+    if rates == "ratefall":
+        checks.append(("rate not offered", "display: Virtual-1: 85 Hz at 1280x800 is not offered any more: 60 Hz instead (the monitor's preferred rate)"))
+        checks.append(("the preferred rate used", "monitor 1: Virtual-1 (QEMU RATES) 1280x800@60 at 0,0"))
     if "switch" in opts:
         extra += " -fw_cfg name=opt/halcyon/setmode,string=1600x900"
         checks.append(("live mode switch", "test mode switch to 1600x900: ok (desktop 1600x900)"))
@@ -1705,6 +1777,11 @@ def run(cfg):
         ini_lines += ["nv.modeset=0"]
     if "nvset" in opts:
         ini_lines += ["nv.flip=0", "nv.hwcursor=0", "nv.heads=1"]
+    if rates in ("ratesave", "ratefall"):
+        ini_lines += ["display.primary=Virtual-1", "display.virtual-1.attach=1", "display.virtual-1.width=1280",
+                      "display.virtual-1.height=800", "display.virtual-1.hz=%d" % (120 if rates == "ratesave" else 85)]
+    if rates == "ratesave":
+        ini_lines += ["display.virtio-gpu.confirmed=Virtual-1 1280x800@60 fc;"]
     if "arrange" in opts:
         ini_lines += ["display.primary=Virtual-2", "display.virtual-2.width=800", "display.virtual-2.height=600",
                       "display.virtual-2.x=0", "display.virtual-2.y=0", "display.virtual-2.attach=1",
@@ -1774,6 +1851,21 @@ def run(cfg):
     if "guard" in opts:
         wait_log(log, "the picture was not confirmed", 0, 45)
         wait_log(log, "display: desktop ", text.find("the picture was not confirmed") if "the picture was not confirmed" in text else 0, 10)
+        time.sleep(1)
+        text = open(log, errors="replace").read()
+    rate_fails = []
+    if rates == "rates" and p.poll() is None and "gui: desktop ready" in text:
+        # Display Properties with the drop-down at 75 Hz (the hook waits 2 s before Apply)
+        if wait_log(log, "display test: refresh rate chosen", 0, 30):
+            time.sleep(0.8)
+            png = os.path.abspath(os.path.join(BUILD, "ci_rates.png"))
+            subprocess.run([sys.executable, "tools/qemu_ctl.py", os.path.join(BUILD, "mon.sock"), "png:" + png],
+                           stdout=subprocess.DEVNULL)
+            from PIL import Image
+            im = Image.open(png).convert("RGB")
+            if im.size != (1024, 768) or dark_share(im) > 0.5:
+                rate_fails.append("screendump of Display Properties: %s, %.0f%% dark" % (im.size, dark_share(im) * 100))
+        wait_log(log, "display test: applied", 0, 30)
         time.sleep(1)
         text = open(log, errors="replace").read()
     if "recycle" in opts:
@@ -1884,6 +1976,8 @@ def run(cfg):
         failures += nvfake_failures(text, img, *nvfake, nvset="nvset" in opts, nvoff="nvoff" in opts)
     if "guard" in opts or "guardblock" in opts:
         failures += guard_failures(img, "start" if "guard" in opts else "blocked")
+    if rates:
+        failures += rate_fails + rates_failures(img, rates)
     if nic:
         failures += net_failures(text, nic, opts)
     if beep:
