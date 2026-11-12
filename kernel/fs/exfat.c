@@ -1074,7 +1074,9 @@ static int dir_add(xfs_t *x, xdir_t *dir, xent_t *pe, u8 (*raw)[32], int n, u64 
     diter_t d;
     int r = di_start(x, &d, dir);
     if (r) return r;
-    int run = 0, eod = 0;
+    int run = 0, eod = 0, nskip = 0;
+    u64 ksec[16];
+    u16 koff[16];
     for (;;) {
         int err = 0;
         const u8 *p = di_entry(x, &d, &err);
@@ -1082,6 +1084,15 @@ static int dir_add(xfs_t *x, xdir_t *dir, xent_t *pe, u8 (*raw)[32], int n, u64 
         if (p[0] == ET_EOD) eod = 1;
         /* everything after the end-of-directory marker is unused */
         if (eod || !(p[0] & ET_INUSE)) {
+            /* a set that fits in one sector is kept in one: it is then
+             * written in one piece, and a power cut leaves the old or the
+             * new set, never one with a wrong checksum (renames in place
+             * rely on this too: core/settings.c). Entries skipped past the
+             * end marker stop being the end (below). */
+            if (run && n <= (int)(x->ss / 32) && d.sec != sec[0]) {
+                for (int i = 0; eod && i < run && nskip < 16; i++) { ksec[nskip] = sec[i]; koff[nskip++] = off[i]; }
+                run = 0;
+            }
             sec[run] = d.sec;
             off[run] = (u16)di_off(x, &d);
             if (++run == n) break;
@@ -1093,6 +1104,12 @@ static int dir_add(xfs_t *x, xdir_t *dir, xent_t *pe, u8 (*raw)[32], int n, u64 
         if (r == 1 && (r = dir_grow(x, &d, dir, pe))) return r;
     }
     if ((r = set_write(x, sec, off, n, raw))) return r;
+    for (int i = 0; i < nskip; i++) {
+        int err = 0;
+        cent_t *c = cget(x, ksec[i], K_DIR, 1, 0, &err);
+        if (!c) return err ? err : E_IO;
+        if (c->buf[koff[i]] == ET_EOD) { c->buf[koff[i]] = 0x05; c->dirty = 1; }   /* unused, not the end */
+    }
     if (eod) {
         /* the set went into the unused tail: keep an end marker after it */
         r = di_next(x, &d);

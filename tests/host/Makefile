@@ -117,6 +117,21 @@ $(OUT)/kbdtest: $(KBD_SRCS) $(ROOT)/kernel/drivers/keymap.h $(ROOT)/kernel/drive
 kbd: $(OUT)/kbdtest
 	$(OUT)/kbdtest
 
+# SETTINGS.INI (kernel/core/settings.c): settingstest.c on an in-memory VFS
+# with an error or a power cut at every step; settingsfs.c on real FAT32,
+# exFAT and NTFS images with a power cut at every sector written
+$(OUT)/settingstest: settingstest.c $(ROOT)/kernel/core/settings.c $(ROOT)/kernel/core/settings.h Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) settingstest.c $(ROOT)/kernel/core/settings.c -o $@
+SETFS_SRCS := $(filter-out shim.c,$(KSRCS)) $(ROOT)/kernel/core/settings.c settingsfs.c
+$(OUT)/settingsfs: $(SETFS_SRCS) shim.c $(HDRS) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) -DSHIM_NO_SETTINGS $(SETFS_SRCS) shim.c -o $@
+settings: $(OUT)/settingstest $(OUT)/settingsfs
+	$(OUT)/settingstest $(SETARGS)
+	@rm -rf $(OUT)/setwork && mkdir -p $(OUT)/setwork
+	$(OUT)/settingsfs $(OUT)/setwork $(SETARGS)
+
 $(OUT)/fstest: $(SRCS) isotest.c ntfstest.c $(HDRS) Makefile
 	@mkdir -p $(OUT)
 	gcc $(CFLAGS) $(SRCS) -o $@

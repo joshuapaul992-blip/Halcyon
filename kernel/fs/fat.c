@@ -1510,6 +1510,26 @@ static int fat_rename(volume_t *v, const char *from, const char *to) {
             if ((r = dir_parent(f, cur, &cur))) goto out;
         }
     }
+    /* the same directory, a short name only before and after: rewrite the
+     * entry where it is. One sector changes, so a power cut leaves either
+     * name, never both on the same clusters (SETTINGS.TMP -> SETTINGS.INI,
+     * core/settings.c, relies on this) */
+    if (ddir == src->dir && !src->has_lfn && src->nslots == 1) {
+        u8 sn[11];
+        int need_lfn;
+        if ((r = make_short(f, ddir, name, sn, &need_lfn))) goto out;
+        if (!need_lfn) {
+            int err = 0;
+            cent_t *c = cget(f, src->sec, 0, &err);
+            if (!c) { r = err; goto out; }
+            u8 *p = c->buf + src->off;
+            memcpy(p, sn, 11);
+            p[12] = 0;
+            c->dirty = 1;
+            r = fat_flush(f);
+            goto out;
+        }
+    }
     u32 nsec; u16 noff;
     u8 tmpl[32];
     memcpy(tmpl, src->de, 32);

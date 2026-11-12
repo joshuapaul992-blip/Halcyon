@@ -70,6 +70,7 @@ int mutex_trylock(mutex_t *m) { (void)m; return 1; }
 void mutex_unlock(mutex_t *m) { (void)m; }
 int mutex_held(mutex_t *m) { (void)m; return 1; }
 
+#ifndef SHIM_NO_SETTINGS     /* settingsfs.c links the real core/settings.c */
 /* settings (core/settings.h): an in-memory table the tests can fill */
 #include "core/settings.h"
 static struct { char k[64]; char v[64]; } g_settings[32];
@@ -103,6 +104,8 @@ void settings_set_int(const char *key, int value) {
     snprintf(b, sizeof b, "%d", value);
     settings_set(key, b);
 }
+
+#endif
 
 /* random numbers (core/random.c): not cryptographic here */
 void random_bytes(void *buf, size_t n) {
