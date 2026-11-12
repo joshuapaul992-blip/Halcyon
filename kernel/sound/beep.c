@@ -104,11 +104,17 @@ int snd_beep(int hz, int ms) {
 /* ---------------- test hook ---------------- */
 extern volatile int gui_desktop_ready __attribute__((weak));
 
+extern volatile int sound_startup_busy __attribute__((weak));
 static int desktop_ready(void *arg) { (void)arg; return !&gui_desktop_ready || gui_desktop_ready; }
 
 static void beep_test(void *arg) {
     (void)arg;
     thread_wait(desktop_ready, NULL, ~0ull);
+    /* after the startup sound (sound/sndevent.c), so the recording holds it
+     * and then the two beeps, apart (at most 20 s) */
+    for (int i = 0; i < 200 && ((&sound_startup_busy && sound_startup_busy) || snd_playing()); i++)
+        thread_sleep_ms(100);
+    thread_sleep_ms(200);
     const char *how = snd_default() ? snd_default()->name : "PC speaker";
     int r1 = snd_beep(880, 300);
     thread_sleep_ms(4300);

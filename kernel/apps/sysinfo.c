@@ -12,6 +12,7 @@
 #include "fileops.h"
 #include "core/irq.h"
 #include "net/netdev.h"
+#include "sound/snddev.h"
 #include "version.h"
 
 blockdev_t *ahci_cd_get(int i) __attribute__((weak));   /* drivers/ahci.c */
@@ -33,15 +34,16 @@ typedef struct si {
     row_t *rows; int n;
     int sel, top;
     u8 collapsed[16];
-    u32 ugen, vgen, ngen;
+    u32 ugen, vgen, ngen, sgen;
     int sb_drag;
     u64 live_t;
     window_t *win;
 } si_t;
 
-enum { CAT_COMPUTER, CAT_DISPLAY, CAT_DISKS, CAT_VOLUMES, CAT_STORAGE, CAT_USB, CAT_INPUT, CAT_NET, CAT_PCI, CAT_COUNT };
+enum { CAT_COMPUTER, CAT_DISPLAY, CAT_DISKS, CAT_VOLUMES, CAT_STORAGE, CAT_USB, CAT_INPUT, CAT_NET, CAT_SOUND, CAT_PCI, CAT_COUNT };
 static const char *cat_names[CAT_COUNT] = { "Computer", "Display adapters", "Disk drives", "Volumes", "Storage controllers",
-                                            "Universal Serial Bus controllers", "Keyboards and pointing devices", "Network adapters", "PCI devices" };
+                                            "Universal Serial Bus controllers", "Keyboards and pointing devices", "Network adapters",
+                                            "Sound devices", "PCI devices" };
 
 static void add(si_t *s, int depth, int icon, int cat, const char *detail, const char *fmt, ...) __attribute__((format(printf, 6, 7)));
 static void add(si_t *s, int depth, int icon, int cat, const char *detail, const char *fmt, ...) {
@@ -80,6 +82,13 @@ static void pci_detail(pci_dev_t *d, char *b, int n) {
     }
 }
 
+/* changes when a sound card is added or starts / stops playing */
+static u32 snd_state(void) {
+    u32 h = snd_generation();
+    for (int i = 0; i < snddev_count(); i++) h = h * 31 + (u32)snddev_get(i)->running;
+    return h;
+}
+
 /* changes when an adapter's link state or speed changes */
 static u32 net_state(void) {
     u32 h = (u32)netdev_count();
@@ -105,6 +114,7 @@ static void build(si_t *s) {
     s->ugen = usb_generation();
     s->vgen = vfs_generation();
     s->ngen = net_state();
+    s->sgen = snd_state();
     char *d = kmalloc(2048);
     struct mm_stats ms; mm_get_stats(&ms);
 
@@ -256,6 +266,33 @@ static void build(si_t *s) {
         add(s, 1, ICON_WARNING, CAT_NET, d, "%s %s", pci_vendor_name(p->vendor), pci_class_name(p->class_code, p->subclass, p->prog_if));
     }
 
+    /* sound */
+    add(s, 0, ICON_SPEAKER, CAT_SOUND, NULL, "%s", cat_names[CAT_SOUND]);
+    for (int i = 0; i < snddev_count(); i++) {
+        snddev_t *sd = snddev_get(i);
+        char irq[48] = "polled";
+        if (sd->irq && sd->irq_live) irq_describe(sd->irq, irq, sizeof irq);
+        int o = snprintf(d, 2048, "%s (%s)\n\nDriver: %s\nOutput: %s\nFormat: %d Hz, %d channels, 16-bit, %d-frame periods (%d ms)\n"
+                         "State: %s%s\nInterrupt: %s\nPlayed: %lu frames (%lu s); %lu underruns\n",
+                         sd->desc, sd->name, sd->driver ? sd->driver : "-", sd->output[0] ? sd->output : "-", sd->rate,
+                         sd->channels, sd->period_frames, sd->rate ? sd->period_frames * 1000 / sd->rate : 0,
+                         sd->running ? "playing" : "idle (stopped while nothing plays)", sd == snd_default() ? ", default device" : "",
+                         irq, sd->frames, sd->rate ? sd->frames / (u64)sd->rate : 0, sd->underruns);
+        if (sd->pci && o < 2047) { d[o++] = '\n'; pci_detail(sd->pci, d + o, 2048 - o); }
+        add(s, 1, ICON_SPEAKER, CAT_SOUND, d, "%s: %s (%s)", sd->name, sd->desc, sd->running ? "playing" : "idle");
+    }
+    for (int i = 0; i < pci_count(); i++) {
+        pci_dev_t *p = pci_get(i);
+        if (p->class_code != 4 || (p->subclass != 1 && p->subclass != 3)) continue;     /* audio, HD Audio */
+        int claimed = 0;
+        for (int k = 0; k < snddev_count(); k++) if (snddev_get(k)->pci == p) claimed = 1;
+        if (claimed) continue;
+        pci_detail(p, d, 2048);
+        strlcat(d, "\nNo driver is available for this device.", 2048);
+        add(s, 1, ICON_WARNING, CAT_SOUND, d, "%s %s", pci_vendor_name(p->vendor), pci_class_name(p->class_code, p->subclass, p->prog_if));
+    }
+    if (!snddev_count()) add(s, 1, ICON_SPEAKER_MUTED, CAT_SOUND, NULL, "No sound card");
+
     /* all PCI */
     add(s, 0, ICON_SYSINFO, CAT_PCI, NULL, "%s", cat_names[CAT_PCI]);
     for (int i = 0; i < pci_count(); i++) {
@@ -361,7 +398,10 @@ static void si_event(window_t *w, gui_event_t *e) {
 
 static void si_tick(window_t *w) {
     si_t *s = w->data;
-    if (usb_generation() != s->ugen || vfs_generation() != s->vgen || net_state() != s->ngen) { build(s); wm_invalidate(w); }
+    if (usb_generation() != s->ugen || vfs_generation() != s->vgen || net_state() != s->ngen || snd_state() != s->sgen) {
+        build(s);
+        wm_invalidate(w);
+    }
     if (time_ms() - s->live_t >= 1000) {
         s->live_t = time_ms();
         for (int i = 0; i < s->n; i++)

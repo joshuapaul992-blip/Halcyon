@@ -496,6 +496,7 @@ void snd_release_pid(u32 pid) __attribute__((weak));   /* sound/: the program's 
 static void proc_finish(proc_t *p) {
     if (proc_release_hook) proc_release_hook(p);
     if (socket_release_all) socket_release_all(p);
+    if (sound_release_all) sound_release_all(p);
     if (snd_release_pid) snd_release_pid(p->pid);
     shm_release_all(p);
     for (int i = 0; i < PROC_HANDLES; i++) {

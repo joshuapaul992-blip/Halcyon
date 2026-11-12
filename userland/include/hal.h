@@ -460,4 +460,36 @@ int  net_ctl(int op, const char *ifname);                  /* NETCTL_RENEW / REL
 int  net_stats(hal_netstats_t *st);
 int  net_conns(hal_netconn_t *out, int max);               /* TCP connections, UDP sockets: entries */
 
+/* ---- sound (see docs/DESIGN-M7.md; the ABI is kernel/sound/sndabi.h) ----
+ * A stream plays PCM through the default sound card, mixed with every other
+ * stream: open it with its format (rate 8000..192000, 1 or 2 channels, 8-bit
+ * unsigned or 16-bit signed samples) and a buffer length, then write whole
+ * frames. snd_write waits until everything is queued (a full buffer is the
+ * back-pressure), unless the stream is non-blocking (SND_NONBLOCK or
+ * SNDCTL_NONBLOCK): then it takes what fits and returns E_AGAIN when nothing
+ * does. poll() reports POLLOUT when a quarter of the buffer is free. close()
+ * lets what is queued play out; snd_close chooses (SNDCLOSE_*). A program has
+ * at most SND_PROC_STREAMS streams; they stop when it ends. E_NODEV: no
+ * sound card. */
+static inline int  snd_open(int rate, int channels, int bits, int buffer_ms, int flags) {
+    return (int)SC5(SYS_SND_OPEN, rate, channels, bits, buffer_ms, flags);
+}
+static inline long snd_write(int h, const void *buf, size_t len) { return SC4(SYS_SND_WRITE, h, buf, len, 0); }
+static inline long snd_write_nb(int h, const void *buf, size_t len) { return SC4(SYS_SND_WRITE, h, buf, len, SNDW_NONBLOCK); }
+/* wait until all that was written has played (timeout_ms < 0: no limit); 0, E_TIMEOUT */
+static inline int  snd_drain(int h, int timeout_ms) { return (int)SC2(SYS_SND_DRAIN, h, timeout_ms); }
+static inline int  snd_ctl(int h, int op, int value) { return (int)SC3(SYS_SND_CTL, h, op, value); }
+static inline int  snd_pause(int h, int paused) { return snd_ctl(h, SNDCTL_PAUSE, paused); }
+static inline int  snd_stream_volume(int h, int percent) { return snd_ctl(h, SNDCTL_VOLUME, percent); }
+static inline int  snd_discard(int h) { return snd_ctl(h, SNDCTL_DISCARD, 0); }          /* drop the queue (seek) */
+static inline int  snd_status(int h, hal_sndstatus_t *st) { return (int)SC2(SYS_SND_STATUS, h, st); }
+static inline int  snd_close(int h, int how) { return (int)SC2(SYS_SND_CLOSE, h, how); }
+/* the master volume: volume 0..100 or -1 (keep), mute 0/1 or -1, flags
+ * SNDVOL_SAVE; returns the volume | SND_MUTED. snd_master(-1, -1, 0) reads it. */
+static inline int  snd_master(int volume, int mute, int flags) { return (int)SC3(SYS_SND_MASTER, volume, mute, flags); }
+/* play a system sound (SNDEV_*); 1 played, 0 the sound scheme has it off */
+static inline int  snd_event(int ev, int flags) { return (int)SC2(SYS_SND_EVENT, ev, flags); }
+static inline int  snd_devinfo(int index, hal_snddev_t *d) { return (int)SC2(SYS_SND_DEVINFO, index, d); }
+static inline int  snd_info(hal_sndinfo_t *info) { return (int)SC1(SYS_SND_INFO, info); }
+
 #endif

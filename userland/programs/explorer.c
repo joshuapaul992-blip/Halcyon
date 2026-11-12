@@ -319,6 +319,7 @@ static const char *file_type_name(const char *name, int is_dir) {
     if (!strcasecmp(e, "htm") || !strcasecmp(e, "html")) return "HTML Document";
     if (is_text_file(name)) return !strcasecmp(e, "ini") || !strcasecmp(e, "cfg") ? "Configuration Settings" : "Text Document";
     if (!strcasecmp(e, "bmp")) return "Bitmap Image";
+    if (!strcasecmp(e, "wav")) return "Wave Sound";
     if (!strcasecmp(e, "efi")) return "EFI Application";
     if (!strcasecmp(e, "bin") || !strcasecmp(e, "sys")) return "System file";
     if (!strcasecmp(e, "exe") || !strcasecmp(e, "com")) return "Application";
@@ -339,6 +340,7 @@ static int file_icon(const char *name, int is_dir) {
     if (!strcasecmp(e, "htm") || !strcasecmp(e, "html")) return HICON_WEB;
     if (is_text_file(name)) return HICON_FILE_TEXT;
     if (!strcasecmp(e, "bmp")) return HICON_FILE_IMAGE;
+    if (!strcasecmp(e, "wav")) return HICON_FILE_AUDIO;
     if (!strcasecmp(e, "efi") || !strcasecmp(e, "exe") || !strcasecmp(e, "com")) return HICON_FILE_APP;
     if (!strcasecmp(e, "bin") || !strcasecmp(e, "sys")) return HICON_FILE_SYS;
     return HICON_FILE;

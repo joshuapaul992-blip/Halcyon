@@ -103,7 +103,8 @@ void snd_release_pid(u32 pid);              /* a program ended: close its stream
 int  snd_volume(void);
 int  snd_muted(void);
 void snd_set_volume(int percent, int mute, int save);
-u32  snd_generation(void);                  /* changes with the volume, mute or the devices */
+u32  snd_generation(void);
+int  snd_playing(void);                     /* a stream or static sound is playing or queued */                  /* changes with the volume, mute or the devices */
 
 /* a beep of hz (20..20000) for ms (1..2000): a tone through the mixer when
  * there is a sound card, else the PC speaker; returns at once (0 or E_*) */

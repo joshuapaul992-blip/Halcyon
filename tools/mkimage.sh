@@ -37,10 +37,25 @@ if ls $BUILD/user/*.exe >/dev/null 2>&1; then
         mcopy -i "$PART" "$f" "::/PROGRAMS/$n"
     done
 fi
+# system sounds (tools/mksounds.py)
+if ls $BUILD/media/*.WAV >/dev/null 2>&1; then
+    mmd -i "$PART" ::/HALCYON/MEDIA
+    for f in $BUILD/media/*.WAV; do
+        mcopy -i "$PART" "$f" "::/HALCYON/MEDIA/$(basename "$f")"
+    done
+fi
 # user files
 if [ -d rootfs ]; then
     for f in rootfs/*; do
         [ -e "$f" ] && mcopy -s -i "$PART" "$f" ::/
+    done
+fi
+# Media Player's demo piece (tools/mksounds.py) in My Documents
+if ls $BUILD/media/music/*.wav >/dev/null 2>&1; then
+    mmd -i "$PART" ::/Documents 2>/dev/null || true
+    mmd -i "$PART" ::/Documents/Music
+    for f in $BUILD/media/music/*.wav; do
+        mcopy -i "$PART" "$f" "::/Documents/Music/$(basename "$f")"
     done
 fi
 dd if="$PART" of="$IMG.tmp" bs=512 seek=$PART_START conv=notrunc 2>/dev/null

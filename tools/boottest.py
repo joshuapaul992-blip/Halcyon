@@ -71,20 +71,32 @@ or attach a sound card, its output recorded by QEMU's wav backend (48 kHz):
   virtiosnd     virtio-sound-pci (virtio 1.2 sound device; MSI-X)
   es1370        Ensoniq AudioPCI ES1370 (plays at 44.1 kHz)
   sb16          Creative Sound Blaster 16 (ISA, IRQ 5, DMA 5; plays at 44.1 kHz)
-          The card's driver must register it as snd0. Once the desktop is up
-          the kernel's sound test (QEMU fw_cfg soundtest) plays a 440 Hz sine
-          at 44.1 kHz for 2 s through a stream, then 100 ms later a 1 kHz
-          triangle at 22.05 kHz for 0.25 s as a static sound: the log must
-          report no underruns and the expected interrupt (live, or polled with
-          noirq), and the recording must hold both, at the right pitch and
-          length, without dropouts. (QEMU resamples a 44.1 kHz card to the
-          recording's 48 kHz; the pitch still comes out within 1 Hz.)
+          The card's driver must register it as snd0. The recording must
+          start with the startup sound (C:\\HALCYON\\MEDIA\\STARTUP.WAV,
+          played when the desktop is ready): its loudness envelope must match
+          the file's, at the master volume's gain. Then the kernel's sound
+          test (QEMU fw_cfg soundtest, which waits for the startup sound to
+          end) plays a 440 Hz sine at 44.1 kHz for 2 s through a stream,
+          then 100 ms later a 1 kHz triangle at 22.05 kHz for 0.25 s as a
+          static sound: the log must report no underruns and the expected
+          interrupt (live, or polled with noirq), and the recording must hold
+          both, at the right pitch and length, without dropouts. (QEMU
+          resamples a 44.1 kHz card to the recording's 48 kHz; the pitch
+          still comes out within 1 Hz.)
   beep    instead of the sound test, the beep test (soundtest = "beep"):
           snd_beep(880, 300), 4.3 s later (the device has been stopped and
           must start again) snd_beep(660, 200). With a sound card (e.g.
           ac97+beep) both go through it; without one (just beep) through the
           PC speaker, recorded with -machine pcspk-audiodev. The recording
           must hold both beeps at the right pitch and length.
+  audio   an AC'97 card recorded as above, and C:\\PROGRAMS\\SNDTEST.EXE run
+          after boot: the sound system calls (formats, limits, bad
+          arguments, blocking and non-blocking writes, drain timing, pause,
+          volumes, poll, a child that ends with open streams, one ended while
+          it waits); it must report "sndtest: all N checks passed", and the
+          recording must hold the startup sound and then SNDTEST's signal, a
+          660 Hz sine written as 8-bit mono at 32 kHz for 1 s, at the right
+          pitch and length without dropouts.
 NETDUMP=file.pcap records the net variants' frames (128 bytes each) for debugging.
 Exit status is the number of failed configurations.
 """
@@ -103,7 +115,7 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user", "xhci:bios:sock", "xhci:bios:web",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
-          "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:uefi:virtiosnd"]
+          "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:uefi:virtiosnd", "xhci:bios:audio"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
@@ -121,7 +133,12 @@ SOUNDS = {"ac97": ("-device AC97,audiodev=snd0", "ac97"),
           "sb16": ("-device sb16,audiodev=snd0", "sb16")}
 for _n in SOUNDS:
     VARIANTS[_n] = 0
+VARIANTS["audio"] = 0
 SOUND_TEST_MS = 2000
+BEEP_AMP = 12000                         # snd_beep's sine (sound/beep.c)
+SNDTEST_HZ, SNDTEST_MS = 660, 1000       # SNDTEST.EXE's signal
+SNDTEST_AMP = 100 * 256                  # its amplitude: 8-bit samples 128 +- 100
+MASTER_GAIN = 0.64                       # the default master volume, 80 %, squared
 NET_PROBE = 3000
 NVME_ERRORS = ["failed", "timed out", "fatal", "offline", "not responding", "no interrupt seen"]
 IDLE_MAX_CPU = 40      # % of one host CPU used by QEMU at the idle desktop
@@ -137,7 +154,7 @@ CHECKS = [
 BAD = ["CPU EXCEPTION", "KERNEL PANIC", "nested fault"]
 # variants that run a test program after boot: (program, its report prefix)
 PROGRAMS = {"user": ("SELFTEST.EXE", "selftest"), "sock": ("SOCKTEST.EXE", "socktest"), "web": ("WEBTEST.EXE", "webtest"),
-            "net": ("NETTEST.EXE", "nettest")}
+            "net": ("NETTEST.EXE", "nettest"), "audio": ("SNDTEST.EXE", "sndtest")}
 PROGRAM_TIMEOUT = {"net": 300}
 NET_LOSS_PCT = 3
 _netservers = None
@@ -340,12 +357,75 @@ def pitch_runs(path):
     return runs
 
 
+def wav_envelope(path, rate_out=100):
+    """RMS of the first channel in 1/rate_out s blocks (16-bit WAV)"""
+    import array
+    data = open(path, "rb").read()
+    i = data.find(b"data")
+    ch = data[22] | data[23] << 8
+    rate = int.from_bytes(data[24:28], "little")
+    pcm = array.array("h")
+    pcm.frombytes(data[i + 8: i + 8 + (len(data) - i - 8) // (2 * ch) * 2 * ch])
+    x = pcm[0::ch]
+    blk = rate // rate_out
+    return [(sum(v * v for v in x[b * blk:(b + 1) * blk]) / blk) ** 0.5 for b in range(len(x) // blk)]
+
+
+def startup_failures(wav, segs, signal_amp):
+    """the recording must start with the startup sound: its 10 ms loudness
+    envelope must follow STARTUP.WAV's (correlation >= 0.95), at the same
+    gain as the test signal that follows it (a sine of amplitude signal_amp
+    in a stream at 100 %: the master volume, and QEMU's AC'97 codec, which
+    takes off another 2.5 dB, apply to both). Returns (failures, the
+    segments after it)."""
+    ref_path = os.path.join(BUILD, "media", "STARTUP.WAV")
+    if not segs:
+        return ["no startup sound (silence)"], segs
+    ref = wav_envelope(ref_path)
+    rec = wav_envelope(wav)
+    t0 = int(round(segs[0][0] * 100))
+    best = (-1, 0, 0)
+    for lag in range(max(0, t0 - 30), t0 + 10):
+        x = rec[lag:lag + len(ref)]
+        if len(x) < len(ref):
+            break
+        sxy = sum(a * b for a, b in zip(x, ref))
+        sxx = sum(a * a for a in x)
+        syy = sum(b * b for b in ref)
+        corr = sxy / ((sxx * syy) ** 0.5 or 1)
+        if corr > best[0]:
+            best = (corr, lag, sxy / (syy or 1))
+    corr, lag, gain = best
+    end = (lag + len(ref)) / 100
+    rest = [sg for sg in segs if sg[0] >= end - 0.05]
+    fails = []
+    want = MASTER_GAIN
+    if rest and rest[0][1] >= 300:            # the signal's gain, from its middle
+        b0 = int(round(rest[0][0] * 100))
+        mid = rec[b0 + 10: b0 + rest[0][1] // 10 - 10]
+        want = (sum(mid) / len(mid)) / (signal_amp / 2 ** 0.5)
+    if corr < 0.95 or abs(gain / want - 1) > 0.12:
+        fails.append("startup sound: envelope correlation %.3f, gain %.2f (want >= 0.95, %.2f as the signal)" % (corr, gain, want))
+    return fails, rest
+
+
 def sound_failures(text, snd, opts, wav):
     """the sound card variant's checks (see the docstring)"""
     driver = SOUNDS[snd][1]
     fails = []
     if not any(l.startswith("sound: snd0: ") and "(%s)" % driver in l for l in text.splitlines()):
         return ["no %s sound card registered" % driver]
+    if "audio" in opts:
+        segs = wav_segments(wav)
+        if segs is None:
+            return fails + ["no recording"]
+        sf, rest = startup_failures(wav, segs, SNDTEST_AMP)
+        fails += sf
+        desc = ", ".join("%.2fs %dms %.1fHz%s" % (a, b, c, " %d dropouts" % d if d else "") for a, b, c, d in rest)
+        if len(rest) != 1 or not (SNDTEST_MS - 30 <= rest[0][1] <= SNDTEST_MS + 30 and abs(rest[0][2] - SNDTEST_HZ) < 1.5
+                                  and not rest[0][3]):
+            fails.append("recording after the startup sound: expected SNDTEST's %d Hz signal, got: %s" % (SNDTEST_HZ, desc or "silence"))
+        return fails
     m = re.search(r"sound: test: done: tone played in \d+ ms, stream underruns (\d+), device snd0 underruns (\d+), irq (\w+)", text)
     if not m:
         return fails + ["sound test did not finish"]
@@ -357,6 +437,8 @@ def sound_failures(text, snd, opts, wav):
     segs = wav_segments(wav)
     if segs is None:
         return fails + ["no recording"]
+    sf, segs = startup_failures(wav, segs, 16000)
+    fails += sf
     desc = ", ".join("%.2fs %dms %.1fHz%s" % (a, b, c, " %d dropouts" % d if d else "") for a, b, c, d in segs)
     if len(segs) != 2:
         return fails + ["recording: expected the tone and the beep, got: %s" % (desc or "silence")]
@@ -384,6 +466,11 @@ def beep_failures(text, snd, wav):
     runs = pitch_runs(wav)
     if runs is None:
         return fails + ["no recording"]
+    if snd:     # with a card the startup sound comes first: check it, then look after it
+        sf, rest = startup_failures(wav, wav_segments(wav) or [], BEEP_AMP)
+        fails += sf
+        if rest:
+            runs = [r for r in runs if r[0] >= rest[0][0] - 0.02]
     desc = ", ".join("%.2fs %dms %.1fHz" % r for r in runs)
     if len(runs) != 2:
         return fails + ["recording: expected two beeps, got: %s" % (desc or "silence")]
@@ -441,15 +528,20 @@ def run(cfg):
     if nic:
         extra += " -netdev user,id=n0 -device %s,netdev=n0 -fw_cfg name=opt/halcyon/netprobe,string=%d" % (
             NICS[nic][0], NET_PROBE)
-    snd = next((v for v in opts if v in SOUNDS), None)
+    snd = next((v for v in opts if v in SOUNDS), "ac97" if "audio" in opts else None)
     wav = os.path.abspath(os.path.join(BUILD, "ci_sound.wav"))
     beep = "beep" in opts
     if snd or beep:
         if os.path.exists(wav):
             os.remove(wav)
-        # beep without a sound card: the PC speaker is recorded
-        extra += " -audiodev wav,id=snd0,path=%s,out.frequency=48000 %s -fw_cfg name=opt/halcyon/soundtest,string=%s" % (
-            wav, SOUNDS[snd][0] if snd else "-machine pcspk-audiodev=snd0", "beep" if beep else SOUND_TEST_MS)
+        if snd:
+            extra += " -audiodev wav,id=snd0,path=%s,out.frequency=48000 %s" % (wav, SOUNDS[snd][0])
+        else:   # beep without a sound card: the PC speaker is recorded
+            extra += " -audiodev wav,id=snd0,path=%s,out.frequency=48000 -machine pcspk-audiodev=snd0" % wav
+        if beep:
+            extra += " -fw_cfg name=opt/halcyon/soundtest,string=beep"
+        elif "audio" not in opts:       # (SNDTEST plays its own signal instead of the kernel's test)
+            extra += " -fw_cfg name=opt/halcyon/soundtest,string=%d" % SOUND_TEST_MS
     prog = next((PROGRAMS[v] for v in opts if v in PROGRAMS), None)
     prog_args = ""
     ini_lines = []
@@ -539,7 +631,7 @@ def run(cfg):
         while time.time() - t1 < 20 and p.poll() is None and "probe burst:" not in text:
             time.sleep(0.5)
             text = open(log, errors="replace").read()
-    if snd or beep:
+    if (snd or beep) and "audio" not in opts:
         done = "sound: beep test: done" if beep else "sound: test: done"
         t1 = time.time()
         while time.time() - t1 < 30 and p.poll() is None and done not in text:

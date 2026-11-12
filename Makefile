@@ -56,6 +56,12 @@ $(BUILD)/gen/icons.c $(BUILD)/gen/icons.h &: tools/mkicons.py
 $(BUILD)/gen/%.o: $(BUILD)/gen/%.c
 	$(CC) $(KCFLAGS) -c $< -o $@
 
+# system sounds (C:\HALCYON\MEDIA\*.WAV), synthesized by tools/mksounds.py
+$(BUILD)/media/stamp: tools/mksounds.py
+	@mkdir -p $(BUILD)/media
+	$(PY) tools/mksounds.py $(BUILD)/media
+	@touch $@
+
 # the version (1.0.<number of commits>), checked on every build
 $(BUILD)/gen/version.h: FORCE
 	@mkdir -p $(BUILD)/gen
@@ -80,7 +86,7 @@ $(BUILD)/KERNEL.BIN: $(BUILD)/kernel.elf
 
 # ---- disk images ----
 IMG_DEPS := $(BUILD)/boot/mbr.bin $(BUILD)/boot/stage2.bin $(BUILD)/KERNEL.BIN \
-            $(BUILD)/rootfs.stamp tools/mkimage.sh
+            $(BUILD)/rootfs.stamp $(BUILD)/media/stamp tools/mkimage.sh
 ifneq ($(EFI_SRC),)
 IMG_DEPS += $(BUILD)/efi/BOOTX64.EFI
 endif
@@ -89,22 +95,33 @@ endif
 UCFLAGS := -std=gnu11 -O2 -g0 -ffreestanding -fno-builtin -fPIE -fno-stack-protector -fno-asynchronous-unwind-tables \
            -Wall -Wextra -Wno-unused-parameter -Iuserland/include
 ULDFLAGS := -static-pie -nostdlib -Wl,--no-dynamic-linker -Wl,-z,noexecstack -Wl,--build-id=none
-ULIB := $(BUILD)/user/crt0.o $(patsubst userland/lib/%.c,$(BUILD)/user/%.o,$(wildcard userland/lib/*.c))
+ULIB := $(BUILD)/user/crt0.o $(patsubst userland/lib/%.c,$(BUILD)/user/%.o,$(filter-out userland/lib/wav.c,$(wildcard userland/lib/*.c)))
 UPROGS := $(patsubst userland/programs/%.c,$(BUILD)/user/%.exe,$(wildcard userland/programs/*.c))
 
 $(BUILD)/user/crt0.o: userland/lib/crt0.S
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -c $< -o $@
-$(BUILD)/user/%.o: userland/lib/%.c userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h
+$(BUILD)/user/%.o: userland/lib/%.c userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -c $< -o $@
-$(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h
+$(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $<
 	strip $@
 
+# the WAV library (userland/lib/wav.c), linked only into the programs that play files
+WAVLIB := $(BUILD)/user/wav.o
+$(BUILD)/user/wav.o: userland/lib/wav.c userland/include/wav.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/mplayer.exe $(BUILD)/user/play.exe: $(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) $(WAVLIB) userland/include/wav.h \
+                           userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(WAVLIB)
+	strip $@
+
 IMG_DEPS += $(UPROGS)
-.SECONDARY: $(ULIB)
+.SECONDARY: $(ULIB) $(WAVLIB)
 
 # ---- libraries linked only into the programs that use them ----
 # BearSSL (userland/third_party/bearssl, unmodified): its own C sources with
@@ -135,7 +152,7 @@ $(BUILD)/user/web/trust.c: tools/mktrust.py userland/third_party/cacert/cacert.p
 	$(PY) tools/mktrust.py userland/third_party/cacert/cacert.pem $@
 $(BUILD)/user/web/trust.o: $(BUILD)/user/web/trust.c
 	$(CC) $(BEAR_CFLAGS) -c $< -o $@
-$(BUILD)/user/web/%.o: userland/lib/web/%.c $(wildcard userland/lib/web/*.h) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h
+$(BUILD)/user/web/%.o: userland/lib/web/%.c $(wildcard userland/lib/web/*.h) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -I$(BEARPORT) -I$(BEARSSL)/inc -c $< -o $@
 $(BUILD)/user/libweb.a: $(WEBLIB_OBJ)
@@ -146,12 +163,12 @@ WEBLIBS := $(BUILD)/user/libweb.a $(BUILD)/user/libbearssl.a
 # programs that use libweb (explicit rules: they replace the pattern rule above)
 BROWSER_SRC := $(wildcard userland/programs/browser/*.c)
 $(BUILD)/user/browser.exe: userland/programs/browser.c $(BROWSER_SRC) $(wildcard userland/programs/browser/*.h) \
-                           userland/lib/web/web.h $(ULIB) $(WEBLIBS) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h
+                           userland/lib/web/web.h $(ULIB) $(WEBLIBS) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -Iuserland/lib/web $(ULDFLAGS) -o $@ $(ULIB) $< $(BROWSER_SRC) $(WEBLIBS)
 	strip $@
 $(BUILD)/user/wget.exe $(BUILD)/user/webtest.exe: $(BUILD)/user/%.exe: userland/programs/%.c userland/lib/web/web.h $(ULIB) $(WEBLIBS) \
-                           userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h $(wildcard userland/programs/webtest_certs.h)
+                           userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h $(wildcard userland/programs/webtest_certs.h)
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -Iuserland/lib/web -I$(BEARPORT) -I$(BEARSSL)/inc $(ULDFLAGS) -o $@ $(ULIB) $< $(WEBLIBS)
 	strip $@

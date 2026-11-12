@@ -25,6 +25,13 @@ if ! web=$(sh tests/web/run.sh 2>&1); then
 fi
 echo "$web" | grep -E "^(url|trust anchors|inflate|images|html|web):"
 
+echo "== host sound tests"
+if ! snd=$(sh tests/sound/run.sh 2>&1); then
+    echo "$snd" | tail -30
+    exit 1
+fi
+echo "$snd" | tail -2
+
 echo "== QEMU boot matrix"
 if [ "$1" = quick ]; then
     python3 tools/boottest.py xhci:bios xhci:uefi

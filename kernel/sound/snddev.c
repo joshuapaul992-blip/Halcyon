@@ -218,6 +218,9 @@ static inline void frame_at(const snd_stream_t *s, u64 k, int *l, int *r) {
 static i32 *mixbuf;
 static int mixcap;
 
+static int streams_playing(void);
+int snd_playing(void) { return streams_playing(); }
+
 static int streams_playing(void) {
     for (snd_stream_t *s = streams; s; s = s->next)
         if (!s->paused && snd_stream_queued(s)) return 1;
@@ -291,6 +294,10 @@ void snd_mix(snddev_t *d, i16 *out, int frames) {
  * WAV file and checks both. The value "beep" runs the beep test in beep.c
  * instead. Never active on real hardware (fw_cfg exists only under QEMU). */
 extern volatile int gui_desktop_ready __attribute__((weak));
+/* the startup sound (sndevent.c) plays first: the test waits until it has
+ * finished and nothing else plays, so the recording holds it and then the
+ * tone and the beep, apart (at most 20 s, in case it never ends) */
+extern volatile int sound_startup_busy __attribute__((weak));
 enum { TS_OFF, TS_WAIT, TS_TONE, TS_GAP, TS_BEEP, TS_DONE };
 static int test_state;
 static u32 test_ms;
@@ -320,6 +327,8 @@ static void test_poll(void) {
     switch (test_state) {
     case TS_WAIT:
         if (&gui_desktop_ready && !gui_desktop_ready) return;
+        if (!test_t0) test_t0 = time_ms();
+        if (time_ms() - test_t0 < 20000 && ((&sound_startup_busy && sound_startup_busy) || streams_playing())) return;
         test_s = snd_stream_open(44100, 2, SND_S16, 200, "sound test", 0);
         if (!test_s) { kprintf("sound: test: cannot open a stream\n"); test_state = TS_DONE; return; }
         test_frames = (u64)test_ms * 44100 / 1000;

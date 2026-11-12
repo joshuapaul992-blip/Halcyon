@@ -3,6 +3,7 @@
 #include "core/lib.h"
 #include "core/mm.h"
 #include "fs/vfs.h"
+#include "sound/sound.h"
 
 typedef struct dlg { volatile int done; int result; char *buf; int bufsz; } dlg_t;
 
@@ -62,6 +63,9 @@ window_t *msgbox_window(const char *title, const char *text, int icon, int butto
         if (i == 0) { b->style |= WS_DEFAULT; w->focus = b; }
         if (ids[i] == ID_CANCEL || (n == 1)) b->style |= WS_CANCEL;
     }
+    /* the system sound for the icon (sound/sndevent.c; queued, never waits) */
+    sound_event(icon == ICON_ERROR ? SNDEV_ERROR : icon == ICON_WARNING ? SNDEV_WARNING :
+                icon == ICON_QUESTION ? SNDEV_QUESTION : SNDEV_INFO);
     return w;
 }
 
