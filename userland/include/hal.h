@@ -73,6 +73,8 @@ static inline int getcwd(char *buf, size_t n) { return (int)SC2(SYS_GETCWD, buf,
 static inline int chdir(const char *p) { return (int)SC1(SYS_CHDIR, p); }
 static inline int proclist(hal_procinfo_t *buf, int max) { return (int)SC2(SYS_PROCLIST, buf, max); }
 static inline int sysinfo(hal_sysinfo_t *si) { return (int)SC1(SYS_SYSINFO, si); }
+/* NVIDIA graphics identification (NVQ_* in sysabi.h; NVREPORT.EXE) */
+static inline long nv_query(int op, long arg, void *buf, size_t size) { return SC4(SYS_NV_QUERY, op, arg, buf, size); }
 void *sbrk(long incr);
 
 /* ---- threads (several per program; each has its own 1 MiB stack) ---- */

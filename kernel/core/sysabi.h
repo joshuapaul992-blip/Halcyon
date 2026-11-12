@@ -90,8 +90,36 @@ enum {
     SYS_SHELL_SETTING = 189,    /* (key, value or NULL, buf, size): read (value NULL: the length, E_NOENT)
                                    or set (value; "" removes it) one of Explorer's settings: keys
                                    "explorer.*", kept in SETTINGS.INI */
-    SYS_COUNT = 190
+    /* 196-199: graphics cards (drivers/nv/, M10) */
+    SYS_NV_QUERY = 196,         /* (NVQ_* op, arg, buf, size): what the NVIDIA identification found, for
+                                   NVREPORT.EXE; see NVQ_* below */
+    SYS_COUNT = 200
 };
+
+/* SYS_NV_QUERY operations. arg packs a card number and an index as gpu << 8 | index. */
+#define NVQ_COUNT    0          /* -> NVIDIA cards identified */
+#define NVQ_REPORT   1          /* (gpu, or -1 for the machine's display adapters) -> length of the text
+                                   (at most size bytes copied, no NUL) */
+#define NVQ_ROM      2          /* (gpu << 8 | source) -> size of that video BIOS copy (E_NOENT none,
+                                   E_INVAL past the last source) */
+#define NVQ_ROMNAME  3          /* (gpu << 8 | source) -> the source's short name ("PRAMIN", NUL-terminated) */
+#define NVQ_EDID     4          /* (gpu << 8 | n) -> connector number << 16 | EDID bytes of the card's
+                                   nth connector (E_NOENT no EDID, E_INVAL past the last) */
+#define NVQ_FBTEST   5          /* (test 0..NV_FBTESTS-1, hal_nvfbtest_t *, sizeof) -> 0: one frame buffer
+                                   speed test, about 0.2 s, drawing grey frames on the screen (repainted
+                                   after); E_NODEV without a frame buffer */
+#define NV_FBTESTS   6
+typedef struct hal_nvfbtest {
+    int test;                   /* 0 fill (rep stosq), 1 fill (32-bit stores), 2 RAM -> screen,
+                                   3 screen -> screen, 4 screen read, 5 RAM -> RAM */
+    int cache_type;             /* the frame buffer's page attribute: 1 write-combining, 0 / 7 uncached,
+                                   6 write-back, -1 unknown */
+    unsigned width, height, pitch, bpp;
+    unsigned long long frame_bytes;     /* pitch x height */
+    unsigned long long bytes, us;       /* moved in that time */
+    unsigned passes, sink;
+    char name[48];
+} hal_nvfbtest_t;
 
 /* SYS_SHM_OPEN flags */
 #define SHM_CREATE 0x01

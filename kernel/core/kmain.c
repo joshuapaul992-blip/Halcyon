@@ -36,6 +36,7 @@ void keyboard_settings_load(void) WEAK;
 void ntfs_settings_changed(void) WEAK;
 void sound_init(void) WEAK;
 void sound_settings_loaded(void) WEAK;
+void nv_init(void) WEAK;           /* drivers/nv/: NVIDIA GPU identification (M10a) */
 #define PROGRESS(p, m) do { if (splash_progress) splash_progress(p, m); } while (0)
 
 
@@ -87,6 +88,8 @@ void kmain(struct bootinfo *bi) {
     if (ntfs_settings_changed) ntfs_settings_changed();   /* internal NTFS disks the user allowed writing to */
     if (keyboard_settings_load) keyboard_settings_load();
     if (net_settings_loaded) net_settings_loaded();
+    /* after the settings (nv.disable=1 skips it), before BOOT.LOG is written */
+    if (nv_init) nv_init();
     /* sound after the settings: the saved volume applies from the first sound */
     if (sound_init && !(bf & BOOTF_NO_SOUND)) sound_init();
     else kprintf("sound: disabled by boot option\n");

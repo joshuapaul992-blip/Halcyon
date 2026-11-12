@@ -100,6 +100,57 @@ int mm_set_write_combining(u64 phys, u64 size) {
     return n > 0;
 }
 
+int mm_set_uncached(u64 phys, u64 size) {
+    if ((phys & 0x1FFFFF) || (size & 0x1FFFFF) || !size || phys + size < phys) return 0;
+    int n = 0;
+    for (u64 va = phys; va < phys + size; va += 0x200000) {
+        u64 i4 = (va >> 39) & 511, i3 = (va >> 30) & 511, i2 = (va >> 21) & 511;
+        if (!(pml4[i4] & PTE_P)) continue;
+        u64 *p3 = (u64 *)(uptr)(pml4[i4] & PTE_ADDR);
+        if (!(p3[i3] & PTE_P) || (p3[i3] & PTE_PS)) continue;
+        u64 *p2 = (u64 *)(uptr)(p3[i3] & PTE_ADDR);
+        if (!(p2[i2] & PTE_P) || !(p2[i2] & PTE_PS)) continue;
+        p2[i2] = (p2[i2] & ~(1ull << 12)) | PTE_PCD | PTE_PWT;     /* PAT entry 3: UC */
+        __asm__ volatile("invlpg (%0)" :: "r"(va) : "memory");
+        n++;
+    }
+    if (n) __asm__ volatile("wbinvd" ::: "memory");
+    return n > 0;
+}
+
+int mm_cache_type(u64 phys) {
+    u64 i4 = (phys >> 39) & 511, i3 = (phys >> 30) & 511, i2 = (phys >> 21) & 511;
+    if (!(pml4[i4] & PTE_P)) return -1;
+    u64 *p3 = (u64 *)(uptr)(pml4[i4] & PTE_ADDR);
+    if (!(p3[i3] & PTE_P) || (p3[i3] & PTE_PS)) return -1;
+    u64 *p2 = (u64 *)(uptr)(p3[i3] & PTE_ADDR);
+    u64 e = p2[i2];
+    if (!(e & PTE_P) || !(e & PTE_PS)) return -1;
+    int idx = ((e & PTE_PWT) ? 1 : 0) | ((e & PTE_PCD) ? 2 : 0) | ((e & (1ull << 12)) ? 4 : 0);
+    u32 a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    if (!(d & (1u << 16))) {                        /* no PAT: PCD / PWT alone */
+        static const u8 legacy[4] = { 6, 4, 7, 0 };
+        return legacy[idx & 3];
+    }
+    u32 lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x277));
+    u64 pat = (u64)hi << 32 | lo;
+    return (int)((pat >> (idx * 8)) & 7);
+}
+
+const char *mm_cache_type_str(int t) {
+    switch (t) {
+    case 0: return "uncached";
+    case 1: return "write-combining";
+    case 4: return "write-through";
+    case 5: return "write-protected";
+    case 6: return "write-back";
+    case 7: return "uncached (UC-)";
+    }
+    return "not mapped";
+}
+
 /* ---------------- heap ---------------- */
 #define HEAP_MAGIC 0x48454150u
 typedef struct hdr {

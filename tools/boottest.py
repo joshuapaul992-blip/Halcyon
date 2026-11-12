@@ -78,6 +78,14 @@ interrupts on, get a working interrupt:
           reaching GUIDEMO (press or release) and the desktop come back, the
           next click must reach it; started again, a key must end it, and
           the third time a mouse movement
+  nvfake  the NVIDIA identification's test hook (fw_cfg nvfake, nvrom, nvedid):
+          a simulated GTX 1070 without registers, its video BIOS a
+          Pascal-style image from tests/host/nvtest (PC-AT + EFI + NVIDIA
+          data images, DCB 4.1) and an EDID on its first connector; the
+          card and monitor must be logged, then NVREPORT.EXE /quiet runs and
+          C:\\HALCYON\\NVREPORT must hold REPORT.TXT (with the frame buffer
+          speed test), README.TXT, VBIOS_PROM.ROM and EDID0.BIN equal to
+          what was passed in (mtools on the host)
   recycle the Recycle Bin and drag and drop (QEMU fw_cfg recycletest, a kernel
           thread: kernel/apps/recycletest.c): on the FAT32 test disk a file
           goes to the bin and stays, another goes to the bin, its folder is
@@ -172,11 +180,11 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
           "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:bios:ac97+dusk", "xhci:uefi:hda+tide", "xhci:uefi:virtiosnd", "xhci:bios:audio",
-          "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:bios:recycle", "xhci:bios:saver",
+          "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:bios:recycle", "xhci:bios:saver", "xhci:uefi:nvfake",
           "xhci:uefi:install", "xhci:bios:install"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "help": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0,
-            "recycle": 0, "saver": 0}
+            "recycle": 0, "saver": 0, "nvfake": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -222,7 +230,8 @@ CHECKS = [
 BAD = ["CPU EXCEPTION", "KERNEL PANIC", "nested fault"]
 # variants that run a test program after boot: (program, its report prefix)
 PROGRAMS = {"user": ("SELFTEST.EXE", "selftest"), "help": ("HELP.EXE", "helptest"), "sock": ("SOCKTEST.EXE", "socktest"), "web": ("WEBTEST.EXE", "webtest"),
-            "net": ("NETTEST.EXE", "nettest"), "audio": ("SNDTEST.EXE", "sndtest"), "ntfsrw": ("NTFSTEST.EXE", "ntfstest")}
+            "net": ("NETTEST.EXE", "nettest"), "audio": ("SNDTEST.EXE", "sndtest"), "ntfsrw": ("NTFSTEST.EXE", "ntfstest"),
+            "nvfake": ("NVREPORT.EXE", "nvreport")}
 PROGRAM_TIMEOUT = {"net": 300}
 NET_LOSS_PCT = 3
 _netservers = None
@@ -1122,6 +1131,40 @@ RB_DELETED = b"This file waits in the Recycle Bin.\r\n"
 RB_RESTORED = b"This file came back from the Recycle Bin.\r\n"
 
 
+def make_nvfake():
+    """the test image and EDID from tests/host/nvtest (built if needed)"""
+    subprocess.run(["make", "-C", "tests/host", "../../build/hosttest/nvtest"], check=True, stdout=subprocess.DEVNULL)
+    rom = os.path.abspath(os.path.join(BUILD, "ci_nvrom.bin"))
+    edid = os.path.abspath(os.path.join(BUILD, "ci_nvedid.bin"))
+    subprocess.run([os.path.join(BUILD, "hosttest", "nvtest"), "--write-rom", rom], check=True)
+    subprocess.run([os.path.join(BUILD, "hosttest", "nvtest"), "--write-edid", edid], check=True)
+    return rom, edid
+
+
+def nvfake_failures(text, img, rom, edid):
+    fails = []
+    out = os.path.join(BUILD, "ci_nvreport")
+    subprocess.run(["rm", "-rf", out], check=True)
+    os.makedirs(out)
+    for name in ("REPORT.TXT", "README.TXT", "VBIOS_PROM.ROM", "EDID0.BIN"):
+        r = subprocess.run(["mcopy", "-n", "-i", img + "@@1M", "::/HALCYON/NVREPORT/" + name, os.path.join(out, name)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if r.returncode:
+            fails.append("NVREPORT/%s missing" % name)
+    for name, src in (("VBIOS_PROM.ROM", rom), ("EDID0.BIN", edid)):
+        p = os.path.join(out, name)
+        if os.path.exists(p) and open(p, "rb").read() != open(src, "rb").read():
+            fails.append("NVREPORT/%s differs from what was passed in" % name)
+    p = os.path.join(out, "REPORT.TXT")
+    if os.path.exists(p):
+        rep = open(p, errors="replace").read()
+        for want in ("Card 0: NVIDIA GeForce GTX 1070", "DCB 4.1", "HALCYON TEST", "1920x1200 at 60 Hz",
+                     "RAM to screen copy", "MB/s"):
+            if want not in rep:
+                fails.append("REPORT.TXT lacks '%s'" % want)
+    return fails
+
+
 def recycle_failures(text, sata, sata_x):
     """the Recycle Bin test's disks, checked on the host"""
     m = re.search(r"recycle test: done \((\d+) checks, (\d+) failed\)", text)
@@ -1224,6 +1267,14 @@ def run(cfg):
                   % ntfsrw_disk)
     if "recycle" in opts:
         extra += " -fw_cfg name=opt/halcyon/recycletest,string=1"
+    nvfake = None
+    if "nvfake" in opts:
+        nvfake = make_nvfake()
+        extra += (" -fw_cfg name=opt/halcyon/nvfake,string=0x134000a1,,0x1b81 -fw_cfg name=opt/halcyon/nvrom,file=%s"
+                  " -fw_cfg name=opt/halcyon/nvedid,file=%s" % nvfake)
+        checks.append(("simulated NVIDIA card", "nv0: NVIDIA GeForce GTX 1070: GP104 (chipset 134"))
+        checks.append(("its connectors", "nv0: connector 0: DisplayPort"))
+        checks.append(("its monitor", "HALCYON TEST, 1920x1200 at 60 Hz"))
     if flags:
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
     nic = next((v for v in opts if v in NICS), None)
@@ -1249,7 +1300,7 @@ def run(cfg):
         elif "audio" not in opts:       # (SNDTEST plays its own signal instead of the kernel's test)
             extra += " -fw_cfg name=opt/halcyon/soundtest,string=%d" % SOUND_TEST_MS
     prog = next((PROGRAMS[v] for v in opts if v in PROGRAMS), None)
-    prog_args = " --test notepad" if "help" in opts else ""
+    prog_args = " --test notepad" if "help" in opts else " /quiet" if "nvfake" in opts else ""
     ini_lines = []
     STARTUP_REF[0] = "DUSKSTRT.WAV" if "dusk" in opts else "TIDESTRT.WAV" if "tide" in opts else "STARTUP.WAV"
     for sch in ("dusk", "tide"):
@@ -1412,6 +1463,8 @@ def run(cfg):
         failures += ntfsrw_failures(text, ntfsrw_disk)
     if "recycle" in opts and not nvme:
         failures += recycle_failures(text, sata, sata_x)
+    if nvfake:
+        failures += nvfake_failures(text, img, *nvfake)
     if nic:
         failures += net_failures(text, nic, opts)
     if beep:

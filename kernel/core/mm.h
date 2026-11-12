@@ -35,5 +35,14 @@ struct mm_stats {
 void mm_get_stats(struct mm_stats *st);
 u64  mm_heap_free(void);          /* bytes not allocated (may be fragmented) */
 int  mm_set_write_combining(u64 phys, u64 size);   /* frame buffers; 1 if applied */
+/* Register BARs below 4 GiB: their 2 MiB pages become uncached in the page
+ * tables (PCD | PWT), whatever the MTRRs say. Only whole 2 MiB pages of an
+ * aligned range are changed; 1 if applied. */
+int  mm_set_uncached(u64 phys, u64 size);
+/* the page attribute (PAT) memory type of the page mapping phys: 0 UC,
+ * 1 WC, 4 WT, 5 WP, 6 WB, 7 UC-; -1 not mapped (the MTRRs may still make
+ * a WB page uncached) */
+int  mm_cache_type(u64 phys);
+const char *mm_cache_type_str(int type);           /* "write-combining" */
 
 #endif

@@ -1,5 +1,6 @@
 #!/bin/sh
-# Build and run the host tests: the keyboard layouts, the network stack
+# Build and run the host tests: the keyboard layouts, the NVIDIA
+# identification code (nvtest.c, fuzz_nv.c seeds), the network stack
 # (netsim: simulated computers on a simulated Ethernet, and the fuzzer's
 # seeds replayed), the USB HID report parser, the EDID / video mode choice,
 # the HD Audio codec layer (hdatest.c: synthetic codecs), Notepad's text
@@ -20,6 +21,11 @@ make --no-print-directory net > $out/netsim.log 2>&1 || { cat $out/netsim.log; e
 grep -E "MB/s|simulated,|checks, " $out/netsim.log | grep -v "^netsim: [a-z]*: " || true
 make --no-print-directory fuzz-net-regress > $out/fuzz_net.log 2>&1 || { cat $out/fuzz_net.log; exit 1; }
 tail -1 $out/fuzz_net.log
+# NVIDIA identification: chip table, VBIOS / DCB parser, I2C and AUX on simulated buses; the fuzzer's seeds
+make --no-print-directory nv > $out/nvtest.log 2>&1 || { cat $out/nvtest.log; exit 1; }
+tail -1 $out/nvtest.log
+make --no-print-directory fuzz-nv-regress > $out/fuzz_nv.log 2>&1 || { cat $out/fuzz_nv.log; exit 1; }
+tail -1 $out/fuzz_nv.log
 # Notepad's text model (word wrap) and undo engine
 make --no-print-directory notepad > $out/notepad.log 2>&1 || { cat $out/notepad.log; exit 1; }
 tail -1 $out/notepad.log

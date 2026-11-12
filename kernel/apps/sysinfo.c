@@ -14,6 +14,7 @@
 #include "net/netdev.h"
 #include "sound/snddev.h"
 #include "version.h"
+#include "drivers/nv/nv.h"
 
 blockdev_t *ahci_cd_get(int i) __attribute__((weak));   /* drivers/ahci.c */
 
@@ -40,10 +41,11 @@ typedef struct si {
     window_t *win;
 } si_t;
 
-enum { CAT_COMPUTER, CAT_DISPLAY, CAT_DISKS, CAT_VOLUMES, CAT_STORAGE, CAT_USB, CAT_INPUT, CAT_NET, CAT_SOUND, CAT_PCI, CAT_COUNT };
+enum { CAT_COMPUTER, CAT_DISPLAY, CAT_DISKS, CAT_VOLUMES, CAT_STORAGE, CAT_USB, CAT_INPUT, CAT_NET, CAT_SOUND, CAT_PCI,
+       CAT_NVIDIA, CAT_COUNT };
 static const char *cat_names[CAT_COUNT] = { "Computer", "Display adapters", "Disk drives", "Volumes", "Storage controllers",
                                             "Universal Serial Bus controllers", "Keyboards and pointing devices", "Network adapters",
-                                            "Sound devices", "PCI devices" };
+                                            "Sound devices", "PCI devices", "NVIDIA graphics" };
 
 static void add(si_t *s, int depth, int icon, int cat, const char *detail, const char *fmt, ...) __attribute__((format(printf, 6, 7)));
 static void add(si_t *s, int depth, int icon, int cat, const char *detail, const char *fmt, ...) {
@@ -56,6 +58,12 @@ static void add(si_t *s, int depth, int icon, int cat, const char *detail, const
     va_end(ap);
     r->detail = strdup(detail ? detail : r->text);
     r->live = 0;
+}
+
+/* a row of the NVIDIA section (drivers/nv/report.c) */
+static void nv_row(void *ctx, int depth, int hint, const char *detail, const char *text) {
+    static const int icons[] = { ICON_DISPLAY, ICON_DISPLAY, ICON_DISPLAY, ICON_WARNING };
+    add(ctx, depth, icons[hint >= 0 && hint < 4 ? hint : 0], CAT_NVIDIA, detail, "%s", text);
 }
 
 /* "Interrupts and CPU usage" row: text and detail */
@@ -160,6 +168,12 @@ static void build(si_t *s) {
     else
         snprintf(d, 2048, "The firmware did not report the monitor (no EDID).");
     add(s, 1, ICON_DISPLAY, CAT_DISPLAY, d, "%s", mname);
+
+    /* NVIDIA cards (drivers/nv/): only when there is one */
+    if (nv_count() > 0) {
+        add(s, 0, ICON_DISPLAY, CAT_NVIDIA, NULL, "%s", cat_names[CAT_NVIDIA]);
+        nv_sysinfo(nv_row, s);
+    }
 
     /* disks */
     add(s, 0, ICON_HDD, CAT_DISKS, NULL, "%s", cat_names[CAT_DISKS]);

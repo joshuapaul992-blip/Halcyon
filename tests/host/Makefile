@@ -199,6 +199,41 @@ $(OUT)/displaytest: displaytest.c $(ROOT)/kernel/drivers/edid.c $(ROOT)/kernel/d
 hid: $(OUT)/hidtest
 	$(OUT)/hidtest $(HIDARGS)
 
+# NVIDIA identification (kernel/drivers/nv/: chip table, VBIOS / DCB parser,
+# I2C and AUX engines; nvtest.c generates the images and simulates the buses)
+# and its fuzzer (fuzz_nv.c; seeds: every generated image layout)
+NVSRCS := $(addprefix $(ROOT)/kernel/drivers/nv/,chip.c vbios.c i2c.c) $(ROOT)/kernel/drivers/edid.c
+NVHDRS := $(ROOT)/kernel/drivers/nv/nvhw.h $(ROOT)/kernel/drivers/edid.h $(wildcard $(ROOT)/kernel/core/*.h)
+$(OUT)/nvtest: nvtest.c $(NVSRCS) $(NVHDRS) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) nvtest.c $(NVSRCS) -o $@
+
+nv: $(OUT)/nvtest
+	$(OUT)/nvtest $(NVARGS)
+
+$(OUT)/fuzz_nv: fuzz_nv.c $(NVSRCS) $(NVHDRS) Makefile
+	@mkdir -p $(OUT)
+	clang $(FUZZ_CFLAGS) fuzz_nv.c $(NVSRCS) -o $@
+
+$(OUT)/fuzz_nv_replay: fuzz_nv.c $(NVSRCS) $(NVHDRS) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) fuzz_nv.c $(NVSRCS) -o $@
+
+NVSEEDS := $(OUT)/fuzz_nv_seeds
+$(NVSEEDS)/.stamp: $(OUT)/nvtest
+	@rm -rf $(NVSEEDS) && mkdir -p $(NVSEEDS)
+	$(OUT)/nvtest --seeds $(NVSEEDS)
+	@touch $@
+
+fuzz-nv-run: $(OUT)/fuzz_nv $(NVSEEDS)/.stamp
+	@mkdir -p $(OUT)/fuzz_nv_corpus $(OUT)/fuzz_nv_crashes
+	cd $(OUT)/fuzz_nv_crashes && $(abspath $(OUT))/fuzz_nv $(abspath $(OUT))/fuzz_nv_corpus $(abspath $(NVSEEDS)) \
+	    -max_len=70000 -timeout=20 -rss_limit_mb=2048 -max_total_time=$(FUZZ_TIME) -fork=$(FUZZ_JOBS) \
+	    -ignore_crashes=1 -ignore_timeouts=1 -ignore_ooms=1 -print_final_stats=1 $(FUZZ_ARGS)
+
+fuzz-nv-regress: $(OUT)/fuzz_nv_replay $(NVSEEDS)/.stamp
+	$(OUT)/fuzz_nv_replay $(NVSEEDS) $(wildcard fuzz_nv_regress)
+
 HDASRCS := $(ROOT)/kernel/sound/drivers/hda_codec.c hdatest.c
 $(OUT)/hdatest: $(HDASRCS) $(ROOT)/kernel/sound/drivers/hda.h $(wildcard $(ROOT)/kernel/core/*.h) Makefile
 	@mkdir -p $(OUT)

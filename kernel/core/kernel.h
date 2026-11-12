@@ -40,6 +40,7 @@ extern void (*g_idle_hook)(void);
 
 u32  qemu_boot_flags(void);
 int  qemu_fw_file(const char *name, char *buf, int bufsz);   /* test hook: QEMU fw_cfg string */       /* test hook: extra BOOTF_* from QEMU fw_cfg */
+int  qemu_fw_blob(const char *name, void *buf, int bufsz);   /* test hook: QEMU fw_cfg bytes; size or -1 */
 
 void reboot(void);
 void shutdown(void);   /* ACPI-less: tries QEMU/Bochs/VirtualBox ports, then halts */

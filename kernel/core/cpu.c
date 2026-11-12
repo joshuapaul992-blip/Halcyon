@@ -332,6 +332,30 @@ int qemu_fw_file(const char *name, char *buf, int bufsz) {
     return 0;
 }
 
+/* contents of a QEMU fw_cfg file as bytes: its size (at most bufsz bytes
+ * are copied), or -1 if there is none */
+int qemu_fw_blob(const char *name, void *buf, int bufsz) {
+    u32 a, b, c, d;
+    cpuid(1, 0, &a, &b, &c, &d);
+    if (!(c & (1u << 31))) return -1;
+    u8 sig[4], hdr[64];
+    outw(0x510, 0x0000);
+    for (int i = 0; i < 4; i++) sig[i] = inb(0x511);
+    if (memcmp(sig, "QEMU", 4)) return -1;
+    outw(0x510, 0x0019);
+    for (int i = 0; i < 4; i++) hdr[i] = inb(0x511);
+    u32 n = be32(hdr);
+    for (u32 f = 0; f < n && f < 256; f++) {
+        for (int i = 0; i < 64; i++) hdr[i] = inb(0x511);
+        if (strcmp((char *)hdr + 8, name)) continue;
+        u32 size = be32(hdr);
+        outw(0x510, (u16)(hdr[4] << 8 | hdr[5]));
+        for (u32 i = 0; i < size && i < (u32)bufsz; i++) ((u8 *)buf)[i] = inb(0x511);
+        return (int)MIN(size, 0x7FFFFFFFu);
+    }
+    return -1;
+}
+
 u32 qemu_boot_flags(void) {
     char buf[24];
     return qemu_fw_file("opt/halcyon/bootflags", buf, sizeof buf) ? (u32)strtol(buf, NULL, 0) : 0;

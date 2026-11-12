@@ -24,6 +24,7 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __a
 long socket_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __attribute__((weak));   /* net/ */
 long sound_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __attribute__((weak));    /* sound/ */
 long shell_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __attribute__((weak));    /* apps/shellsys.c */
+long nv_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __attribute__((weak));       /* drivers/nv/ */
 
 /* ---- helpers ---- */
 
@@ -564,6 +565,8 @@ void syscall_dispatch(struct sysframe *f) {
             if (sound_syscall) r = sound_syscall((int)nr, a1, a2, a3, a4, a5, a6);
         } else if (nr >= SYS_RECYCLE_DELETE && nr <= SYS_SHELL_SETTING) {     /* the Recycle Bin, Explorer's settings */
             if (shell_syscall) r = shell_syscall((int)nr, a1, a2, a3, a4, a5, a6);
+        } else if (nr == SYS_NV_QUERY) {                                       /* drivers/nv/report.c */
+            if (nv_syscall) r = nv_syscall((int)nr, a1, a2, a3, a4, a5, a6);
         } else if (nr >= SYS_WIN_CREATE && nr < SYS_COUNT && usergui_syscall) {
             r = usergui_syscall((int)nr, a1, a2, a3, a4, a5, a6);
         }
