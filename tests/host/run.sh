@@ -29,6 +29,9 @@ tail -1 $out/fuzz_nv.log
 # NVIDIA modesetting (M10b): method streams, PLLs, DisplayPort, VBIOS scripts, the EVO channel on a simulated engine
 make --no-print-directory evo > $out/evotest.log 2>&1 || { cat $out/evotest.log; exit 1; }
 tail -1 $out/evotest.log
+# NVIDIA acceleration (M10e): PFIFO, page tables, the copy engine on a simulated GPU
+make --no-print-directory fifo > $out/fifotest.log 2>&1 || { cat $out/fifotest.log; exit 1; }
+tail -1 $out/fifotest.log
 # Notepad's text model (word wrap) and undo engine
 make --no-print-directory notepad > $out/notepad.log 2>&1 || { cat $out/notepad.log; exit 1; }
 tail -1 $out/notepad.log

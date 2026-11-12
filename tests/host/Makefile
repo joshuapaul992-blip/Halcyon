@@ -237,6 +237,16 @@ $(OUT)/evotest: evotest.c $(EVOSRCS) $(EVOHDRS) Makefile
 evo: $(OUT)/evotest
 	$(OUT)/evotest $(EVOARGS)
 
+# M10e: PFIFO, the GPU's page tables and the copy engine (fifo.c) against a
+# simulated PFIFO, MMU and copy engine (fifotest.c)
+FIFOSRCS := $(ROOT)/kernel/drivers/nv/fifo.c
+$(OUT)/fifotest: fifotest.c $(FIFOSRCS) $(ROOT)/kernel/drivers/nv/fifo.h $(NVHDRS) Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) fifotest.c $(FIFOSRCS) -o $@
+
+fifo: $(OUT)/fifotest
+	$(OUT)/fifotest $(FIFOARGS)
+
 $(OUT)/fuzz_nv: fuzz_nv.c $(NVSRCS) $(NVHDRS) Makefile
 	@mkdir -p $(OUT)
 	clang $(FUZZ_CFLAGS) fuzz_nv.c $(NVSRCS) -o $@
