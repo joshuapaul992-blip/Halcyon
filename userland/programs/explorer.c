@@ -52,6 +52,7 @@ typedef struct item {
     char letter, kind, is_boot, readonly;
     char fs[8], device[16];
     unsigned long long total, free;
+    unsigned vflags;                /* VOLF_* */
 } item_t;
 
 typedef struct link { hal_rect_t r; int id; } link_t;
@@ -98,6 +99,14 @@ static void rounded(int x, int y, int w, int h, int rad, int corners, unsigned t
 }
 static void rounded_outline(int x, int y, int w, int h, int rad, int corners, unsigned c) {
     gfx_shade(win, x, y, w, h, c, 0, SHADE_ROUNDED_OUTLINE, rad | (corners & 15) << 8);
+}
+/* a small padlock (14 x 17) over a read-only drive's icon */
+static void draw_lock(int x, int y) {
+    rounded_outline(x + 3, y, 8, 12, 4, 15, 0x505050);
+    rounded_outline(x + 4, y + 1, 6, 10, 3, 15, 0x909090);
+    rounded(x, y + 7, 14, 10, 2, 15, 0xFBE07A, 0xC8901C);
+    rounded_outline(x, y + 7, 14, 10, 2, 15, 0x8A6408);
+    gfx_fill(win, x + 6, y + 10, 2, 4, 0x5A4004);
 }
 static int in_rect(int x, int y, int w, int h, int px, int py) { return px >= x && py >= y && px < x + w && py < y + h; }
 
@@ -701,6 +710,7 @@ static void load(void) {
             it->kind = vi.kind;
             it->is_boot = vi.is_boot;
             it->readonly = vi.readonly;
+            it->vflags = vi.flags;
             strlcpy(it->fs, vi.fs, sizeof it->fs);
             strlcpy(it->device, vi.device, sizeof it->device);
             snprintf(it->name, sizeof it->name, "%s (%c:)", vi.label[0] ? vi.label : drive_kind(vi.kind), vi.letter);
@@ -956,8 +966,8 @@ static void paint_pane(void) {
         y = pane_box(y, pw, "Other Places", 3, l, ic, id);
     }
     /* details box */
-    char l1[MAX_NAME + 1], l2[64], l3[64], l4[64];
-    const char *lines[4] = { l1, l2, l3, l4 };
+    char l1[MAX_NAME + 1], l2[64], l3[64], l4[64], l5[64];
+    const char *lines[5] = { l1, l2, l3, l4, l5 };
     int k;
     if (sel >= 0 && sel < n) {
         item_t *it = &items[sel];
@@ -970,6 +980,7 @@ static void paint_pane(void) {
             snprintf(l3, sizeof l3, "Free Space: %s", a);
             snprintf(l4, sizeof l4, "Total Size: %s", b);
             k = 4;
+            if (it->readonly && it->kind != VOL_CDROM) { strlcpy(l5, "Read-only", sizeof l5); k = 5; }
         } else {
             strlcpy(l2, file_type_name(it->name, it->is_dir), sizeof l2);
             k = 2;
@@ -1064,6 +1075,7 @@ static void paint_view(void) {
             if (i == sel) rounded(r.x, r.y, r.w, r.h, 3, 15, lighten(th.select, 170), lighten(th.select, 140));
             else if (i == hover) rounded(r.x, r.y, r.w, r.h, 3, 15, lighten(th.select, 215), lighten(th.select, 200));
             gfx_icon(win, r.x + 6, r.y + 6, ICON48(it->icon));
+            if (it->readonly && it->kind != VOL_CDROM) draw_lock(r.x + 38, r.y + 36);
             gfx_text_box(win, r.x + 60, r.y + 4, r.w - 64, 16, it->name, 0x000000, FONT_UI_BOLD, 0);
             char a[32], b[32], line[80];
             format_size(it->free, a, sizeof a);
@@ -1396,6 +1408,147 @@ static void cmd_paste(void) {
     paint();
 }
 
+/* ---------------- drive properties ---------------- */
+enum { ID_DP_WRITE = 500, ID_DP_OK, ID_DP_CANCEL };
+
+static const char write_warning[] =
+    "Halcyon can write to this NTFS drive, but it is an internal disk with Windows on it.\n\n"
+    "- Writing to it from Halcyon could damage files that Windows needs. Keep backups of "
+    "everything important on it.\n"
+    "- Shut Windows down completely before you start Halcyon: with Fast Startup "
+    "(or hibernation) Windows keeps the drive in use, and Halcyon then keeps it read-only.\n\n"
+    "Do you want Halcyon to write to this drive?";
+
+typedef struct dprops {
+    int d, w, h;
+    hal_volinfo_t vi;
+    int bar_y, sep1, sep2, warn_y, icon;
+} dprops_t;
+
+static void dp_paint(const dprops_t *p) {
+    int d = p->d, W = p->w;
+    gfx_fill(d, 0, 0, W, p->h, th.face);
+    gfx_icon(d, 14, 12, p->icon);
+    for (int i = 0; i < 2; i++) {
+        int y = i ? p->sep2 : p->sep1;
+        gfx_line(d, 14, y, W - 15, y, 0xACA899);
+        gfx_line(d, 14, y + 1, W - 15, y + 1, 0xFFFFFF);
+    }
+    /* colour keys of the used / free lines, and the bar */
+    gfx_fill(d, 14, p->bar_y - 66, 12, 12, 0x0000FF);
+    gfx_rect(d, 14, p->bar_y - 66, 12, 12, 0x000000);
+    gfx_fill(d, 14, p->bar_y - 48, 12, 12, 0xFF00FF);
+    gfx_rect(d, 14, p->bar_y - 48, 12, 12, 0x000000);
+    int bw = W - 28;
+    int used = p->vi.total ? (int)((p->vi.total - p->vi.free_bytes) * (unsigned long long)(bw - 4) / p->vi.total) : 0;
+    gfx_bevel(d, 14, p->bar_y, bw, 16, 0);
+    gfx_fill(d, 16, p->bar_y + 2, bw - 4, 12, 0xFF00FF);
+    if (used > 0) gfx_fill(d, 16, p->bar_y + 2, MIN(used, bw - 4), 12, 0x0000FF);
+    if (p->warn_y) gfx_icon(d, 14, p->warn_y, HICON_WARNING);
+    win_invalidate(d);
+}
+
+static void dp_row(int d, int y, const char *k, const char *v) {
+    ctl_create(d, CTL_LABEL, 14, y, 96, 16, k, 0, 0);
+    ctl_create(d, CTL_LABEL, 112, y, 220, 16, v, 0, 0);
+}
+
+static void dp_size(int d, int y, const char *k, unsigned long long v) {
+    char a[48], b[48];
+    format_size_exact(v, a, sizeof a);
+    format_size(v, b, sizeof b);
+    ctl_create(d, CTL_LABEL, 34, y, 80, 16, k, 0, 0);
+    ctl_create(d, CTL_LABEL, 120, y, 140, 16, a, 0, 0);
+    ctl_create(d, CTL_LABEL, 262, y, 70, 16, b, 0, 0);
+}
+
+/* the General page of a drive's properties: type, file system, space, and
+ * for read-only drives why; NTFS drives on internal disks can be allowed
+ * writing here (hal_volinfo_t VOLF_WRITE_OPT) */
+static void drive_props(char letter, const char *model) {
+    dprops_t p;
+    memset(&p, 0, sizeof p);
+    if (volume_info(letter, &p.vi) < 0) return;
+    hal_volinfo_t *vi = &p.vi;
+    int ro = vi->readonly && vi->kind != VOL_CDROM, opt = (vi->flags & VOLF_WRITE_OPT) != 0;
+    int was = (vi->flags & VOLF_WRITE_OK) != 0;
+    p.w = 346;
+    p.h = 330 + (ro ? 72 : 0) + (opt ? 28 : 0);
+    p.icon = drive_icon(vi->kind);
+    char name[96], title[128], buf[128];
+    snprintf(name, sizeof name, "%s (%c:)", vi->label[0] ? vi->label : drive_kind(vi->kind), vi->letter);
+    snprintf(title, sizeof title, "%s Properties", name);
+    int d = win_create(title, p.w, p.h, WIN_DIALOG);
+    if (d < 0) return;
+    p.d = d;
+    win_set_icon(d, drive_icon(vi->kind));
+    ctl_create(d, CTL_LABEL, 62, 20, p.w - 76, 16, name, 0, CTL_BOLD);
+    p.sep1 = 54;
+    int y = 66;
+    dp_row(d, y, "Type:", drive_kind(vi->kind)); y += 20;
+    dp_row(d, y, "File system:", vi->fs[0] ? vi->fs : "?"); y += 20;
+    snprintf(buf, sizeof buf, "%s (%s)", model && model[0] ? model : "?", vi->device[0] ? vi->device : "?");
+    dp_row(d, y, "Device:", buf); y += 20;
+    if (vi->serial) {
+        snprintf(buf, sizeof buf, "%04X-%04X", (unsigned)(vi->serial >> 16) & 0xFFFF, (unsigned)vi->serial & 0xFFFF);
+        dp_row(d, y, "Serial number:", buf);
+    }
+    y += 26;
+    p.sep2 = y;
+    y += 12;
+    dp_size(d, y, "Used space:", vi->total - vi->free_bytes); y += 18;
+    dp_size(d, y, "Free space:", vi->free_bytes); y += 24;
+    dp_size(d, y, "Capacity:", vi->total); y += 26;
+    p.bar_y = y;
+    y += 28;
+    if (ro) {
+        p.warn_y = y;
+        ctl_create(d, CTL_LABEL, 56, y, p.w - 70, 16, "This drive is read-only.", 0, CTL_BOLD);
+        ctl_create(d, CTL_LABEL, 56, y + 16, p.w - 70, 54,
+                   vi->ro_reason[0] ? vi->ro_reason : "The file system is mounted read-only.", 0, CTL_WRAP);
+        y += 72;
+    }
+    if (opt) {
+        ctl_create(d, CTL_CHECKBOX, 14, y, p.w - 28, 18, "Allow Halcyon to write to this drive", ID_DP_WRITE, 0);
+        ctl_set_value(d, ID_DP_WRITE, was);
+    }
+    ctl_create(d, CTL_BUTTON, p.w - 2 * 83, p.h - 36, 75, 23, "OK", ID_DP_OK, CTL_DEFAULT);
+    ctl_create(d, CTL_BUTTON, p.w - 83, p.h - 36, 75, 23, "Cancel", ID_DP_CANCEL, CTL_CANCEL);
+    ctl_focus(d, ID_DP_OK);
+    win_set_owner(d, win, 1);
+    for (int done = 0; !done;) {
+        hal_event_t ev;
+        if (!win_get_event(&ev, -1)) continue;
+        if (ev.win != d) { passive_event(&ev); continue; }
+        if (ev.type == EVT_PAINT) dp_paint(&p);
+        else if (ev.type == EVT_CLOSE || (ev.type == EVT_KEY && ev.pressed && ev.id == KEY_ESC)) done = 1;
+        else if (ev.type == EVT_COMMAND && ev.id == ID_DP_CANCEL) done = 1;
+        else if (ev.type == EVT_COMMAND && ev.id == ID_DP_WRITE) {
+            /* ticking the box: say what it means first */
+            if (ctl_get_value(d, ID_DP_WRITE) &&
+                msgbox(d, "Allow Writing", write_warning, MBX_ICON_WARNING, MBX_YESNO) != IDR_YES)
+                ctl_set_value(d, ID_DP_WRITE, 0);
+        } else if ((ev.type == EVT_COMMAND && ev.id == ID_DP_OK) ||
+                   (ev.type == EVT_KEY && ev.pressed && (ev.id == KEY_ENTER || ev.id == KEY_KP_ENTER))) {
+            int want = opt ? ctl_get_value(d, ID_DP_WRITE) != 0 : was;
+            done = 1;
+            if (want != was) {
+                int r = volume_set_write(letter, want);
+                if (r < 0) {
+                    char msg[300];
+                    snprintf(msg, sizeof msg, "The setting could not be changed.\n\n%s",
+                             r == E_BUSY ? "Files on the drive are open. Close them (and any window showing the "
+                                           "drive's files from a program), then try again." : errstr(r));
+                    msgbox(d, "Drive Properties", msg, MBX_ICON_WARNING, MBX_OK);
+                    if (r == E_BUSY) done = 0;
+                }
+            }
+        }
+    }
+    win_destroy(d);
+    load();             /* (the read-only state and free space may have changed) */
+}
+
 static void cmd_props(void) {
     char msg[1100], sz[48], szx[48], tm[48], ct[48];
     if (sel < 0) {
@@ -1411,16 +1564,7 @@ static void cmd_props(void) {
     memset(&x, 0, sizeof x);
     int have = stat_ex(p, &x) == 0;
     if (!path[0]) {
-        hal_volinfo_t vi;
-        if (volume_info(it->letter, &vi) == 0) { it->total = vi.total; it->free = vi.free_bytes; }
-        char used[48], fr[48], tot[48];
-        format_size(it->total - it->free, used, sizeof used);
-        format_size(it->free, fr, sizeof fr);
-        format_size(it->total, tot, sizeof tot);
-        snprintf(msg, sizeof msg, "%s\n\nType: %s\nFile system: %s\nDevice: %s (%s)\n\nUsed space: %s\nFree space: %s\nCapacity: %s",
-                 it->name, drive_kind(it->kind), it->fs[0] ? it->fs : "?", have && x.model[0] ? x.model : "?",
-                 it->device[0] ? it->device : "?", used, fr, tot);
-        info_box("Disk Properties", msg, it->icon);
+        drive_props(it->letter, have ? x.model : "");
         return;
     }
     hal_dirent_t *st = &x.d;

@@ -47,9 +47,13 @@ enum {
      *           internet stack (interfaces, configuration, name lookup),
      *           128 SYS_GETRANDOM, 129-139 free
      *   160     SYS_WIN_CANVAS: the window's pixels mapped into the program
+     *   164     SYS_VOLUME_SET_WRITE: drive properties (core/syscall.c)
      *   168-169 Explorer: built-in shell tools, file details (core/syscall.c) */
     SYS_WIN_CANVAS = 160,
     SYS_DATETIME = 161, SYS_VOLUME_INFO, SYS_VFS_GENERATION,
+    SYS_VOLUME_SET_WRITE = 164, /* (drive, allow): allow Halcyon to write to an NTFS volume on an
+                                   internal disk (VOLF_WRITE_OPT) or take it back; saved in SETTINGS.INI,
+                                   and the volume is mounted again (E_BUSY while files are open on it) */
     SYS_GETRANDOM = 128,        /* (buf, len <= 65536): cryptographically strong bytes */
     SYS_SHELL_APP = 168, SYS_STAT_EX,
     SYS_SOUND_FIRST = 140, SYS_SOUND_LAST = 151,
@@ -75,12 +79,21 @@ typedef struct hal_datetime {
 /* SYS_VOLUME_INFO */
 enum { VOL_HDD = 0, VOL_REMOVABLE, VOL_CDROM, VOL_FLOPPY };
 typedef struct hal_volinfo {
-    char letter, kind, is_boot, readonly;
-    char label[16];
-    char fs[8];               /* "FAT32", "exFAT", "ISO9660" */
+    char letter, kind, is_boot, readonly;   /* readonly: nothing on it can be changed (VOLF_* say why) */
+    char label[64];           /* UTF-8, up to 32 characters (NTFS) */
+    char fs[8];               /* "FAT32", "exFAT", "ISO9660", "NTFS" */
     char device[16];          /* "sata0p1", "usb0", "cd0" */
     unsigned long long total, free_bytes;
+    unsigned long long serial;    /* the volume's serial number, 0 = none */
+    unsigned int flags;           /* VOLF_* */
+    unsigned int pad;
+    char ro_reason[128];          /* why it is read-only, "" if writable or not known */
 } hal_volinfo_t;
+#define VOLF_DEVICE_RO   0x01     /* the device is write-protected (or a CD) */
+#define VOLF_FS_RO       0x02     /* the file system driver mounted it read-only (ro_reason) */
+#define VOLF_WRITE_OPT   0x04     /* NTFS on an internal disk: writing needs the user's permission,
+                                     which SYS_VOLUME_SET_WRITE gives or takes back */
+#define VOLF_WRITE_OK    0x08     /* ... and the user has allowed it (SETTINGS.INI ntfs.write.<serial>) */
 
 /* SYS_SHELL_APP: open one of the shell's built-in tools (does not wait) */
 enum { SHELL_APP_TERMINAL = 1,   /* Command Prompt; arg: its folder, or NULL */

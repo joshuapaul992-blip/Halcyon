@@ -57,14 +57,17 @@ typedef struct fs_ops fs_ops_t;
 
 struct volume {
     char letter;                   /* 'C' ... 'Z' */
-    char label[100];               /* volume label (UTF-8), trimmed ("HALCYON") or "" (NTFS: up to 32 characters) */
-    char fs_name[8];               /* "FAT12" / "FAT16" / "FAT32" */
+    char label[64];                /* volume label (UTF-8, up to 32 characters on NTFS), trimmed, or "" */
+    char fs_name[8];               /* "FAT12" / "FAT16" / "FAT32" / "exFAT" / "ISO9660" / "NTFS" */
     blockdev_t *bd;                /* partition or whole disk */
     const fs_ops_t *ops;
     void *fs_priv;
     u8 alive;                      /* cleared on unmount; stale handles fail with E_NODEV */
     u8 is_boot;
     u8 readonly;                   /* mounted read-only by the driver: every change fails with E_ROFS */
+    u8 ro_policy;                  /* read-only only because writing needs the user's permission
+                                      (NTFS: an internal disk with Windows on it, no ntfs.write.<serial>
+                                      in SETTINGS.INI): Explorer then offers "Allow Halcyon to write" */
     u32 open_files;
     char ro_reason[128];           /* why it is read-only, for Explorer ("" if writable or unknown) */
     u64 serial;                    /* the volume's serial number (0 = none), e.g. for per-volume settings */
@@ -136,9 +139,11 @@ int  vfs_sync_all(void);
 int  vfs_remount(char letter);
 
 /* Quick-format bd (a partition, or a disk without a partition table) with
- * fs = "FAT" (automatic), "FAT12", "FAT16", "FAT32" or "exFAT", and mount it
- * again (with its old drive letter). Refuses the boot volume, volumes with
- * open files and partitioned disks (E_BUSY). cluster_bytes 0 = default. */
+ * fs = "FAT" (automatic), "FAT12", "FAT16", "FAT32", "exFAT" or "NTFS", and
+ * mount it again (with its old drive letter; if no driver can mount the new
+ * file system it still returns 0, and no volume appears). Refuses the boot
+ * volume, volumes with open files and partitioned disks (E_BUSY).
+ * cluster_bytes 0 = default. */
 int  vfs_format(blockdev_t *bd, const char *fs, const char *label, u32 cluster_bytes);
 
 /* convenience: read a whole file into a NUL-terminated heap buffer */

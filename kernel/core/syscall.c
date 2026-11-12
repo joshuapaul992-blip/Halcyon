@@ -276,13 +276,40 @@ static long sys_volume_info(u64 letter, u64 uinfo) {
     int ic = drive_icon(v);
     vi.kind = ic == ICON_USBDRIVE ? VOL_REMOVABLE : ic == ICON_CDROM ? VOL_CDROM : ic == ICON_FLOPPY ? VOL_FLOPPY : VOL_HDD;
     vi.is_boot = (char)v->is_boot;
-    vi.readonly = (char)(v->bd && v->bd->readonly);
+    vi.readonly = (char)((v->bd && v->bd->readonly) || v->readonly);
     strlcpy(vi.label, v->label, sizeof vi.label);
     strlcpy(vi.fs, v->fs_name, sizeof vi.fs);
     if (v->bd) strlcpy(vi.device, v->bd->name, sizeof vi.device);
+    vi.serial = v->serial;
+    if (v->bd && v->bd->readonly) vi.flags |= VOLF_DEVICE_RO;
+    if (v->readonly) vi.flags |= VOLF_FS_RO;
+    if (volume_write_option(v)) vi.flags |= VOLF_WRITE_OPT | (volume_write_allowed(v) ? VOLF_WRITE_OK : 0);
+    if (v->readonly) strlcpy(vi.ro_reason, v->ro_reason, sizeof vi.ro_reason);
+    else if (v->bd && v->bd->readonly)
+        strlcpy(vi.ro_reason, ic == ICON_CDROM ? "CDs and DVDs cannot be written to." : "The disk is write-protected.",
+                sizeof vi.ro_reason);
     u64 total = 0, freeb = 0;
     if (!vfs_statfs(v->letter, &total, &freeb)) { vi.total = total; vi.free_bytes = freeb; }
     return copyout(uinfo, &vi, sizeof vi) ? E_INVAL : 0;
+}
+
+/* SYS_VOLUME_SET_WRITE: on the GUI thread (SETTINGS.INI is the shell's) */
+typedef struct { char letter; int allow; volatile int done; int result; } setwrite_job_t;
+static void job_set_write(void *a) {
+    setwrite_job_t *j = a;
+    j->result = volume_set_write(j->letter, j->allow);
+    j->done = 1;
+}
+static long sys_volume_set_write(u64 letter, u64 allow) {
+    setwrite_job_t *j = kzalloc(sizeof *j);
+    if (!j) return E_NOMEM;
+    j->letter = (char)toupper((int)(letter & 0x7F));
+    j->allow = allow != 0;
+    gui_post(job_set_write, j);
+    while (!j->done) thread_sleep_ms(10);
+    long r = j->result;
+    kfree(j);
+    return r;
 }
 
 static long sys_volumes(u64 ubuf, int max) {
@@ -421,6 +448,7 @@ void syscall_dispatch(struct sysframe *f) {
         break;
     }
     case SYS_VOLUME_INFO: r = sys_volume_info(a1, a2); break;
+    case SYS_VOLUME_SET_WRITE: r = sys_volume_set_write(a1, a2); break;
     case SYS_VFS_GENERATION: r = vfs_generation(); break;
     case SYS_GETRANDOM: {
         u8 tmp[256];

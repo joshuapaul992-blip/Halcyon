@@ -35,6 +35,19 @@ void format_size_exact(u64 bytes, char *out, int outsz);     /* "1,572,864 bytes
 void format_time(const vfs_time_t *t, char *out, int outsz); /* "11/11/2026 7:23 AM" */
 int  drive_icon(volume_t *v);
 const char *drive_kind(volume_t *v);                         /* "Local Disk", "Removable Disk" */
+
+/* driveprops.c: "Allow Halcyon to write to this drive" (NTFS on internal
+ * disks). The key in SETTINGS.INI is ntfs.write.<serial, 16 uppercase hex
+ * digits> = 1. volume_write_option: the volume offers the choice (the
+ * driver set ro_policy, or writing is allowed already). volume_set_write
+ * saves the choice and mounts the volume again: 0, E_BUSY (open files; then
+ * nothing changes), E_NOTSUP (no such choice for this volume), or a mount
+ * error. */
+void ntfs_write_key(u64 serial, char *out, size_t n);
+int  volume_write_allowed(const volume_t *v);
+int  volume_write_option(const volume_t *v);
+int  volume_set_write(char letter, int allow);
+const char *volume_write_warning(void);
 int  is_text_file(const char *name);
 
 #endif

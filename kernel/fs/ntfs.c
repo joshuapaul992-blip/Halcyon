@@ -1853,6 +1853,7 @@ void ntfs_settings_changed(void) {
         if (fs->ro == NT_RO_INTERNAL && internal_allowed(fs)) {
             fs->ro = NT_RO_NONE;
             v->readonly = 0;
+            v->ro_policy = 0;
             v->ro_reason[0] = 0;
             kprintf("ntfs: %c: writing allowed by the settings\n", v->letter);
         }
@@ -2146,6 +2147,7 @@ int ntfs_probe(blockdev_t *bd, volume_t *v) {
     if (!bd->removable && has_windows(fs) && !internal_allowed(fs)) set_ro(fs, NT_RO_INTERNAL);
     if (fs->corrupt) set_ro(fs, NT_RO_CHECK);
     v->readonly = fs->ro != NT_RO_NONE;
+    v->ro_policy = fs->ro == NT_RO_INTERNAL;
     strlcpy(v->ro_reason, ro_text[fs->ro], sizeof v->ro_reason);
 
     v->ops = &ntfs_ops;
@@ -2162,6 +2164,7 @@ bad:
     }
 fail:
     v->readonly = 0;
+    v->ro_policy = 0;
     v->ro_reason[0] = 0;
     fs_free(fs);
     return r;

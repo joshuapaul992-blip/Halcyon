@@ -48,6 +48,12 @@ interrupts on, get a working interrupt:
   fwvideo no display adapter driver (boot flag): the firmware frame buffer only
   switch  switch the display mode to 1600 x 900 once the desktop is up (QEMU
           fw_cfg test hook; needs the live QEMU/Bochs display driver)
+  ntfs    a blank 256 MiB SATA disk (model NTFSTEST, one MBR partition of
+          type 0x0C) that the kernel's format test hook (fw_cfg formattest)
+          formats as NTFS with 4 KiB clusters through vfs_format once the
+          desktop is up; afterwards the partition table must say 0x07 and the
+          partition must pass ntfsfix -n, ntfsinfo -m (label, cluster size)
+          and tests/host/ntfs_tool.py check on the host (ntfs-3g tools)
   cd      also an AHCI CD-ROM drive with an ISO 9660 + Joliet test disc
           (built with xorriso): the disc must mount, and after the desktop is
           up the disc is ejected and another one inserted through the QEMU
@@ -125,9 +131,9 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
           "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:uefi:virtiosnd", "xhci:bios:audio",
-          "xhci:uefi:hda"]
+          "xhci:uefi:hda", "xhci:bios:ntfs"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
-            "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0}
+            "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -498,6 +504,53 @@ def beep_failures(text, snd, wav):
     return fails
 
 
+NTFS_LABEL = "Halcyon_NTFS"
+NTFS_PART = (2048, 522240)          # start, sectors of the scratch disk's partition
+
+
+def make_ntfs_disk():
+    """a blank 256 MiB disk with one (unformatted) FAT32-type partition"""
+    disk = os.path.join(BUILD, "ci_ntfs.img")
+    if os.path.exists(disk):
+        os.remove(disk)
+    with open(disk, "wb") as f:
+        f.truncate(256 << 20)
+    subprocess.run(["sfdisk", "-q", disk], input="start=%d, size=%d, type=c\n" % NTFS_PART, text=True,
+                   check=True, stdout=subprocess.DEVNULL)
+    return disk
+
+
+def ntfs_failures(text, disk):
+    """the format test hook's volume, checked on the host"""
+    if "format test: " not in text:
+        return ["format test did not run"]
+    line = [l for l in text.splitlines() if "format test: " in l][0]
+    if "as NTFS '%s': done" % NTFS_LABEL not in line:
+        return ["format test: %s" % line.strip()]
+    fails = []
+    with open(disk, "rb") as f:
+        mbr = f.read(512)
+    if mbr[0x1BE + 4] != 0x07:
+        fails.append("partition type 0x%02x, not 0x07" % mbr[0x1BE + 4])
+    part = os.path.join(BUILD, "ci_ntfs_part.img")
+    subprocess.run(["dd", "if=" + disk, "of=" + part, "bs=512", "skip=%d" % NTFS_PART[0],
+                    "count=%d" % NTFS_PART[1], "conv=sparse", "status=none"], check=True)
+    if subprocess.run(["sh", "-c", "command -v ntfsfix && command -v ntfsinfo"], stdout=subprocess.DEVNULL).returncode:
+        print("    (ntfs-3g tools missing: the NTFS volume was not checked)")
+        return fails
+    r = subprocess.run(["ntfsfix", "-n", part], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if r.returncode or "processed successfully" not in r.stdout:
+        fails.append("ntfsfix -n: " + r.stdout.strip().splitlines()[-1])
+    r = subprocess.run(["ntfsinfo", "-m", part], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if r.returncode or "Volume Name: %s\n" % NTFS_LABEL not in r.stdout or "Cluster Size: 4096" not in r.stdout:
+        fails.append("ntfsinfo -m: label or cluster size")
+    r = subprocess.run([sys.executable, "tests/host/ntfs_tool.py", part, "check"], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True)
+    if r.returncode:
+        fails.append("ntfs_tool.py check: " + r.stdout.strip().splitlines()[0])
+    return fails
+
+
 def run(cfg):
     parts = cfg.split(":")
     hc, fw = parts[0], parts[1]
@@ -534,6 +587,14 @@ def run(cfg):
         sata_x = os.path.join(BUILD, "ci_sata_exfat.img")
         subprocess.run(["cp", os.path.join(BUILD, "exfat.img"), sata_x], check=True)
         extra += " -drive if=none,id=d1,format=raw,file=%s -device ide-hd,drive=d1,bus=ide.2" % sata_x
+    ntfs_disk = None
+    if "ntfs" in opts:
+        ntfs_disk = make_ntfs_disk()
+        spec = os.path.abspath(os.path.join(BUILD, "ci_formattest.txt"))     # (run.sh splits EXTRA at spaces)
+        with open(spec, "w") as f:
+            f.write("NTFSTEST NTFS %s 4096" % NTFS_LABEL)
+        extra += (" -drive if=none,id=d3,format=raw,file=%s -device ide-hd,drive=d3,bus=ide.3,model=NTFSTEST"
+                  " -fw_cfg name=opt/halcyon/formattest,file=%s" % (ntfs_disk, spec))
     if flags:
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
     nic = next((v for v in opts if v in NICS), None)
@@ -653,6 +714,11 @@ def run(cfg):
         while time.time() - t1 < 30 and p.poll() is None and done not in text:
             time.sleep(0.5)
             text = open(log, errors="replace").read()
+    if ntfs_disk:
+        t1 = time.time()
+        while time.time() - t1 < 30 and p.poll() is None and "format test: " not in text:
+            time.sleep(0.5)
+            text = open(log, errors="replace").read()
     idle = None
     if p.poll() is None and "gui: desktop ready" in text and not prog:
         time.sleep(2)
@@ -690,6 +756,8 @@ def run(cfg):
             failures.append("CD volume")
         failures += cd_fails
     failures += kbd_fails
+    if ntfs_disk:
+        failures += ntfs_failures(text, ntfs_disk)
     if nic:
         failures += net_failures(text, nic, opts)
     if beep:

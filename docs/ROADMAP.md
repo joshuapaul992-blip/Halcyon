@@ -354,3 +354,286 @@ install and keep using. No new big features: finishing, fixing and testing.
 **Recommended order:** 5 → 9 → 6 → 7 → 7.5 → 8 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17
 (Mesa, M15, comes after the Linux layer, M13, which it runs on; Firefox, M14,
 does not need it.)
+
+## Halcyon 1.1
+
+After 1.0 RTM the version becomes 1.1.<build> (`major_minor` in
+tools/mkversion.sh), and pre-release builds show the watermark again. 1.1
+starts with newer graphics: the generations that M10 and M12 stop short of, up
+to 2020, the year NVIDIA's Ampere came out.
+
+### M18: NVIDIA Turing and Ampere
+
+Generations: Turing (TU102/104/106: RTX 20 series; TU116/117: GTX 16 series;
+2018-2019) and Ampere (GA102/103/104/106/107: RTX 30 series, 2020-2021).
+GA100 is a compute-only chip with no display and is not covered.
+
+- **Display:** Turing and Ampere use the newer display engine (NVDisplay, from
+  Volta on) instead of M10's EVO: the same idea of a command channel to the
+  display, with different channel classes, memory-based notifiers and a new
+  output and clock setup per generation. The M10 features follow: native
+  modes, resolution switching without a reboot, several monitors, hardware
+  cursor, page flips; DisplayPort 1.4 and HDMI 2.0/2.1 links (link training,
+  DSC on high-resolution monitors where needed).
+- **Firmware:** both generations have a GPU System Processor (GSP, a RISC-V
+  core). NVIDIA publishes its firmware (GSP-RM) in linux-firmware under a
+  license that allows redistribution; with it, the GPU's initialisation,
+  power management and engine setup are done by the GSP, and the driver
+  talks to it through a message queue. This is how Turing and Ampere get full
+  clock speeds, unlike Pascal in M10. Modesetting is attempted without the
+  firmware first (as nouveau did before GSP); acceleration and clocks need
+  it. The firmware is large (tens of MB per generation), so it lives in a
+  separate firmware pack on the image or the disk, not in the kernel.
+- **Sources:** NVIDIA's open GPU kernel modules (released under MIT and GPLv2:
+  the MIT terms allow porting, with copyright notices kept), open-gpu-doc,
+  envytools and nouveau (MIT).
+- **3D:** M15's approach extended: the nouveau DRM interface on top of the
+  GSP-based driver, and Mesa on top. Vulkan through NVK is at its best on
+  Turing and later, so these cards become the preferred ones for Xenithium
+  (M16) and Firefox's GPU rendering.
+- **Testing:** no test card at hand yet (the GTX 1070 is Pascal); VFIO
+  passthrough or bare metal, with `BOOT.LOG` reports from testers.
+- Depends on M10 (identification, the display framework) and, for 3D, M15.
+
+### M19: Intel and AMD graphics up to 2020
+
+M12's range carried forward to the same point in time.
+
+- **Intel:**
+  - Gen11 (Ice Lake, 2019; Jasper Lake and Elkhart Lake) and Gen12 / Xe-LP
+    (Tiger Lake 2020, Rocket Lake 2021, Iris Xe MAX "DG1" as the first Intel
+    discrete GPU).
+  - The display engine changed a lot: Type-C ports with DisplayPort Alt Mode
+    and Thunderbolt (a handshake with the Type-C subsystem before a port can
+    be used), new combo PHYs, the display state buffer, and power wells that
+    the display microcontroller (DMC) firmware manages in low-power states
+    (redistributable, in linux-firmware).
+  - Intel still publishes programmer's reference manuals for these
+    generations.
+- **AMD:**
+  - Vega (Vega 56/64 and Radeon VII, and the Raven Ridge, Picasso and Renoir
+    APUs, 2017-2020), RDNA1 (Navi 10/14: RX 5000, 2019) and RDNA2 (Navi
+    21-23: RX 6000, November 2020: two months after Ampere, the same
+    generation).
+  - These are the cards M12 deferred: their platform security processor
+    (PSP) must first load AMD's signed firmware (system management unit,
+    display microcontroller DMCUB, and others; redistributable, in
+    linux-firmware), and their display code (DCN 1.0 to 3.0) is very large.
+    The amdgpu driver's display core is MIT-licensed; porting the needed
+    parts, rather than writing DCN from scratch, is the realistic path.
+- **3D on both:** as for NVIDIA: the Linux DRM interfaces (i915 or amdgpu)
+  behind Halcyon's drivers and Mesa's drivers on top (iris and ANV for
+  Intel, radeonsi and RADV for AMD), on M13.
+- **Testing:** AMD through VFIO passthrough; Intel on laptops and NUCs (bare
+  metal).
+- Depends on M12 and, for 3D, M13 and M15.
+
+### M20: Several processor cores (SMP)
+
+Halcyon runs on one core today, under one big kernel lock. Firefox (M14) and
+Roblox (M16) are heavily multi-threaded, so this is the biggest performance
+step of 1.1.
+
+- Start the other cores (ACPI MADT, INIT/SIPI), per-core GDT/TSS, local APIC
+  timers and idle; a scheduler with per-core run queues, load balancing and
+  core affinity for user threads.
+- Replace the big kernel lock step by step with finer locks (memory, VFS and
+  block layer, network stack, GUI, sound), so that system calls on different
+  cores run in parallel; TLB shootdowns for shared address spaces.
+- Interrupts spread over cores (MSI-X vectors per core for NICs and NVMe).
+- Tests: the whole CI matrix with 2, 4 and 8 virtual CPUs, stress tests for
+  races (many threads in many programs), and lock-order checking in debug
+  builds.
+- Could move before 1.0 if M14 or M16 turn out too slow on one core.
+
+### M21: ACPI and power management
+
+- An ACPI AML interpreter: the namespace and methods of the firmware's DSDT and
+  SSDTs. With it: PCI interrupt routing from `_PRT` (replacing M2's learned
+  routes), proper power-off and restart on every machine, and the devices
+  ACPI describes.
+- Laptops: battery level and charging (a battery icon in the tray, warnings,
+  the "critical battery" sound M7 left out), the lid switch, the power and
+  sleep buttons, screen brightness keys.
+- Sleep (S3, suspend to RAM) and resume: every driver saves and restores its
+  device; a "Stand By" choice next to Turn Off. Hibernation (S4) later.
+- CPU frequency and power states (P-states, C-states; Intel HWP and AMD CPPC),
+  thermal zones and fan control through ACPI.
+- Depends on M20 for per-core power states.
+
+### M22: Wi-Fi and Bluetooth
+
+- Wi-Fi: Intel Wi-Fi 5/6 adapters (the most common in laptops and desktops
+  with Wi-Fi; they need Intel's redistributable firmware) and a common USB
+  Wi-Fi stick family (Realtek or MediaTek); scanning, WPA2-Personal and
+  WPA3-Personal (SAE), a "Wireless Network Connection" list in the tray and in
+  Network Connections, saved networks.
+- Bluetooth: USB and on-board controllers (HCI), pairing (Secure Simple
+  Pairing), keyboards and mice (HID), game controllers, and headphones (A2DP
+  audio through M7's mixer).
+- Tests: QEMU has no Wi-Fi adapter; the WPA handshake and the 802.11 frame
+  handling get host tests against recorded and generated traffic, the drivers
+  real hardware.
+
+### M23: Networking 2: IPv6 and Windows file sharing
+
+- IPv6 (M6 left it out; DESIGN-M6 lists what it needs): addresses through
+  SLAAC and DHCPv6, neighbour discovery, dual-stack sockets and name lookup
+  (AAAA), privacy addresses, IPv6 in Firefox and the browser.
+- Windows file sharing: an SMB 2/3 client, so that "My Network Places" in
+  Explorer shows shared folders on Windows PCs and NAS boxes, with copying
+  and opening files in place; NTLMv2 sign-in, signing and encryption.
+- Local name discovery (mDNS / LLMNR), so other computers show up by name.
+- A firewall for incoming connections (on by default), now that Halcyon has
+  servers and shares.
+
+### M24: USB and devices 2
+
+- Isochronous USB transfers (left out since M1): USB audio devices (headsets,
+  DACs, microphones) and webcams (USB Video Class).
+- Game controllers: Xbox (XInput, wired and the wireless adapter),
+  PlayStation (DualShock 4, DualSense) and generic HID gamepads, with a
+  controller API for programs and Xenithium (M16).
+- USB Attached SCSI (UASP) for fast external disks, USB 3.2 and USB-C details
+  (the xHCI driver's newer features), Thunderbolt 3/4 and USB4 docks at least
+  as far as their USB and display parts go.
+- Printers: IPP Everywhere over the network and over USB, with a print dialog
+  for Notepad, Paint and the browser.
+
+### M25: Media 2: recording, codecs and video
+
+- Recording: microphone input on HD Audio, AC'97 and USB audio, a Sound
+  Recorder, and capture streams in the sound system calls.
+- Codecs written for Halcyon or vendored under permissive licences: MP3, AAC,
+  FLAC, Ogg Vorbis and Opus in Media Player and for programs.
+- Video playback: H.264 and VP9 (and AV1 where fast enough) decoded in
+  software, using the cores from M20; hardware decoding on the M18/M19 GPUs
+  later. Media Player plays video files; the browser's own decoder stays for
+  Firefox to provide.
+- A webcam viewer for M24's cameras.
+
+### M26: Disks 2: Disk Management and Linux disks
+
+- Disk Management: list disks and partitions (MBR and GPT), create, delete,
+  format, resize (FAT, exFAT, NTFS) and label partitions, with clear warnings.
+- Check Disk for FAT, exFAT and NTFS: find and repair the inconsistencies a
+  crash or a pulled USB stick leaves.
+- Linux disks: ext4 read and write (journal replayed or refused like NTFS's),
+  so dual-boot machines can share files both ways.
+- The installer (M8, M17) uses Disk Management to make room next to Windows
+  or Linux.
+
+### M27: Release: Halcyon 1.1 RTM
+
+As M17 for 1.0: no new big features, finishing, fixing and testing.
+
+- Feature freeze, release candidates from a release branch, the full CI and
+  a hardware matrix that now includes Turing/Ampere, Intel Gen11/12 and AMD
+  Vega/RDNA graphics, Wi-Fi and Bluetooth adapters, laptops (sleep, battery),
+  and multi-core machines.
+- Upgrade from 1.0 in place with the M17 update mechanism, settings and files
+  kept; a rollback path.
+- Performance pass on SMP (no regressions against 1.0 on one core), power
+  use on laptops, and the firmware pack (M18, M19, M22) checked for licences
+  and versions.
+- Release notes, known issues, the license audit and THIRD_PARTY_NOTICES
+  for everything new; the RTM build is tagged `v1.1` and drops the
+  pre-release watermark.
+- Depends on M18 to M26.
+
+**1.1 order:** 18 → 19 → 20 → 21 → 22 → 23 → 24 → 25 → 26 → 27 (M20, SMP,
+may move to the front if Firefox and Roblox need it sooner).
+
+## Release schedule
+
+Releases are gated by milestones and quality, not by dates. Target windows
+are named so there is something to aim at; when a gate is not met, the window
+slips and the bar stays where it is.
+
+### Versions and build numbers
+
+- Every build is `major.minor.build`: 1.0.<build>, 1.1.<build>, and so on, one
+  build number per release line, counted from commits (tools/mkversion.sh).
+- Every build of a later line is numbered above every build of an earlier
+  line, service packs included: 1.0.1415 is older than 1.1.2362, always.
+  1.0 counts commits from the start of the history. When 1.1 begins (at 1.0
+  RTM), its builds start at a fixed number well above the RTM build (the next
+  thousand above RTM + 1000: RTM 1.0.1415 means 1.1 starts at 1.1.3000) and
+  count the commits since the branch point; the same again for 1.2 and later.
+- Service packs are built on the release's maintenance branch (`release/1.0`
+  from the RTM commit), so their build numbers keep rising within the line
+  (1.0 RTM 1.0.1415, SP1 1.0.1472, ...) but stay below the next line's start:
+  the version generator refuses to build a number that reaches it. About and
+  the boot screen name the service pack ("Halcyon 1.0, Service Pack 1, build
+  1472").
+- Pre-release builds (everything except an RTM or a service pack's final
+  build) show the desktop watermark; finals do not.
+
+### Channels
+
+| Channel | When | What |
+|---|---|---|
+| Dev builds | every commit | what CI builds; watermark |
+| Milestone previews | each finished milestone | a GitHub pre-release: USB image, ISO, checksums, short notes; tag `m7.5`, `m8`, ... |
+| Beta | all features of the release are in, polish not done | Beta 1, Beta 2, ... for testers on real hardware |
+| Release candidates | during the release milestone (M17, M27) | RC1, RC2, ...: fixes only; any of them may become the final |
+| RTM | the approved RC | tag `v1.0`, `v1.1`; no watermark; release notes, known issues |
+| Service packs | every few months after an RTM | fixes plus selected features backported from the next release; their own RCs |
+
+### 1.0
+
+- **Beta 1** once M7.5 to M15 are done (Halcyon runs Firefox, with hardware 3D
+  on the GTX 1070); M17's work runs alongside the betas.
+- **M16 (Xenithium) is not on 1.0's critical path:** it depends on Roblox's
+  weekly clients and its willingness to tolerate unofficial runtimes. It
+  ships in 1.0 if it is ready by the release candidates, otherwise in a 1.0
+  service pack or 1.1.
+- **RTM** when the release candidates show no known crash, hang or data-loss
+  bugs and the hardware matrix is published (M17).
+
+Target windows (estimates; the graphics drivers move at the pace of
+real-hardware testing, and M13-M15 are each bigger than everything before
+them):
+
+| Step | Target |
+|---|---|
+| M7.5 and M8 previews | November-December 2026 |
+| Graphics, M10-M12 | early 2027 |
+| Linux layer, Firefox, Mesa, M13-M15 | through 2027 |
+| 1.0 Beta 1 | mid-2027 |
+| 1.0 RTM | late 2027 |
+
+### 1.0 service packs and backports from 1.1
+
+A 1.1 feature may come to 1.0 in a service pack when it has shipped in a 1.1
+preview or beta and survived testing there, keeps 1.0's programs, settings
+and files working, and is self-contained (drivers, apps, protocols; nothing
+that changes the core of the kernel). Every service pack gets its own release
+candidates, the full CI and the hardware matrix.
+
+| Backported in service packs | 1.1 only |
+|---|---|
+| codecs and Sound Recorder (M25); the firewall, IPv6, SMB file sharing (M23); game controllers, UASP, printers (M24); Wi-Fi and Bluetooth (M22); display on Turing/Ampere and the 2020 Intel/AMD GPUs (M18/M19 modesetting); Check Disk, ext4 (M26) | several cores (M20); the ACPI interpreter, sleep and resume (M21); 3D on the new GPUs (M18/M19 acceleration) |
+
+- **SP1**, about 3-4 months after 1.0 RTM: fixes and the low-risk backports
+  (codecs, firewall, controllers).
+- **SP2**, once 1.1's betas have proven them: Wi-Fi, Bluetooth, IPv6, SMB,
+  display on the newer GPUs.
+- **SP3**, after 1.1 RTM: the last bundle of fixes. 1.0 then gets security
+  fixes only, for 6 months.
+
+### 1.1
+
+Milestone previews for M18-M26, betas once they are in, then M27's release
+candidates and RTM; target about 12 months after 1.0 RTM.
+
+### Beyond 1.1
+
+- A feature release about once a year (1.2, 1.3, ...), each with a theme;
+  1.2 could bring newer GPUs (NVIDIA Ada, AMD RDNA3, Intel Arc), Wi-Fi 6E/7
+  and the security work M17 begins.
+- 2.0 is kept for one change in how Halcyon works, such as a GPU-composited
+  desktop or an ARM64 port, not for a longer feature list.
+- Support: the latest release gets fixes; the one before gets security
+  fixes for 6 months after the next one ships.
+
