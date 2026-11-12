@@ -1,6 +1,7 @@
 /* Halcyon OS - window manager: compositor, input routing, main loop */
 #include "wm.h"
 #include "dnd.h"
+#include "layout.h"
 #include "drivers/display.h"
 #include "core/irq.h"
 #include "core/thread.h"
@@ -115,6 +116,53 @@ void gui_full_redraw(void) {
     wm_invalidate_rect(mkrect(0, 0, screen_w(), screen_h()));
 }
 
+/* ---------------- monitors ---------------- */
+static rect_t mons[DISPLAY_MAX_OUTPUTS];
+static void *mon_conn[DISPLAY_MAX_OUTPUTS];     /* which connector each one is */
+static int nmons;
+void mon_refresh(void) {
+    display_output_t o[DISPLAY_MAX_OUTPUTS];
+    nmons = display_outputs(o, DISPLAY_MAX_OUTPUTS);
+    for (int i = 0; i < nmons; i++) { mons[i] = mkrect(o[i].x, o[i].y, o[i].w, o[i].h); mon_conn[i] = o[i].conn; }
+    if (!nmons) { nmons = 1; mons[0] = mkrect(0, 0, screen_w(), screen_h()); }
+}
+int mon_count(void) { if (!nmons) mon_refresh(); return nmons; }
+rect_t mon_rect(int i) {
+    if (!nmons) mon_refresh();
+    return mons[i >= 0 && i < nmons ? i : 0];
+}
+rect_t mon_work(int i) {
+    rect_t r = mon_rect(i);
+    if (i <= 0 || i >= nmons) r.h -= TASKBAR_H;
+    return r;
+}
+int mon_at(int x, int y) { if (!nmons) mon_refresh(); return layout_at(mons, nmons, x, y); }
+int mon_of(rect_t r) {
+    if (!nmons) mon_refresh();
+    int m = layout_best(mons, nmons, r);
+    return m < 0 ? 0 : m;
+}
+int mon_of_window(window_t *w) {
+    if (w->state == WS_MAXIMIZED && !rect_empty(w->max_mon)) return mon_of(w->max_mon);
+    return mon_of(w->state == WS_MINIMIZED && w->restore.w ? w->restore : w->frame);
+}
+static int work_areas(rect_t *wa) {
+    int n = mon_count();
+    for (int i = 0; i < n; i++) wa[i] = mon_work(i);
+    return n;
+}
+rect_t wm_fullscreen_rect(int whole) { return whole ? mkrect(0, 0, screen_w(), screen_h()) : mon_rect(0); }
+rect_t wm_keep_on_monitor(rect_t f) {
+    rect_t wa[DISPLAY_MAX_OUTPUTS];
+    int n = work_areas(wa);
+    rect_t g = layout_fit(wa, n, f, 0, 0);
+    rect_t a = wa[mon_of(g)];
+    /* larger than the work area: its top left corner stays on it */
+    f.x = f.w > a.w ? a.x : g.x;
+    f.y = f.h > a.h ? a.y : g.y;
+    return f;
+}
+
 /* ---------------- geometry ---------------- */
 static int framed(window_t *w) { return !(w->flags & (WF_POPUP | WF_FULLSCREEN | WF_EMBED)); }
 
@@ -218,18 +266,26 @@ window_t *wm_create(const char *title, int icon, int x, int y, int cw, int ch, u
     int bare = (flags & (WF_POPUP | WF_FULLSCREEN | WF_EMBED)) != 0;
     int fw = bare ? cw : cw + 2 * BORDER;
     int fh = bare ? ch : ch + TITLE_H + BORDER;
-    int sw = screen_w(), sh = screen_h() - TASKBAR_H;
-    if (fw > sw) fw = sw;
-    if (fh > sh && !(flags & WF_FULLSCREEN)) fh = sh;
-    if (flags & WF_FULLSCREEN) { x = y = 0; fw = sw; fh = screen_h(); }
+    /* new windows open on the primary monitor; dialogs over the window
+     * that is active (their program's), on its monitor */
+    rect_t wa = mon_work(0);
+    if ((flags & WF_CENTER) && wm_active()) wa = mon_work(mon_of_window(wm_active()));
+    int sw = wa.w, sh = wa.h;
+    if (fw > sw && !(flags & WF_POPUP)) fw = sw;
+    if (fh > sh && !(flags & (WF_FULLSCREEN | WF_POPUP))) fh = sh;
+    if (flags & WF_FULLSCREEN) {
+        rect_t fr = wm_fullscreen_rect((flags & WF_SAVER) != 0);
+        x = fr.x; y = fr.y; fw = fr.w; fh = fr.h;
+    }
     else if (flags & WF_EMBED) { if (x < 0) x = 0; if (y < 0) y = 0; }
-    else if (flags & WF_CENTER) { x = (sw - fw) / 2; y = (sh - fh) / 2; }
+    else if (flags & WF_CENTER) { x = wa.x + (sw - fw) / 2; y = wa.y + (sh - fh) / 2; }
     else if (x < 0 || y < 0) {
         x = 60 + (auto_pos % 8) * 28;
         y = 40 + (auto_pos % 8) * 24;
         auto_pos++;
         if (x + fw > sw) x = MAX(0, sw - fw);
         if (y + fh > sh) y = MAX(0, sh - fh);
+        x += wa.x; y += wa.y;
     }
     w->frame = mkrect(x, y, fw, fh);
     w->min_w = 160; w->min_h = 80;
@@ -338,11 +394,12 @@ void wm_place_restore(window_t *w, const char *key) {
         c = *end == ',' ? end + 1 : end;
     }
     if (k < 4) return;
-    int sw = screen_w(), work = screen_h() - TASKBAR_H;
+    rect_t wa[DISPLAY_MAX_OUTPUTS];
+    int nwa = work_areas(wa);
     rect_t f = w->frame;
     if (w->flags & WF_RESIZABLE) {
-        f.w = CLAMP(n[2], w->min_w, sw);
-        f.h = CLAMP(n[3] + w->place_top, w->min_h, work);
+        f.w = MAX(n[2], w->min_w);
+        f.h = MAX(n[3] + w->place_top, w->min_h);
     }
     f.x = n[0]; f.y = n[1];
     /* another window of the same kind at that place: cascade */
@@ -353,8 +410,10 @@ void wm_place_restore(window_t *w, const char *key) {
         if (!clash) break;
         f.x += 28; f.y += 24;
     }
-    f.x = CLAMP(f.x, 0, MAX(0, sw - f.w));
-    f.y = CLAMP(f.y, 0, MAX(0, work - f.h));
+    /* onto the monitor it was on (the primary if that one is gone), inside it */
+    int keep_w = f.w, keep_h = f.h;
+    f = layout_fit(wa, nwa, f, 0, 0);
+    if (!(w->flags & WF_RESIZABLE)) { f.w = keep_w; f.h = keep_h; }
     set_frame(w, f);
     if (k >= 5 && n[4] && (w->flags & WF_RESIZABLE) && !(w->flags & WF_NO_MAXIMIZE)) wm_maximize(w, 1);
 }
@@ -392,8 +451,13 @@ void wm_minimize(window_t *w) {
 void wm_maximize(window_t *w, int on) {
     if (on) {
         if (w->state != WS_MAXIMIZED) w->restore = w->frame;
+        /* the monitor it is on (drawing and clicks are kept to it: the
+         * borders hang over its edges) */
+        int m = mon_of(w->state == WS_MAXIMIZED ? w->max_mon : w->frame);
+        rect_t wa = mon_work(m);
+        w->max_mon = mon_rect(m);
         w->state = WS_MAXIMIZED;
-        set_frame(w, mkrect(-BORDER, -0, screen_w() + 2 * BORDER, screen_h() - TASKBAR_H + BORDER));
+        set_frame(w, mkrect(wa.x - BORDER, wa.y, wa.w + 2 * BORDER, wa.h + BORDER));
     } else {
         w->state = WS_NORMAL;
         set_frame(w, w->restore);
@@ -416,15 +480,21 @@ void wm_show(window_t *w) {
 static int cursor_kind(void);
 static rect_t cursor_rect(int kind, int x, int y);
 static int drawn_cursor = -1, drawn_cx, drawn_cy;
-void wm_cursor_changed(void) {
-    if (cursor_kind() == drawn_cursor) return;
+static int hwc;                     /* the adapter's hardware cursor is used: no software cursor redraws */
+/* the software cursor's old and new place need drawing */
+static void sw_cursor_dirty(void) {
+    if (hwc) return;
     wm_invalidate_rect(cursor_rect(drawn_cursor < 0 ? 0 : drawn_cursor, drawn_cx, drawn_cy));
     wm_invalidate_rect(cursor_rect(cursor_kind(), mx, my));
+}
+void wm_cursor_changed(void) {
+    if (cursor_kind() == drawn_cursor) return;
+    sw_cursor_dirty();
 }
 
 void wm_set_busy(int b) {
     busy = b;
-    wm_invalidate_rect(mkrect(mx - 2, my - 2, 40, 40));
+    if (!hwc) wm_invalidate_rect(mkrect(mx - 2, my - 2, 40, 40));
 }
 
 /* ---------------- frame drawing ---------------- */
@@ -573,7 +643,63 @@ static rect_t cursor_rect(int kind, int x, int y) {
     cursor_info(kind, &img, &hx, &hy);
     return mkrect(x - hx - 1, y - hy - 1, 20, 24);
 }
+/* a cursor shape as a 64 x 64 ARGB image for the hardware cursor (the
+ * shadow is black at 70/255, as the software cursor darkens) */
+static void cursor_argb(int kind, u32 *img, int *hx, int *hy) {
+    const char **art;
+    cursor_info(kind, &art, hx, hy);
+    memset(img, 0, 64 * 64 * 4);
+    for (int j = 0; art[j] && j < 62; j++)
+        for (int i = 0; art[j][i] && i < 62; i++)
+            if (art[j][i] != ' ') img[(j + 1) * 64 + i + 1] = 0x46000000u;
+    for (int j = 0; art[j] && j < 63; j++)
+        for (int i = 0; art[j][i] && i < 63; i++) {
+            char c = art[j][i];
+            if (c == 'X') img[j * 64 + i] = 0xFF000000u;
+            else if (c == '.') img[j * 64 + i] = 0xFFFFFFFFu;
+        }
+}
+
+/* the hardware cursor follows the pointer and the shape; the software one
+ * takes over when an output has none (hotplug onto another adapter) */
+static int hw_kind = -1, hw_x = -1, hw_y = -1, hw_vis = -1;
+static void cursor_sync(void) {
+    int was = hwc;
+    if (!hwc && hw_kind < 0) {
+        /* the first image tells the display core to try the hardware cursor */
+        u32 img[64 * 64];
+        int hx, hy;
+        cursor_argb(CURSOR_ARROW, img, &hx, &hy);
+        display_cursor_image(img, hx, hy);
+        hw_kind = CURSOR_ARROW;
+    }
+    hwc = display_hw_cursor();
+    if (hwc != was) {
+        hw_x = hw_y = hw_vis = -1;
+        /* the software cursor appears or goes */
+        wm_invalidate_rect(cursor_rect(drawn_cursor < 0 ? 0 : drawn_cursor, drawn_cx, drawn_cy));
+        wm_invalidate_rect(cursor_rect(cursor_kind(), mx, my));
+        if (hwc) hw_kind = -2;
+    }
+    if (!hwc) return;
+    int k = cursor_kind(), vis = !saver_active();
+    if (k != hw_kind) {
+        u32 img[64 * 64];
+        int hx, hy;
+        cursor_argb(k, img, &hx, &hy);
+        display_cursor_image(img, hx, hy);
+        hw_kind = k;
+        hw_x = -1;
+    }
+    if (mx != hw_x || my != hw_y || vis != hw_vis) {
+        display_cursor_move(mx, my, vis);
+        hw_x = mx; hw_y = my; hw_vis = vis;
+    }
+    drawn_cursor = k; drawn_cx = mx; drawn_cy = my;
+}
+
 static void draw_cursor(gc_t *g) {
+    if (hwc) return;                        /* the adapter draws it */
     if (saver_active()) return;             /* hidden while the screen saver runs */
     int kind = cursor_kind();
     const char **img; int hx, hy;
@@ -600,10 +726,16 @@ static void draw_cursor(gc_t *g) {
 }
 
 /* ---------------- hit testing ---------------- */
+/* a maximized window's borders hang over its monitor's edges: on another
+ * monitor they are neither drawn nor clickable */
+static rect_t win_bounds(window_t *w) {
+    if (w->state == WS_MAXIMIZED && !rect_empty(w->max_mon) && mon_count() > 1) return rect_intersect(w->frame, w->max_mon);
+    return w->frame;
+}
 static window_t *window_at(int x, int y) {
     window_t *hit = NULL;
     for (window_t *w = windows; w; w = w->next)
-        if (w->state != WS_MINIMIZED && !(w->flags & (WF_EMBED | WF_SAVER)) && rect_contains(w->frame, x, y)) hit = w;
+        if (w->state != WS_MINIMIZED && !(w->flags & (WF_EMBED | WF_SAVER)) && rect_contains(win_bounds(w), x, y)) hit = w;
     return hit;
 }
 window_t *wm_window_at(int x, int y) { return window_at(x, y); }
@@ -801,9 +933,11 @@ static void mouse_up(int button) {
 static void mouse_move(void) {
     if (drag_mode == DRAG_MOVE && drag_win) {
         rect_t f = drag_win->frame;
+        int m = mon_at(mx, my);
+        rect_t mr = mon_rect(m < 0 ? 0 : m), wa = mon_work(m < 0 ? 0 : m);
         f.x = mx - drag_dx;
-        f.y = MAX(0, my - drag_dy);
-        if (f.y > screen_h() - TASKBAR_H - 10) f.y = screen_h() - TASKBAR_H - 10;
+        f.y = MAX(mr.y, my - drag_dy);
+        if (f.y > wa.y + wa.h - 10) f.y = wa.y + wa.h - 10;
         set_frame(drag_win, f);
         return;
     }
@@ -954,20 +1088,21 @@ static void handle_input(void) {
             mx += dx * mouse_speed * sp / 10;
             my += dy * mouse_speed * sp / 10;
         }
-        mx = CLAMP(mx, 0, screen_w() - 1);
-        my = CLAMP(my, 0, screen_h() - 1);
+        /* the pointer stays on the monitors: it crosses where they touch */
+        mon_count();
+        layout_clamp_point(mons, nmons, &mx, &my);
         if (dnd_active()) {             /* a drag: the pointer and the buttons are its */
             int ob = mbuttons;
             mbuttons = ev.buttons;
-            wm_invalidate_rect(cursor_rect(drawn_cursor < 0 ? 0 : drawn_cursor, drawn_cx, drawn_cy));
+            sw_cursor_dirty();
             dnd_pointer(mx, my, ob, mbuttons);
-            wm_invalidate_rect(cursor_rect(cursor_kind(), mx, my));
+            sw_cursor_dirty();
             continue;
         }
         if (mx != ox || my != oy) {
-            wm_invalidate_rect(cursor_rect(drawn_cursor < 0 ? 0 : drawn_cursor, drawn_cx, drawn_cy));
+            if (!hwc) wm_invalidate_rect(cursor_rect(drawn_cursor < 0 ? 0 : drawn_cursor, drawn_cx, drawn_cy));
             mouse_move();
-            wm_invalidate_rect(cursor_rect(cursor_kind(), mx, my));
+            if (!hwc) wm_invalidate_rect(cursor_rect(cursor_kind(), mx, my));
         }
         u8 changed = ev.buttons ^ mbuttons;
         for (int b = 1; b <= 4; b <<= 1) {
@@ -977,7 +1112,7 @@ static void handle_input(void) {
         }
         if (ev.dz) wheel(ev.dz);
         int k = cursor_kind();
-        if (k != drawn_cursor || mx != drawn_cx || my != drawn_cy) {
+        if (!hwc && (k != drawn_cursor || mx != drawn_cx || my != drawn_cy)) {
             wm_invalidate_rect(cursor_rect(drawn_cursor < 0 ? 0 : drawn_cursor, drawn_cx, drawn_cy));
             wm_invalidate_rect(cursor_rect(k, mx, my));
         }
@@ -1004,10 +1139,16 @@ static void compose(rect_t r) {
         if (w->needs_paint && w->state != WS_MINIMIZED) paint_client(w);
     window_t *active = wm_active();
     int taskbar_drawn = covered;
+    gc_t g0 = g;
     for (window_t *w = from; w; w = w->next) {
         if (w->state == WS_MINIMIZED || (w->flags & WF_EMBED)) continue;
+        g = g0;
         if (!taskbar_drawn && is_overlay(w)) { taskbar_paint(&g, r); taskbar_drawn = 1; }
         rect_t vr = vis_rect(w);
+        if (w->state == WS_MAXIMIZED && mon_count() > 1 && !rect_empty(w->max_mon)) {
+            vr = rect_intersect(vr, w->max_mon);
+            g.clip = rect_intersect(g.clip, w->max_mon);
+        }
         if (rect_empty(rect_intersect(vr, r))) continue;
         if (framed(w)) draw_frame(&g, w, w == active);
         else if (!(w->flags & WF_NOSHADOW)) gfx_shadow(&g, w->frame, 4, 80);
@@ -1031,6 +1172,7 @@ static void compose(rect_t r) {
             gfx_blit(&eg, ec.x, ec.y, e->client, mkrect(0, 0, e->client->w, e->client->h));
         }
     }
+    g = g0;
     if (!taskbar_drawn) taskbar_paint(&g, r);
     if (gui_overlay_paint) gui_overlay_paint(&g, r);     /* the volume indicator, tray tooltips */
     dnd_paint(&g, r);                                    /* a drag's image */
@@ -1043,11 +1185,16 @@ static int render(void) {
         if (w->needs_paint && w->state != WS_MINIMIZED) wm_invalidate_rect(wm_client_rect(w));
     if (!ndirty) return 0;
     rect_t list[MAX_DIRTY];
-    int n = ndirty;
-    memcpy(list, dirty, sizeof(rect_t) * n);
+    int n = 0;
+    /* (a rectangle from before the screen got smaller must not reach past it) */
+    for (int i = 0; i < ndirty; i++) {
+        list[n] = rect_intersect(dirty[i], mkrect(0, 0, g_screen->w, g_screen->h));
+        if (!rect_empty(list[n])) n++;
+    }
     ndirty = 0;
     for (int i = 0; i < n; i++) compose(list[i]);
     for (int i = 0; i < n; i++) screen_present(list[i]);
+    screen_commit();
     return 1;
 }
 
@@ -1112,6 +1259,7 @@ void gui_step(void) {
     int busy = 0;
     u32 gen = irq_generation();
     irq_service();
+    if (display_service()) busy = 1;        /* page flips, hotplug */
     input_poll_devices();
     if (storage_service()) busy = 1;
     if (run_jobs()) busy = 1;
@@ -1136,6 +1284,7 @@ void gui_step(void) {
     }
     saver_tick();
     if (render()) busy = 1;
+    cursor_sync();
     u64 deadline = idle_take_deadline();
     if (busy) return;
     /* windows with on_tick want ~10 Hz; the shell (clock, balloons) 1 Hz */
@@ -1155,37 +1304,64 @@ void gui_run_until(volatile int *flag) {
     while (!*flag) gui_step();
 }
 
-/* the display mode changed (Display settings): back buffer, wallpaper and
- * windows follow the new size */
+/* the display arrangement or a mode changed (Display Properties, hotplug):
+ * back buffer, wallpaper and windows follow. Windows stay on their monitor;
+ * those on a monitor that went away move to the primary one. */
 static int screen_changed(void) {
     int r = screen_resize();
-    if (!r) r = desktop_screen_changed();
     if (r) return r;
-    int sw = screen_w(), sh = screen_h(), work = sh - TASKBAR_H;
+    rect_t old[DISPLAY_MAX_OUTPUTS];
+    void *oldc[DISPLAY_MAX_OUTPUTS];
+    int nold = nmons;
+    memcpy(old, mons, sizeof old);
+    memcpy(oldc, mon_conn, sizeof oldc);
+    mon_refresh();
+    r = desktop_screen_changed();
+    if (r) return r;
+    rect_t wa[DISPLAY_MAX_OUTPUTS];
+    int nwa = work_areas(wa);
+    rect_t bounds = mkrect(0, 0, screen_w(), screen_h());
     menu_close_all();
     for (window_t *w = windows; w; w = w->next) {
         if (w->flags & (WF_POPUP | WF_EMBED)) continue;
-        if (w->flags & WF_FULLSCREEN) { set_frame(w, mkrect(0, 0, sw, sh)); continue; }
+        if (w->flags & WF_FULLSCREEN) { set_frame(w, wm_fullscreen_rect((w->flags & WF_SAVER) != 0)); continue; }
+        /* the monitor it was on, if it is still there: where is it now? */
+        rect_t was = w->state == WS_MAXIMIZED ? w->max_mon : w->state == WS_MINIMIZED && w->restore.w ? w->restore : w->frame;
+        int om = layout_best(old, nold, was), nm = -1;
+        if (om >= 0)
+            for (int i = 0; i < nmons; i++) if (mon_conn[i] == oldc[om]) nm = i;
         if (w->state == WS_MAXIMIZED) {
-            set_frame(w, mkrect(-BORDER, -0, sw + 2 * BORDER, work + BORDER));
+            int m = nm >= 0 ? nm : 0;
+            rect_t a = mon_work(m);
+            w->max_mon = mon_rect(m);
+            set_frame(w, mkrect(a.x - BORDER, a.y, a.w + 2 * BORDER, a.h + BORDER));
             continue;
         }
         if (w->state == WS_MINIMIZED && w->restore.w) {
-            /* restored later: keep its normal place on screen */
-            rect_t *f = &w->restore;
-            f->x = CLAMP(f->x, 60 - f->w, sw - 60);
-            f->y = CLAMP(f->y, 0, MAX(0, work - TITLE_H));
+            /* restored later: keep its normal place on a monitor */
+            if (!layout_grabbable(mons, nmons, w->restore, TITLE_H, 60)) w->restore = layout_fit(wa, nwa, w->restore, 0, 0);
         }
         rect_t f = w->frame;
-        if (f.x + f.w > sw || f.y + f.h > work) {
-            /* keep it on screen: move it, never resize it */
-            f.x = CLAMP(f.x, 0, MAX(0, sw - f.w));
-            f.y = CLAMP(f.y, 0, MAX(0, work - f.h));
+        if (nm >= 0 && om >= 0) {           /* its monitor moved: the window goes with it */
+            f.x += mons[nm].x - old[om].x;
+            f.y += mons[nm].y - old[om].y;
+            if (w->state == WS_MINIMIZED && w->restore.w) {
+                w->restore.x += mons[nm].x - old[om].x;
+                w->restore.y += mons[nm].y - old[om].y;
+            }
+        }
+        if (!layout_grabbable(mons, nmons, f, TITLE_H, 60) || f.x + f.w > bounds.w + 60 || f.y + f.h > bounds.h) {
+            /* keep it on a monitor: move it, never resize it */
+            rect_t g = layout_fit(wa, nwa, f, 0, nm < 0);
+            f.x = g.x; f.y = g.y;
+            if (nm < 0 && om >= 0 && w->state == WS_NORMAL)
+                kprintf("gui: \"%s\": its monitor went away, moved onto monitor %d at %d,%d\n", w->title, mon_of(f) + 1, f.x, f.y);
         }
         if (f.x != w->frame.x || f.y != w->frame.y) set_frame(w, f);
     }
-    mx = CLAMP(mx, 0, sw - 1);
-    my = CLAMP(my, 0, sh - 1);
+    layout_clamp_point(mons, nmons, &mx, &my);
+    hw_x = -1;
+    ndirty = 0;                             /* (rectangles of the old size) */
     taskbar_invalidate();
     gui_full_redraw();
     return 0;
@@ -1196,10 +1372,12 @@ void recycle_test_hook(void);
 void gui_main(void) {
     gui_thread = thread_current();
     usergui_init();
-    display_apply_saved();
+    display_start();                        /* native display drivers, the saved arrangement */
     screen_init();
+    if (screen_resize()) panic("cannot allocate the screen back buffer");
+    mon_refresh();
     display_changed_hook = screen_changed;
-    mx = screen_w() / 2; my = screen_h() / 2;
+    mx = mon_rect(0).x + mon_rect(0).w / 2; my = mon_rect(0).y + mon_rect(0).h / 2;
     wm_mouse_load();
     desktop_init();
     saver_init();
@@ -1207,12 +1385,22 @@ void gui_main(void) {
     kprintf("gui: desktop ready (%dx%d)\n", screen_w(), screen_h());
     gui_desktop_ready = 1;
     /* test hook: QEMU fw_cfg "opt/halcyon/setmode" = "WIDTHxHEIGHT" switches the
-     * display mode once the desktop is up (live adapters) */
-    char setmode[32];
+     * primary monitor's mode once the desktop is up (live adapters);
+     * "CONNECTOR:WIDTHxHEIGHT" another monitor's */
+    char setmode[48];
     if (qemu_fw_file("opt/halcyon/setmode", setmode, sizeof setmode) && setmode[0]) {
-        char *x = strchr(setmode, 'x');
-        int sw = (int)strtol(setmode, NULL, 10), sh = x ? (int)strtol(x + 1, NULL, 10) : 0;
-        int r = display_set_mode(sw, sh);
+        char *colon = strchr(setmode, ':'), *spec = colon ? colon + 1 : setmode;
+        char *x = strchr(spec, 'x');
+        int sw = (int)strtol(spec, NULL, 10), sh = x ? (int)strtol(x + 1, NULL, 10) : 0, r = E_INVAL;
+        if (colon) {
+            *colon = 0;
+            display_conf_t cf;
+            display_get_conf(&cf);
+            for (int i = 0; i < cf.n; i++)
+                if (!strcasecmp(cf.out[i].conn->name, setmode)) { cf.out[i].w = sw; cf.out[i].h = sh; cf.out[i].attach = 1; r = display_set_conf(&cf); }
+        } else {
+            r = display_set_mode(sw, sh);
+        }
         kprintf("gui: test mode switch to %dx%d: %s (desktop %dx%d)\n", sw, sh, r ? strerror(r) : "ok", screen_w(), screen_h());
     }
     /* test hook: QEMU fw_cfg "opt/halcyon/autorun" = "C:/PROGRAMS/X.EXE args" */

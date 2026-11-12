@@ -2,6 +2,7 @@
  * notification balloons, shutdown */
 #include "net/netcfg.h"
 #include "wm.h"
+#include "drivers/display.h"
 #include "volume.h"
 #include "sound/sound.h"
 #include "core/lib.h"
@@ -164,23 +165,60 @@ void desktop_wallpaper_render(int style, surface_t *s) {
     }
 }
 
+/* Every monitor gets the whole picture at its own size; the desktop
+ * between monitors (an L-shaped arrangement) is never seen and stays black. */
+static rect_t wp_mons[DISPLAY_MAX_OUTPUTS];
+static int wp_nmons;
+/* Draw the wallpaper of every monitor into s. A monitor of a size drawn
+ * before (in old, at old_m[]) is copied from there: rendering a picture
+ * takes a while, and a hotplug or a change on one monitor should not redraw
+ * the others'. */
+static int wallpaper_render_all(surface_t *s, const surface_t *old, const rect_t *old_m, int old_n) {
+    gc_t g = gc_for(s);
+    rect_t now[DISPLAY_MAX_OUTPUTS];
+    int n = mon_count();
+    for (int i = 0; i < n; i++) now[i] = mon_rect(i);
+    gfx_fill(&g, mkrect(0, 0, s->w, s->h), HEX(0x000000));     /* where no monitor shows the desktop */
+    for (int i = 0; i < n; i++) {
+        rect_t m = now[i];
+        int from = -1;
+        for (int k = 0; k < old_n && old && from < 0; k++)
+            if (old_m[k].w == m.w && old_m[k].h == m.h && old_m[k].x + m.w <= old->w && old_m[k].y + m.h <= old->h) from = k;
+        if (from >= 0) { gfx_blit(&g, m.x, m.y, old, mkrect(old_m[from].x, old_m[from].y, m.w, m.h)); continue; }
+        if (m.x == 0 && m.y == 0 && m.w == s->w && m.h == s->h) { desktop_wallpaper_render(wp_style, s); continue; }
+        surface_t *t = surface_new(m.w, m.h);
+        if (!t) return E_NOMEM;
+        desktop_wallpaper_render(wp_style, t);
+        gfx_blit(&g, m.x, m.y, t, mkrect(0, 0, t->w, t->h));
+        surface_free(t);
+    }
+    wp_nmons = n;
+    memcpy(wp_mons, now, sizeof(rect_t) * (size_t)n);
+    return 0;
+}
+
 void desktop_wallpaper_set(int style) {
     wp_style = style;
     if (!wallpaper) wallpaper = surface_new(screen_w(), screen_h());
-    desktop_wallpaper_render(style, wallpaper);
+    if (wallpaper) wallpaper_render_all(wallpaper, NULL, NULL, 0);
     gui_full_redraw();
 }
 int desktop_wallpaper_style(void) { return wp_style; }
 
-/* the screen size changed: wallpaper of the new size */
+/* the arrangement changed: wallpaper of the new size, at the monitors' places */
 int desktop_screen_changed(void) {
-    if (wallpaper && wallpaper->w == screen_w() && wallpaper->h == screen_h()) return 0;
+    int same = wallpaper && wallpaper->w == screen_w() && wallpaper->h == screen_h() && wp_nmons == mon_count();
+    for (int i = 0; same && i < wp_nmons; i++) if (!rect_equal(wp_mons[i], mon_rect(i))) same = 0;
+    if (same) return 0;
     surface_t *n = surface_new(screen_w(), screen_h());
     if (!n) return E_NOMEM;
+    rect_t old_m[DISPLAY_MAX_OUTPUTS];
+    int old_n = wp_nmons;
+    memcpy(old_m, wp_mons, sizeof old_m);
+    int r = wallpaper_render_all(n, wallpaper, old_m, old_n);
     surface_free(wallpaper);
     wallpaper = n;
-    desktop_wallpaper_render(wp_style, wallpaper);
-    return 0;
+    return r;
 }
 
 /* ---------------- the standard programs ---------------- */
@@ -257,8 +295,9 @@ static int dicon_image(int i) {
 static int icol[NDICONS], irow[NDICONS];      /* -1: in the default column */
 static int drag_i = -1, dragging, drag_x0, drag_y0, drag_x, drag_y;
 
-static int grid_rows(void) { return MAX(1, (screen_h() - TASKBAR_H - 10) / CELL); }
-static int grid_cols(void) { return MAX(1, (screen_w() - 8) / CELL); }
+/* the icons live on the primary monitor */
+static int grid_rows(void) { return MAX(1, (mon_work(0).h - 10) / CELL); }
+static int grid_cols(void) { return MAX(1, (mon_work(0).w - 8) / CELL); }
 static void icon_key(int i, char *out, int n) {
     int o = snprintf(out, (size_t)n, "desktop.icon.");
     for (const char *c = dicons[i].label; *c && o < n - 1; c++) if (isalnum((u8)*c)) out[o++] = (char)tolower((u8)*c);
@@ -281,7 +320,8 @@ static void icon_cell(int i, int *c, int *r) {
 static rect_t dicon_rect(int i) {
     int c, r;
     icon_cell(i, &c, &r);
-    return mkrect(8 + c * CELL, 10 + r * CELL, 80, 78);
+    rect_t p = mon_work(0);
+    return mkrect(p.x + 8 + c * CELL, p.y + 10 + r * CELL, 80, 78);
 }
 static int cell_used(int c, int r, int except) {
     for (int i = 0; i < NDICONS; i++) {
@@ -294,6 +334,8 @@ static int cell_used(int c, int r, int except) {
 /* drop icon i at screen point (x, y): the nearest free cell */
 static void icon_drop(int i, int x, int y) {
     for (int k = 0; k < NDICONS; k++) icon_cell(k, &icol[k], &irow[k]);   /* all explicit from now on */
+    rect_t p = mon_work(0);
+    x -= p.x; y -= p.y;
     int c0 = CLAMP((x - 8) / CELL, 0, grid_cols() - 1), r0 = CLAMP((y - 10) / CELL, 0, grid_rows() - 1);
     int best = -1, bc = c0, br = r0;
     for (int c = 0; c < grid_cols(); c++)
@@ -365,8 +407,9 @@ void desktop_paint(gc_t *g, rect_t clip) {
     static const char l1[] = "Halcyon " OS_RELEASE;
     char l2[64];
     snprintf(l2, sizeof l2, "For testing purposes only. Build %u", (unsigned)OS_BUILD);
-    int right = screen_w() - 10;
-    int y2 = screen_h() - TASKBAR_H - 6 - font_ui.height;
+    rect_t pw = mon_work(0);
+    int right = pw.x + pw.w - 10;
+    int y2 = pw.y + pw.h - 6 - font_ui.height;
     int y1 = y2 - font_title.height - 1;
     int w1 = gfx_text_width(&font_title, l1), w2 = gfx_text_width(&font_ui, l2);
     if (!rect_empty(rect_intersect(mkrect(right - MAX(w1, w2) - 2, y1, MAX(w1, w2) + 4, y2 + font_ui.height + 2 - y1), clip))) {
@@ -583,7 +626,8 @@ static int last_minute = -1;
 static int net_tray = -1;
 static char net_tray_text[96];
 
-rect_t taskbar_rect(void) { return mkrect(0, screen_h() - TASKBAR_H, screen_w(), TASKBAR_H); }
+/* along the bottom of the primary monitor */
+rect_t taskbar_rect(void) { rect_t p = mon_rect(0); return mkrect(p.x, p.y + p.h - TASKBAR_H, p.w, TASKBAR_H); }
 void taskbar_invalidate(void) { wm_invalidate_rect(taskbar_rect()); }
 
 static int usb_disks_present(void) {
@@ -944,7 +988,7 @@ void start_menu_toggle(void) {
     if (start_menu) { menu_close_all(); return; }
     menu_close_all();
     sm_hover = -1;
-    start_menu = wm_create("Start", -1, 0, screen_h() - TASKBAR_H - SM_H, SM_W, SM_H, WF_POPUP | WF_TOPMOST);
+    start_menu = wm_create("Start", -1, taskbar_rect().x, taskbar_rect().y - SM_H, SM_W, SM_H, WF_POPUP | WF_TOPMOST);
     start_menu->on_paint = sm_paint;
     start_menu->on_event = sm_event;
     start_menu->on_destroy = sm_destroy;
@@ -981,7 +1025,8 @@ static void show_balloon(const char *title, const char *text) {
     strlcpy(balloon_title, title, sizeof balloon_title);
     strlcpy(balloon_text, text, sizeof balloon_text);
     int w = 300, h = 34 + gfx_text_wrap_height(&font_ui, w - 24, text) + 16;
-    balloon = wm_create("", -1, screen_w() - w - 10, screen_h() - TASKBAR_H - h - 2, w, h, WF_TOPMOST | WF_POPUP | WF_NOSHADOW);
+    rect_t tb = taskbar_rect();
+    balloon = wm_create("", -1, tb.x + tb.w - w - 10, tb.y - h - 2, w, h, WF_TOPMOST | WF_POPUP | WF_NOSHADOW);
     balloon->on_paint = balloon_paint;
     balloon->on_event = balloon_event;
     balloon->on_destroy = balloon_destroy;
@@ -1067,11 +1112,14 @@ void shell_tick(void) {
 static void final_screen(const char *msg) {
     gc_t g = gc_for(g_screen);
     rect_t s = mkrect(0, 0, screen_w(), screen_h());
-    gfx_gradient_v(&g, s, HEX(0x0E2A66), HEX(0x05102A));
-    gfx_icon(&g, screen_w() / 2 - 24, screen_h() / 2 - 70, &icons48[ICON_LOGO]);
+    gfx_fill(&g, s, HEX(0x05102A));
+    for (int i = 0; i < mon_count(); i++) gfx_gradient_v(&g, mon_rect(i), HEX(0x0E2A66), HEX(0x05102A));
+    rect_t p = mon_rect(0);
+    gfx_icon(&g, p.x + p.w / 2 - 24, p.y + p.h / 2 - 70, &icons48[ICON_LOGO]);
     int tw = gfx_text_width(&font_large, msg);
-    gfx_text(&g, &font_large, (screen_w() - tw) / 2, screen_h() / 2, msg, HEX(0xF5B547));
+    gfx_text(&g, &font_large, p.x + (p.w - tw) / 2, p.y + p.h / 2, msg, HEX(0xF5B547));
     screen_present(s);
+    display_sync();                     /* on screen now: the loop that would flip it stops here */
 }
 
 int bootlog_save(const char *reason);

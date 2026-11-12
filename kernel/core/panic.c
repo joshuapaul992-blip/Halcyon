@@ -41,6 +41,7 @@ static int draw_text(const font_t *f, int x, int y, const char *s, u32 fg, u32 b
 }
 
 int bootlog_save(const char *reason) __attribute__((weak));
+void display_panic(int phase) __attribute__((weak));   /* drivers/display.c: the primary monitor's buffer */
 extern void (*klog_hook)(const char *s, int n);
 
 void panic_screen(const char *title, const char *detail) {
@@ -52,6 +53,7 @@ void panic_screen(const char *title, const char *detail) {
         kprintf("panic: nested fault, halting\n");
         for (;;) __asm__ volatile("cli; hlt");
     }
+    if (display_panic) display_panic(0);
     if (!b->fb_addr) return;
     const u32 bg = 0x1C2A4A;
     for (u32 y = 0; y < b->fb_height; y++)
@@ -68,7 +70,9 @@ void panic_screen(const char *title, const char *detail) {
               "The kernel log has been written to the serial port (COM1).", 0xC8D4F0, bg);
     y += 30;
     draw_text(&font_ui, x, y, "Saving the kernel log to \\HALCYON\\BOOT.LOG on the boot drive...", 0xC8D4F0, bg);
+    if (display_panic) display_panic(1);
     int r = bootlog_save ? bootlog_save("crash") : -1;
     draw_text(&font_ui_bold, x + 420, y, r == 0 ? "done. Please include this file in bug reports." : "not possible.",
               r == 0 ? 0x9CFF7A : 0xFFB0A0, bg);
+    if (display_panic) display_panic(1);
 }

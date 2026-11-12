@@ -201,8 +201,8 @@ static void set_min(uwin_t *u) {
 
 /* after a size change: keep the window on screen (like Sonar's level change) */
 static void keep_on_screen(window_t *w) {
-    rect_t f = w->frame;
-    int nx = MAX(0, MIN(f.x, screen_w() - f.w)), ny = MAX(0, MIN(f.y, screen_h() - TASKBAR_H - f.h));
+    rect_t f = w->frame, g = wm_keep_on_monitor(f);
+    int nx = g.x, ny = g.y;
     if (nx != f.x || ny != f.y) {
         wm_invalidate_rect(mkrect(f.x, f.y, f.w + 8, f.h + 8));
         w->frame.x = nx; w->frame.y = ny;
@@ -633,7 +633,10 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
         u = kzalloc(sizeof *u);
         int cw = (int)CLAMP((i64)a2, 32, 2048), ch = (int)CLAMP((i64)a3, 16, 1536);
         if (!j || !u || copyin_str(j->title, a1, sizeof j->title) == E_INVAL) { kfree(j); kfree(u); return E_INVAL; }
-        if (a4 & WIN_FULLSCREEN) { cw = screen_w(); ch = screen_h(); }
+        if (a4 & WIN_FULLSCREEN) {          /* the primary monitor; a screen saver every monitor */
+            rect_t fr = wm_fullscreen_rect(saver_is_saver_pid(p->pid));
+            cw = fr.w; ch = fr.h;
+        }
         if (a4 & WIN_PREVIEW) {
             /* only the program Display Properties started for that box */
             j->host = saver_preview_host((int)a5, p->pid, &j->box);
