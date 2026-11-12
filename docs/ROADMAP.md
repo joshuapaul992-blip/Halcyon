@@ -40,46 +40,18 @@
    string gained the build number (1.0.<commits>) and pre-release builds a
    desktop watermark. See docs/DESIGN-M7.md.
 
+7.5. **NTFS:** read and write for Windows drives, USB sticks and external
+   disks (fragmented, sparse and LZNT1-compressed files, attribute lists,
+   hard links, `$UpCase` names, B+ tree directories with splits and merges;
+   create, delete, rename, write, extend, truncate), mounted read-write only
+   when Windows shut the volume down cleanly (no dirty flag, clean
+   `$LogFile`, no Fast Startup hibernation), and internal Windows disks
+   read-only until allowed in the drive's new Properties dialog. An NTFS
+   formatter in Format and `FORMAT /FS:NTFS`. Checked against the ntfs-3g
+   tools, fuzzed; not yet checked by Windows' `chkdsk` (left for real
+   hardware). See docs/DESIGN-M7.5.md and docs/DESIGN-M7.5-FORMAT.md.
+
 ## Planned (in recommended order)
-
-### M7.5: NTFS (read and write)
-
-Windows disks become usable from Halcyon: an internal Windows drive, or a USB
-stick or external disk formatted NTFS.
-
-- Reading: the boot sector and the MFT (update sequence fixups, attribute
-  lists for files with many attributes), resident and non-resident
-  attributes and their run lists, directories as `$INDEX_ROOT` /
-  `$INDEX_ALLOCATION` B+ trees, file names in the Win32, DOS and POSIX
-  namespaces compared through the volume's `$UpCase` table, hard links,
-  sparse files, LZNT1-compressed files, symbolic links and junctions shown as
-  links. Encrypted (EFS) files are listed but cannot be opened; alternate
-  data streams are kept but not shown.
-- Writing: create, delete, rename and move files and folders, write, extend
-  and truncate files (resident data moved out of the MFT record when it
-  grows), allocate MFT records and clusters through `$MFT:$Bitmap` and
-  `$Bitmap`, keep the index B+ trees balanced (node splits and merges), and
-  update the duplicated name information, timestamps and sizes the way
-  Windows expects so that its `chkdsk` finds nothing to fix. Writes to
-  compressed or encrypted files are refused.
-- The journal: Halcyon does not replay or write `$LogFile`. A volume is
-  mounted read-write only if Windows shut it down cleanly; the journal is
-  then reset and the volume marked dirty while mounted, as other non-Windows
-  NTFS drivers do. A volume that is dirty, or hibernated (Windows Fast
-  Startup or hibernation leaves `hiberfil.sys` active), is mounted read-only,
-  and Halcyon says why and what to do in Windows.
-- Safety: an internal disk with Windows on it is read-only until the user
-  allows writing in the drive's properties; removable disks are writable by
-  default.
-- Explorer and the Format tool: NTFS volumes show with their label and free
-  space, and Format offers NTFS (cluster size, quick format).
-- Tests: host tests against images made by `mkntfs` and checked by
-  `ntfsfix`/`ntfsinfo` (ntfs-3g tools), with random operation sequences
-  compared to a model and every image checked afterwards; images with
-  compression, sparse files, many hard links and huge directories; a fuzzer
-  for the on-disk structures; and `chkdsk` on real Windows disks written by
-  Halcyon.
-- Depends on M3 (the file system layer) and M4.
 
 ### M8: Polish
 - Settings that survive a reboot; installer to the internal disk; Explorer
