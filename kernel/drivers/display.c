@@ -536,6 +536,7 @@ static void build_modes(display_connector_t *c) {
     lim.vram = a->vram;
     lim.buffers = flips ? 2 : 1;
     lim.virtual_sizes = a->virtual_sizes;
+    lim.rates = a->rates;
     lim.valid = valid_cb;
     lim.ctx = a;
     valid_conn = c;
@@ -591,10 +592,11 @@ void display_get_conf(display_conf_t *c) {
             o->attach = conn->head != NULL;
             if (conn->head) {
                 o->w = conn->head->mode.w; o->h = conn->head->mode.h;
+                o->hz = conn->head->mode.hz;
                 o->x = conn->head->x; o->y = conn->head->y;
             } else {
                 int d = modes_default(conn->modes, conn->nmodes, 2560, 1600);
-                if (d >= 0) { o->w = conn->modes[d].w; o->h = conn->modes[d].h; }
+                if (d >= 0) { o->w = conn->modes[d].w; o->h = conn->modes[d].h; o->hz = conn->modes[d].hz; }
                 o->x = conn_get(conn, "x", 100000); o->y = conn_get(conn, "y", 0);
             }
         }
@@ -602,12 +604,25 @@ void display_get_conf(display_conf_t *c) {
     c->primary = primary;
 }
 
+const display_mode_t *display_conf_mode(const display_conf_out_t *o) {
+    display_connector_t *c = o->conn;
+    int m = modes_find_rate(c->modes, c->nmodes, o->w, o->h, c->adapter->rates ? o->hz : 0);
+    if (m < 0) m = modes_find(c->modes, c->nmodes, o->w, o->h);
+    return m >= 0 ? &c->modes[m] : NULL;
+}
+
+/* the same mode (size, refresh rate and timing) */
+static int same_mode(const display_mode_t *a, const display_mode_t *b) {
+    return a->w == b->w && a->h == b->h && a->hz == b->hz && !memcmp(&a->t, &b->t, sizeof a->t) &&
+           (a->flags & (DT_HSYNC_POS | DT_VSYNC_POS | DT_INTERLACE)) == (b->flags & (DT_HSYNC_POS | DT_VSYNC_POS | DT_INTERLACE));
+}
+
 int display_conf_live(const display_conf_t *c) {
     for (int i = 0; i < c->n; i++) {
         const display_conf_out_t *o = &c->out[i];
         display_connector_t *conn = o->conn;
-        int same = (conn->head != NULL) == (o->attach != 0) &&
-                   (!o->attach || (conn->head->mode.w == o->w && conn->head->mode.h == o->h));
+        const display_mode_t *m = o->attach ? display_conf_mode(o) : NULL;
+        int same = (conn->head != NULL) == (o->attach != 0) && (!o->attach || (m && same_mode(&conn->head->mode, m)));
         if (!same && !conn->adapter->live) return 0;
     }
     return 1;
@@ -702,13 +717,13 @@ static int apply_raw(const display_conf_t *cf) {
             assign[i] = NULL;
             mode[i] = NULL;
             if (!o->attach || o->conn->status == CONN_DISCONNECTED) continue;
-            int m = modes_find(o->conn->modes, o->conn->nmodes, o->w, o->h);
-            if (m < 0) { kprintf("display: %s: no mode %dx%d\n", o->conn->name, o->w, o->h); continue; }
+            const display_mode_t *m = display_conf_mode(o);
+            if (!m) { kprintf("display: %s: no mode %dx%d\n", o->conn->name, o->w, o->h); continue; }
             display_head_t *h = pick_head(o->conn, taken);
             if (!h) { kprintf("display: %s: no free head\n", o->conn->name); continue; }
             taken[o->conn->adapter - adapter_store] |= 1u << h->index;
             assign[i] = h;
-            mode[i] = &o->conn->modes[m];
+            mode[i] = m;
         }
     for (int i = 0; i < c.n; i++)
         if (assign[i] && nplace < LAYOUT_MAX) {
@@ -739,10 +754,10 @@ static int apply_raw(const display_conf_t *cf) {
         const display_mode_t *m = mode[i];
         h->x = place[p].x;
         h->y = place[p].y;
-        if (h->conn == conn && h->mode.w == m->w && h->mode.h == m->h && h->nfb) continue;
+        if (h->conn == conn && same_mode(&h->mode, m) && h->nfb) continue;
         int r = head_set(h, conn, m);
         if (r) {
-            kprintf("display: %s: %dx%d failed (%s)\n", conn->name, m->w, m->h, strerror(r));
+            kprintf("display: %s: %dx%d at %d Hz failed (%s)\n", conn->name, m->w, m->h, m->hz, strerror(r));
             err = r;
             if (h->conn == conn) head_off(h);
         }
@@ -821,6 +836,10 @@ int display_save_conf(const display_conf_t *c) {
         if (o->w && o->h) {
             conn_key(o->conn, "width", k, sizeof k); settings_set_int(k, o->w);
             conn_key(o->conn, "height", k, sizeof k); settings_set_int(k, o->h);
+            /* the refresh rate, where the adapter offers a choice */
+            conn_key(o->conn, "hz", k, sizeof k);
+            if (o->conn->adapter->rates && o->hz > 0) settings_set_int(k, o->hz);
+            else settings_set(k, NULL);
         }
         display_connector_t *conn = o->conn;
         if (conn->head) {
@@ -840,6 +859,26 @@ int display_save_conf(const display_conf_t *c) {
     return settings_save();
 }
 
+/* the mode saved for a connector (display.<connector>.width, height and,
+ * where the adapter offers a choice, hz); -1 if none is saved or its size is
+ * not offered. A saved refresh rate that is not offered any more (another
+ * monitor, a slower link) gives modes_find's rate at that size: the
+ * monitor's preferred one, else the highest; BOOT.LOG says so. */
+static int rate_fell;                          /* (display_start saves BOOT.LOG then) */
+static int saved_mode(display_connector_t *c) {
+    int w = conn_get(c, "width", 0), h = conn_get(c, "height", 0), fell = 0;
+    if (!w || !h) return -1;
+    int hz = c->adapter->rates ? conn_get(c, "hz", 0) : 0;
+    int m = modes_saved(c->modes, c->nmodes, w, h, hz, &fell);
+    if (m >= 0 && fell) {
+        int p = modes_preferred(c->modes, c->nmodes);
+        rate_fell = 1;
+        kprintf("display: %s: %d Hz at %dx%d is not offered any more: %d Hz instead (%s)\n", c->name, hz, w, h, c->modes[m].hz,
+                p >= 0 && c->modes[p].hz == c->modes[m].hz ? "the monitor's preferred rate" : "the highest rate at that size");
+    }
+    return m;
+}
+
 /* the configuration an adapter starts with: SETTINGS.INI, else defaults */
 static void conf_for_start(display_conf_t *cf, display_adapter_t *a, int place_x) {
     for (int k = 0; k < a->nconns && cf->n < (int)ARRAY_SIZE(cf->out); k++) {
@@ -848,8 +887,7 @@ static void conf_for_start(display_conf_t *cf, display_adapter_t *a, int place_x
         memset(o, 0, sizeof *o);
         o->conn = c;
         o->attach = c->status != CONN_DISCONNECTED && c->nmodes > 0 && conn_get(c, "attach", 1);
-        int w = conn_get(c, "width", 0), h = conn_get(c, "height", 0), m = -1;
-        if (w && h) m = modes_find(c->modes, c->nmodes, w, h);
+        int w, h, m = saved_mode(c);
         const char *pn = settings_get("display.primary", NULL);
         int maybe_primary = (pn && !strcasecmp(pn, c->name)) || (!pn && a->owns_fw_fb && k == 0);
         if (m < 0 && maybe_primary) {
@@ -862,7 +900,7 @@ static void conf_for_start(display_conf_t *cf, display_adapter_t *a, int place_x
         if (m < 0 && a->owns_fw_fb && maybe_primary)
             m = modes_find(c->modes, c->nmodes, (int)fwfb.w, (int)fwfb.h);
         if (m < 0) m = modes_default(c->modes, c->nmodes, 2560, 1600);
-        if (m >= 0) { o->w = c->modes[m].w; o->h = c->modes[m].h; }
+        if (m >= 0) { o->w = c->modes[m].w; o->h = c->modes[m].h; o->hz = c->modes[m].hz; }
         else o->attach = 0;
         o->x = conn_has(c, "x") ? conn_get(c, "x", 0) : place_x;
         o->y = conn_get(c, "y", 0);
@@ -884,6 +922,16 @@ static void log_connectors(display_adapter_t *a) {
             char d[128];
             mode_describe(&c->modes[p], d, sizeof d);
             kprintf("display:   preferred %s\n", d);
+        }
+        /* the sizes with a choice of refresh rates */
+        for (int i = 0, lines = 0; a->rates && i < c->nmodes && lines < 12; i++) {
+            if (i && c->modes[i - 1].w == c->modes[i].w && c->modes[i - 1].h == c->modes[i].h) continue;
+            int hz[16], n = modes_rates(c->modes, c->nmodes, c->modes[i].w, c->modes[i].h, hz, 16);
+            if (n < 2) continue;
+            char r[96] = "";
+            for (int j = 0; j < n; j++) snprintf(r + strlen(r), sizeof r - strlen(r), "%s%d", j ? ", " : "", hz[j]);
+            kprintf("display:   %dx%d at %s Hz\n", c->modes[i].w, c->modes[i].h, r);
+            lines++;
         }
     }
 }
@@ -911,10 +959,12 @@ static void log_outputs(void) {
     int n = display_outputs(outs, DISPLAY_MAX_OUTPUTS), bw, bh;
     display_desktop_size(&bw, &bh);
     for (int i = 0; i < n; i++) {
-        char mon[64];
+        char mon[64], hz[16] = "";
         edid_describe(&outs[i].conn->monitor, mon, sizeof mon);
-        kprintf("display: monitor %d: %s (%s) %dx%d at %d,%d on %s%s\n", outs[i].conn->number, outs[i].conn->name, mon,
-                outs[i].w, outs[i].h, outs[i].x, outs[i].y, outs[i].conn->adapter->name, outs[i].primary ? ", primary" : "");
+        /* the refresh rate where it is the monitor's (a driver that programs the timing) */
+        if (outs[i].conn->adapter->rates && outs[i].head->mode.hz) snprintf(hz, sizeof hz, "@%d", outs[i].head->mode.hz);
+        kprintf("display: monitor %d: %s (%s) %dx%d%s at %d,%d on %s%s\n", outs[i].conn->number, outs[i].conn->name, mon,
+                outs[i].w, outs[i].h, hz, outs[i].x, outs[i].y, outs[i].conn->adapter->name, outs[i].primary ? ", primary" : "");
     }
     kprintf("display: desktop %dx%d on %d monitor%s\n", bw, bh, n, n == 1 ? "" : "s");
 }
@@ -979,9 +1029,10 @@ static void guard_clear(display_adapter_t *a, const char *why) {
     if (bootlog_save) bootlog_save("display driver running");
 }
 
-/* "DP-1 1920x1080 fc;HDMI-1 1280x1024;": each output's mode, and whether its
- * head flips pages (f) and draws the hardware cursor (c), so a driver that
- * gains these asks once more */
+/* "DP-1 2560x1440@165 fc;HDMI-1 1280x1024@60;": each output's mode and
+ * refresh rate, and whether its head flips pages (f) and draws the
+ * hardware cursor (c), so a new rate, or a driver that gains these, asks
+ * once more */
 static void guard_signature(display_adapter_t *a, char *out, int n) {
     out[0] = 0;
     for (int k = 0; k < a->nconns; k++) {
@@ -989,7 +1040,7 @@ static void guard_signature(display_adapter_t *a, char *out, int n) {
         if (!c->head) continue;
         char one[48];
         u32 caps = c->head->caps;
-        snprintf(one, sizeof one, "%s %dx%d%s%s%s;", c->name, c->head->mode.w, c->head->mode.h,
+        snprintf(one, sizeof one, "%s %dx%d@%d%s%s%s;", c->name, c->head->mode.w, c->head->mode.h, c->head->mode.hz,
                  caps & (HEAD_CAP_FLIP | HEAD_CAP_CURSOR) ? " " : "", caps & HEAD_CAP_FLIP ? "f" : "", caps & HEAD_CAP_CURSOR ? "c" : "");
         strlcat(out, one, (size_t)n);
     }
@@ -1157,6 +1208,8 @@ void display_start(void) {
         kprintf("display: %s, %d modes (changes apply at the next start)\n", fwa->name, fwa->conns[0].nmodes);
     log_outputs();
     for (int i = 0; i < nadapters; i++) guard_started(&adapter_store[i]);
+    /* (BOOT.LOG was saved before the display started: the reason goes in now) */
+    if (rate_fell && bootlog_save) bootlog_save("a saved refresh rate is not offered");
 }
 
 void display_apply_saved(void) { display_start(); }
@@ -1194,9 +1247,8 @@ static void hotplug_reconfigure(display_adapter_t *a) {
             o->attach = 0;
             continue;
         }
-        int w = conn_get(c, "width", 0), h = conn_get(c, "height", 0), m = -1;
-        /* a saved mode is kept; otherwise the monitor's (the VM window's) size is followed */
-        if (w && h && !pref_changed) m = modes_find(c->modes, c->nmodes, w, h);
+        /* a saved mode (and rate) is kept; otherwise the monitor's (the VM window's) size is followed */
+        int m = pref_changed ? -1 : saved_mode(c);
         if (m < 0) m = modes_default(c->modes, c->nmodes, 2560, 1600);
         if (m < 0) { o->attach = 0; continue; }
         if (was[k] == CONN_DISCONNECTED || !c->head) {
@@ -1209,6 +1261,7 @@ static void hotplug_reconfigure(display_adapter_t *a) {
         }
         o->w = c->modes[m].w;
         o->h = c->modes[m].h;
+        o->hz = c->modes[m].hz;
     }
     if (!changed) return;
     if (cf.primary && conf_find(&cf, cf.primary) && !conf_find(&cf, cf.primary)->attach) cf.primary = NULL;
@@ -1349,7 +1402,7 @@ int display_set_mode(int w, int h) {
     display_get_conf(&cf);
     display_conf_out_t *o = conf_find(&cf, c);
     if (!o) return E_INVAL;
-    o->w = w; o->h = h;
+    o->w = w; o->h = h; o->hz = 0;
     int r = display_set_conf(&cf);
     if (!r) kprintf("display: mode %dx%d\n", w, h);
     return r;
@@ -1358,7 +1411,7 @@ int display_save_mode(int w, int h) {
     display_conf_t cf;
     display_get_conf(&cf);
     display_conf_out_t *o = pc() ? conf_find(&cf, pc()) : NULL;
-    if (o) { o->w = w; o->h = h; }
+    if (o) { o->w = w; o->h = h; o->hz = 0; }
     settings_set_int("display.width", w);
     settings_set_int("display.height", h);
     return o ? display_save_conf(&cf) : settings_save();

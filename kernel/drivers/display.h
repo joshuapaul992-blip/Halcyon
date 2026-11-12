@@ -40,7 +40,7 @@ struct pci_dev;
 #define DISPLAY_MAX_ADAPTERS   4
 #define DISPLAY_MAX_HEADS      4      /* per adapter */
 #define DISPLAY_MAX_CONNECTORS 8      /* per adapter */
-#define DISPLAY_MAX_MODES      64     /* per connector */
+#define DISPLAY_MAX_MODES      96     /* per connector (sizes x refresh rates) */
 #define DISPLAY_MAX_OUTPUTS    8      /* monitors on the desktop at once */
 #define DISPLAY_EDID_MAX       512
 
@@ -165,6 +165,8 @@ struct display_adapter {
     int live;                  /* modes switch at once (else: at the next start) */
     int owns_fw_fb;            /* this device shows the firmware frame buffer */
     int virtual_sizes;         /* virtual hardware: offer the common sizes too */
+    int rates;                 /* set_mode programs each mode's own timing: every refresh rate the
+                                  monitor lists is offered (else one mode per size) */
     int max_w, max_h;          /* largest mode / buffer */
     u32 max_clock_khz;         /* 0: no limit */
     u64 vram;                  /* bytes for scanout buffers (0: no limit) */
@@ -264,6 +266,7 @@ typedef struct display_conf_out {
     display_connector_t *conn;
     int attach;                /* part of the desktop */
     int w, h;                  /* mode */
+    int hz;                    /* its refresh rate (adapters with rates); 0: modes_find's for the size */
     int x, y;                  /* place (any origin: normalized) */
 } display_conf_out_t;
 typedef struct display_conf {
@@ -275,6 +278,8 @@ void display_get_conf(display_conf_t *c);            /* as it is now */
 int  display_set_conf(const display_conf_t *c);      /* apply live; on failure back to the old one; 0 or E_* */
 int  display_save_conf(const display_conf_t *c);     /* SETTINGS.INI (display.<connector>.*) */
 int  display_conf_live(const display_conf_t *c);     /* can this be applied without a restart? */
+/* the connector's mode for o (o->w x o->h at o->hz, else modes_find's), or NULL */
+const display_mode_t *display_conf_mode(const display_conf_out_t *o);
 
 /* After a fatal error (core/panic.c): phase 0 points g_bootinfo.fb_* at
  * the primary head's visible buffer, phase 1 makes the drawing visible */

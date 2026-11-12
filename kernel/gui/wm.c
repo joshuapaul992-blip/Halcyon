@@ -1392,18 +1392,22 @@ void gui_main(void) {
     }
     /* test hook: QEMU fw_cfg "opt/halcyon/setmode" = "WIDTHxHEIGHT" switches the
      * primary monitor's mode once the desktop is up (live adapters);
-     * "CONNECTOR:WIDTHxHEIGHT" another monitor's */
+     * "CONNECTOR:WIDTHxHEIGHT[@HZ]" another monitor's (at that refresh rate) */
     char setmode[48];
     if (qemu_fw_file("opt/halcyon/setmode", setmode, sizeof setmode) && setmode[0]) {
         char *colon = strchr(setmode, ':'), *spec = colon ? colon + 1 : setmode;
-        char *x = strchr(spec, 'x');
+        char *x = strchr(spec, 'x'), *at = strchr(spec, '@');
         int sw = (int)strtol(spec, NULL, 10), sh = x ? (int)strtol(x + 1, NULL, 10) : 0, r = E_INVAL;
+        int shz = at ? (int)strtol(at + 1, NULL, 10) : 0;
         if (colon) {
             *colon = 0;
             display_conf_t cf;
             display_get_conf(&cf);
             for (int i = 0; i < cf.n; i++)
-                if (!strcasecmp(cf.out[i].conn->name, setmode)) { cf.out[i].w = sw; cf.out[i].h = sh; cf.out[i].attach = 1; r = display_set_conf(&cf); }
+                if (!strcasecmp(cf.out[i].conn->name, setmode)) {
+                    cf.out[i].w = sw; cf.out[i].h = sh; cf.out[i].hz = shz; cf.out[i].attach = 1;
+                    r = display_set_conf(&cf);
+                }
         } else {
             r = display_set_mode(sw, sh);
         }
@@ -1418,6 +1422,7 @@ void gui_main(void) {
         shell_run(autorun, args);
     }
     format_test_hook();
+    display_test_hook();                    /* apps/display.c: fw_cfg opt/halcyon/displaytest */
     recycle_test_hook();                    /* apps/recycletest.c: fw_cfg opt/halcyon/recycletest */
     installer_boot_hook();
     for (;;) gui_step();

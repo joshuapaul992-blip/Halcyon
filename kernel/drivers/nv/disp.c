@@ -273,6 +273,13 @@ static u32 max_clock(nvd_t *n, nvd_conn_t *c, const nv_dcb_output_t *o) {
     return 0;
 }
 
+/* Every timing of the mode list (each refresh rate separately) at its exact
+ * pixel clock: the head's limit, then the output's. DisplayPort: the most
+ * the link can carry, the lanes and rate both ends support (the DPCD's,
+ * capped by the DCB and the generation, read at detect); a mode set
+ * retrains the link for the mode's clock, widest and fastest first
+ * (nv_dp_configs), so a timing that fits here trains unless the cable
+ * cannot carry it, and then the mode set fails and the core goes back. */
 static int nvd_mode_valid(display_adapter_t *a, display_connector_t *dc, const display_mode_t *m) {
     nvd_t *n = a->priv;
     nvd_conn_t *c = &n->conn[dc->index];
@@ -1109,6 +1116,7 @@ static void probe_one(nv_device_t *d) {
     nvds[slot] = n;
     n->a = a;
     a->live = 1;
+    a->rates = 1;                                    /* each mode's own timing: every refresh rate the monitor lists */
     a->max_w = g->max_w;
     a->max_h = g->max_h;
     a->pitch_align = 256;
