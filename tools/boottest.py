@@ -103,6 +103,15 @@ interrupts on, get a working interrupt:
   guardblock  the same with display.virtio-gpu.guard=start already in
           SETTINGS.INI (a start that did not finish): the driver is not
           started, the marker becomes "blocked"
+  accel   (with vgpu or dual) the display core's accelerated presentation
+          (M10e) through its software test hook (fw_cfg displayaccel): the
+          virtio GPU gets uploads, buffer-to-buffer copies and fills done
+          asynchronously, so the fences, the flip and flush ordering run on
+          the real presentation path; the checks of vgpu / dual (flips, the
+          screendumps with the desktop) must still pass
+  accelhang  the same, but the test hook stops completing after 50 fences:
+          the core must give acceleration up after 250 ms and the CPU
+          present the desktop (the vgpu screendump still shows it)
   ntfsrw  an internal SATA disk (one MBR partition of type 7) with an NTFS
           volume made on the host by mkntfs and ntfs-3g (tests/host/
           ntfs_mkimg.py, needs root): it has \\Windows\\System32, so it
@@ -239,10 +248,12 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:bios:ac97+dusk", "xhci:uefi:hda+tide", "xhci:uefi:virtiosnd", "xhci:bios:audio",
           "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:bios:recycle", "xhci:bios:saver", "xhci:uefi:nvfake",
           "xhci:bios:nvfake+nvoff", "xhci:bios:nvfake+nvset", "xhci:bios:guard", "xhci:uefi:guardblock",
+          "xhci:bios:vgpu+accel", "xhci:uefi:dual+accel", "xhci:bios:vgpu+accelhang",
           "xhci:uefi:install", "xhci:bios:install"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "help": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "vgpu": 0, "dual": 0, "arrange": 0, "multi": 0, "gpufail": 0, "gpuoff": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0,
-            "recycle": 0, "saver": 0, "nvfake": 0, "nvoff": 0, "nvset": 0, "guard": 0, "guardblock": 0}
+            "recycle": 0, "saver": 0, "nvfake": 0, "nvoff": 0, "nvset": 0, "guard": 0, "guardblock": 0,
+            "accel": 0, "accelhang": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -1416,7 +1427,10 @@ def nvfake_failures(text, img, rom, edid, nvset=False, nvoff=False):
     if os.path.exists(p):
         rep = open(p, errors="replace").read()
         for want in ("Card 0: NVIDIA GeForce GTX 1070", "DCB 4.1", "HALCYON TEST", "1920x1200 at 60 Hz", "Display driver: firmware frame buffer",
-                     "RAM to screen copy", "MB/s") + \
+                     "RAM to screen copy", "MB/s", "copy engine: RAM to screen", "Side by side (M10e)",
+                     "Acceleration (M10e): none (no native driver)" if nvoff else
+                     "Acceleration (M10e): off: nv.accel=0 in SETTINGS.INI" if nvset else
+                     "Acceleration (M10e): off: simulated card: no registers") + \
                 (() if nvoff else
                  ("Heads: page flips, hardware cursor, vertical blank (M10d)",
                   "settings: nv.flip=0, nv.hwcursor=0, nv.heads=1 (1 of 4 heads registered)", "head 0: off, 0 kHz; caps vblank;")
@@ -1612,12 +1626,23 @@ def run(cfg):
     if "guardblock" in opts:
         checks.append(("blocked by the marker", "(virtio-gpu) not started: its start at the last boot did not finish"))
         checks.append(("firmware frame buffer kept", "changes apply at the next start"))
+    if "accel" in opts or "accelhang" in opts:
+        extra += " -fw_cfg name=opt/halcyon/displayaccel,string=virtio-gpu%s" % (":hang" if "accelhang" in opts else "")
+        if "dual" not in opts:            # Starfield after 4 s: many frames through the accelerated path
+            extra += " -fw_cfg name=opt/halcyon/screensaver,string=4:STARS.SCR"
+        checks.append(("acceleration through the software test hook", "acceleration in use: software (test hook"))
+        checks.append(("updates presented through acceleration", "updates presented through acceleration ("))
+    if "accel" in opts:
+        checks.append(("100 updates through acceleration", "100 updates presented through acceleration ("))
+    if "accelhang" in opts:
+        checks.append(("a fence that never comes back ends acceleration", "acceleration off for this session: a fence did not complete in 250 ms"))
     if "nvoff" in opts:
         checks.append(("nv.modeset=0", "nv0: native modesetting off (nv.modeset=0 in SETTINGS.INI)"))
     elif "nvset" in opts:
         checks.append(("modesetting registered with one head", "nv0: native modesetting: GP102 display engine (core class 987d), 1 head, 5 connectors, simulated card"))
         checks.append(("nv.hwcursor=0, nv.flip=0, nv.heads=1", "nv0: 10d: hardware cursor off (nv.hwcursor=0) (cursor channel 917a, 64x64), page flips off (nv.flip=0) (base channel 927c), vertical blank polled; 1 of 4 heads (nv.heads)"))
         checks.append(("one monitor at a time", "nv0: dry run: 1 of 5 monitors can be lit at once"))
+        checks.append(("nv.accel=0", "nv0: 10e: acceleration off (nv.accel=0 in SETTINGS.INI)"))
     elif "nvfake" in opts:
         checks.append(("modesetting registered", "nv0: native modesetting: GP102 display engine (core class 987d), 4 heads, 5 connectors, simulated card"))
         checks.append(("simulated card not touched", "display: NVIDIA GeForce GTX 1070 (nv) failed: simulated card (QEMU test hook): no registers, native modesetting not attempted"))
@@ -1628,6 +1653,9 @@ def run(cfg):
         checks.append(("dry run of four monitors", "nv0: dry run: a monitor on every connector: HDMI-1 on head 3, SOR3, VPLL3"))
         checks.append(("a fifth monitor has no head", "nv0: dry run: a monitor on every connector: DVI-D-1: no free head for DCB output 6"))
         checks.append(("10d not attempted", "nv0: 10d: no base or cursor channel started, no scanline read, 4 heads not lit: the simulated card has no registers"))
+        checks.append(("10e dry run of the copy engine", "nv0: 10e: dry run: SET_OBJECT c1b5 2 words, a 1920x1200 upload 10 words (20088100 00000002 ... 838680c0), a fill 14 words (200381c0 ... 878680c0), the semaphore release 5 words"))
+        checks.append(("10e dry run of the page tables", "nv0: 10e: dry run: page tables (GP100 format): directory base"))
+        checks.append(("10e not attempted", "nv0: 10e: no channel started, no register touched: the simulated card has no registers"))
     if "vgpu" in opts:
         checks.append(("virtio GPU in use", "monitor 1: Virtual-1"))
         checks.append(("firmware frame buffer retired", "display: Default: off"))
@@ -1704,7 +1732,7 @@ def run(cfg):
     if "nvoff" in opts:
         ini_lines += ["nv.modeset=0"]
     if "nvset" in opts:
-        ini_lines += ["nv.flip=0", "nv.hwcursor=0", "nv.heads=1"]
+        ini_lines += ["nv.flip=0", "nv.hwcursor=0", "nv.heads=1", "nv.accel=0"]
     if "arrange" in opts:
         ini_lines += ["display.primary=Virtual-2", "display.virtual-2.width=800", "display.virtual-2.height=600",
                       "display.virtual-2.x=0", "display.virtual-2.y=0", "display.virtual-2.attach=1",
@@ -1832,11 +1860,26 @@ def run(cfg):
         im = Image.open(png).convert("RGB")
         if dark_share(im) > 0.5 or blue_share(im, (200, im.size[1] - 26, im.size[0] - 200, im.size[1] - 4)) < 0.8:
             gpu_fails.append("screendump shows no desktop with its taskbar (%.0f%% dark)" % (dark_share(im) * 100))
+    if ("accel" in opts or "accelhang" in opts) and "dual" not in opts and p.poll() is None and "gui: desktop ready" in text:
+        want = "acceleration off for this session" if "accelhang" in opts else "100 updates presented through acceleration"
+        if not wait_log(log, want, 0, 40):
+            gpu_fails.append("no '%s' within 40 s" % want)
+        if "accelhang" in opts:
+            # the screen saver ends; the CPU presents the desktop again
+            subprocess.run([sys.executable, "tools/qemu_ctl.py", os.path.join(BUILD, "mon.sock"), "sendkey shift", "sleep:2"],
+                           stdout=subprocess.DEVNULL)
+            png = os.path.abspath(os.path.join(BUILD, "ci_gpu2.png"))
+            subprocess.run([sys.executable, "tools/qemu_ctl.py", os.path.join(BUILD, "mon.sock"), "png:" + png], stdout=subprocess.DEVNULL)
+            from PIL import Image
+            im = Image.open(png).convert("RGB")
+            if dark_share(im) > 0.5 or blue_share(im, (200, im.size[1] - 26, im.size[0] - 200, im.size[1] - 4)) < 0.8:
+                gpu_fails.append("after acceleration was given up the screendump shows no desktop (%.0f%% dark)" % (dark_share(im) * 100))
+        text = open(log, errors="replace").read()
     if "saver" in opts and p.poll() is None and "gui: desktop ready" in text:
         saver_fails = saver_test(log)
         text = open(log, errors="replace").read()
     if p.poll() is None and "gui: desktop ready" in text and not prog and "saver" not in opts and "dual" not in opts \
-            and "arrange" not in opts:
+            and "arrange" not in opts and "accel" not in opts and "accelhang" not in opts:
         time.sleep(2)
         c0 = cpu_seconds(p.pid)
         time.sleep(4)
