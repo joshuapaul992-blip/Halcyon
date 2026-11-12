@@ -268,6 +268,24 @@ void desktop_paint(gc_t *g, rect_t clip) {
             gfx_text(g, &font_ui, tx, ty, t, HEX(0xFFFFFF));
         }
     }
+#if OS_PRERELEASE
+    /* the pre-release watermark, bottom right above the tray:
+     *   Halcyon 1.0
+     *   For testing purposes only. Build 107 */
+    static const char l1[] = "Halcyon " OS_RELEASE;
+    char l2[64];
+    snprintf(l2, sizeof l2, "For testing purposes only. Build %u", (unsigned)OS_BUILD);
+    int right = screen_w() - 10;
+    int y2 = screen_h() - TASKBAR_H - 6 - font_ui.height;
+    int y1 = y2 - font_title.height - 1;
+    int w1 = gfx_text_width(&font_title, l1), w2 = gfx_text_width(&font_ui, l2);
+    if (!rect_empty(rect_intersect(mkrect(right - MAX(w1, w2) - 2, y1, MAX(w1, w2) + 4, y2 + font_ui.height + 2 - y1), clip))) {
+        gfx_text(g, &font_title, right - w1 + 1, y1 + 1, l1, HEX(0x000000));
+        gfx_text(g, &font_title, right - w1, y1, l1, HEX(0xFFFFFF));
+        gfx_text(g, &font_ui, right - w2 + 1, y2 + 1, l2, HEX(0x000000));
+        gfx_text(g, &font_ui, right - w2, y2, l2, HEX(0xFFFFFF));
+    }
+#endif
 }
 
 static menu_item_t desk_menu_items[] = {

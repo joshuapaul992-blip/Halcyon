@@ -73,7 +73,11 @@ static void about_paint(window_t *w, gc_t *g) {
         gfx_text_box(g, &font_ui, mkrect(140, y, cw - 164, font_ui.height), values[i], HEX(0x1C2230), 0);
         y += 21;
     }
-    gfx_text(g, &font_small, 24, ch - 30, "Halcyon " OS_VERSION ", built " __DATE__, HEX(0x8A8A8A));
+    gfx_text(g, &font_small, 24, ch - 30, "Halcyon " OS_VERSION ", built " __DATE__
+#if OS_PRERELEASE
+             " (pre-release)"
+#endif
+             , HEX(0x8A8A8A));
 }
 
 static void about_ok(window_t *w, widget_t *b) { wm_close(w); }
