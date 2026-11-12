@@ -18,6 +18,12 @@
  *     the transfer unit / watermark against hand-computed values, link
  *     training against a simulated sink (fine, needs more swing, never
  *     locks, no sink), and the drive levels from the VBIOS table
+ *   - refresh rates on the user's GTX 1070 and LG UltraGear: the GP104's
+ *     PLL table reconstructed from the coefficients NVREPORT logged for
+ *     497.75 MHz, 241.50 / 604.25 / 679.30 MHz hit exactly inside the VCO
+ *     range; 2560 x 1440 at 165, 144, 60 and 120 Hz set one after the
+ *     other on a lit head (the link trained again at 4 x 8.1 GHz each
+ *     time, the PLL's coefficients); a DCB capped at 5.4 GHz; a 2-lane sink
  *   - VBIOS tables: IED output / settings / clock scripts, DP output and
  *     drive tables, and the init script interpreter: conditions, NOT,
  *     RESUME, sub-scripts, REPEAT, register writes with the head / OR /
@@ -1117,13 +1123,13 @@ static void fw_state(void) {
 }
 
 static int g_base, g_keep_fw;          /* (10d) the base usage bounds; a second head: the first stays on */
-static int set_1080(int head, int k, int or_id, u32 proto, nv_evo_dp_t *dp) {
-    nv_evo_timing_t t;
-    timing_1080(&t);
+static int set_timing(int head, int k, int or_id, u32 proto, nv_evo_dp_t *dp, const nv_evo_timing_t *tm) {
+    nv_evo_timing_t t = *tm;
     nv_evo_head_cfg_t c;
     memset(&c, 0, sizeof c);
     nv_evo_raster(&t, &c.r);
-    c.head = head; c.on = 1; c.w = 1920; c.h = 1080; c.offset = 8u << 20; c.pitch = 7680; c.vram_handle = EVO_HANDLE_VRAM;
+    c.head = head; c.on = 1; c.w = t.hactive; c.h = t.vactive; c.offset = 8u << 20; c.pitch = ALIGN_UP((u32)t.hactive * 4, 256u);
+    c.vram_handle = EVO_HANDLE_VRAM;
     c.or_type = proto == EVO_PROTO_CRT; c.or_id = or_id; c.proto = proto; c.or_heads = 1u << head;
     c.depth = proto == EVO_PROTO_DP_A ? EVO_DEPTH_24 : 0;
     c.base = (u8)g_base;
@@ -1143,6 +1149,11 @@ static int set_1080(int head, int k, int or_id, u32 proto, nv_evo_dp_t *dp) {
     int r = nv_evo_submit(&E, &s, 1);
     E.dp[or_id] = NULL;
     return r;
+}
+static int set_1080(int head, int k, int or_id, u32 proto, nv_evo_dp_t *dp) {
+    nv_evo_timing_t t;
+    timing_1080(&t);
+    return set_timing(head, k, or_id, proto, dp, &t);
 }
 
 static void test_takeover(u16 chipset) {
@@ -1331,6 +1342,142 @@ static void test_dp_training(void) {
     evo_setup(0x134); sink_init(4, 0x14);
     memset(&dp, 0, sizeof dp);
     CHECK(!nv_dp_detect(&E, &dp) && dp.bw_max == 0x0a, "DCB caps the rate");
+}
+
+/* ---------------- refresh rates: the GTX 1070 and the LG UltraGear ----------------
+ *
+ * The user's monitor on DisplayPort (NVREPORT 1.0.199): 2560 x 1440 at 60,
+ * 120, 144 and 165 Hz, h 48+32+80 (total 2720), v 3+5+33 / 77 / 95 / 66. Its
+ * DCB output: 4 lanes up to 8.1 GHz; the sink: DPCD 1.4, 4 lanes, rate 1e.
+ *
+ * The GP104's PLL limits table (version 4.0, 27 MHz reference) is not in
+ * the report; the coefficients our calculator chose from it for the
+ * firmware's 497.75 MHz are: N 54 fN 19c7 M 1 P 3. P = VCO maximum / clock
+ * (capped by the table's P range) = 3 means a maximum between 1493.25 and
+ * 1991 MHz with P allowed up to 3 at least; M = 1 an input maximum above
+ * 27 MHz. Every table in that range must give the logged coefficients and
+ * reach 604.25 and 679.30 MHz exactly, inside the VCO range. */
+static const struct { u32 khz, vtotal; } lg[] = { { 241500, 1481 }, { 497750, 1525 }, { 604250, 1543 }, { 679300, 1514 } };
+
+static void lg_timing(int i, nv_evo_timing_t *t) {
+    *t = (nv_evo_timing_t){ lg[i].khz, 2560, 2608, 2640, 2720, 1440, 1443, 1448, (u16)lg[i].vtotal, 0, 1 };
+}
+
+/* the 4.0 limits record both VPLLs of the test ROM point at (MHz) */
+static void pll40(u32 vco_min, u32 vco_max, u32 in_min, u32 in_max, int p_max) {
+    u32 l = A_PLL + 0x40;
+    w16(l, vco_min); w16(l + 2, vco_max); w16(l + 4, in_min); w16(l + 6, in_max);
+    w8(l + 8, 1); w8(l + 9, 255); w8(l + 10, 8); w8(l + 11, 255); w8(l + 12, 1); w8(l + 13, (u32)p_max);
+}
+
+/* the PLL's output for its coefficients (fractional N: fN + 4096 in 13 bits) */
+static double pll_out(const nv_pll_limits_t *p, int N, int fN, int M, int P) {
+    double n = N + (double)((fN + 4096) & 0xFFFF) / 8192.0;
+    if (((fN + 4096) & 0xFFFF) >= 0x8000) n -= 8.0;
+    return (double)p->refclk * n / M / P;
+}
+
+static void test_refresh_rates(void) {
+    nv_pll_limits_t p;
+    int N, fN, M, P;
+    /* the PLL: every reconstruction of the GP104's table */
+    static const u32 vmax[] = { 1500, 1600, 1700, 1800, 1900, 1990 };
+    for (unsigned v = 0; v < ARRAY_SIZE(vmax); v++) {
+        build_rom(0x40);
+        pll40(vmax[v] / 2, vmax[v], 13, 38, 31);
+        CHECK(!nv_pll_limits(&BIOS, 0x134, 0x80, 27000, &p) && p.vco1.max_freq == vmax[v] * 1000 && p.refclk == 27000, "GP104 table %u", vmax[v]);
+        int got = nv_pll_calc_gt215(&p, 497750, &N, &fN, &M, &P);
+        CHECK(got == 497750 && N == 54 && fN == 0x19c7 && M == 1 && P == 3, "VCO up to %u MHz: 497.75 MHz as the report logged it (N %d fN %04x M %d P %d)",
+              vmax[v], N, fN, M, P);
+        for (unsigned i = 0; i < ARRAY_SIZE(lg); i++) {
+            got = nv_pll_calc_gt215(&p, lg[i].khz, &N, &fN, &M, &P);
+            double out = pll_out(&p, N, fN, M, P), vco = (double)lg[i].khz * P;
+            CHECK(got == (int)lg[i].khz && out > lg[i].khz * 0.99999 && out < lg[i].khz * 1.00001 && vco >= p.vco1.min_freq &&
+                  vco <= p.vco1.max_freq && N >= p.vco1.min_n && N <= p.vco1.max_n && M == 1,
+                  "VCO up to %u MHz: %u kHz -> %.2f kHz (N %d fN %04x M %d P %d, VCO %.0f)", vmax[v], lg[i].khz, out, N, fN, M, P, vco);
+        }
+    }
+    /* the table used below: VCO 950-1900 MHz; the coefficients worked out by hand:
+     * 604.25: P 3, 1812750 / 27000 = 67.14 -> N 66, fN (30750 * 8192 + 13500) / 27000 - 4096 = 0x1472
+     * 679.30: P 2, 1358600 / 27000 = 50.32 -> N 49, fN (35600 * 8192 + 13500) / 27000 - 4096 = 0x1a31 */
+    build_rom(0x40);
+    pll40(950, 1900, 13, 38, 31);
+    nv_pll_limits(&BIOS, 0x134, 0x80, 27000, &p);
+    CHECK(nv_pll_calc_gt215(&p, 604250, &N, &fN, &M, &P) == 604250 && N == 66 && fN == 0x1472 && P == 3, "604.25: N %d fN %04x P %d", N, fN, P);
+    CHECK(nv_pll_calc_gt215(&p, 679300, &N, &fN, &M, &P) == 679300 && N == 49 && fN == 0x1a31 && P == 2, "679.30: N %d fN %04x P %d", N, fN, P);
+
+    /* DisplayPort: what the link carries (mode_valid) and the configurations tried */
+    CHECK(nv_dp_fits(4, 0x1e, 679300, 24) && nv_dp_fits(4, 0x14, 679300, 24) && !nv_dp_fits(2, 0x1e, 679300, 24) &&
+          !nv_dp_fits(2, 0x1e, 604250, 24) && nv_dp_fits(2, 0x1e, 497750, 24) && !nv_dp_fits(4, 0x0a, 497750, 24),
+          "165 Hz needs 4 lanes at 5.4 or 8.1 GHz; 120 Hz fits 2 lanes at 8.1");
+    int nr[8];
+    u8 bw[8];
+    int n = nv_dp_configs(4, 0x1e, (679300 * 24 + 7) / 8, nr, bw, 8);
+    CHECK(n == 2 && nr[0] == 4 && bw[0] == 0x1e && nr[1] == 4 && bw[1] == 0x14, "165 Hz: 4 x 8.1, then 4 x 5.4 (%d)", n);
+    n = nv_dp_configs(4, 0x1e, (497750 * 24 + 7) / 8, nr, bw, 8);
+    CHECK(n == 3 && nr[2] == 2 && bw[2] == 0x1e, "120 Hz: 4 x 8.1, 4 x 5.4, 2 x 8.1 (%d)", n);
+    for (unsigned i = 0; i < ARRAY_SIZE(lg); i++) CHECK(lg[i].khz <= nv_evo_head_max_khz(nv_evo_gen_for(0x134)), "a Pascal head drives %u kHz", lg[i].khz);
+
+    /* the mode sets on the simulated GP104: 165 Hz, then 144 (the rate changes on
+     * the lit head: the link trained again, the PLL set again), then 60 */
+    evo_setup(0x134);
+    fw_state();
+    BIOS.out[0].dp_max_rate = 3;                     /* DCB: up to 8.1 GHz */
+    sink_init(4, 0x1e);
+    K.dpcd[0] = 0x14;                                /* DPCD 1.4 */
+    CHECK(!nv_evo_takeover(&E), "GP104 takeover: %s", E.why);
+    nv_evo_dp_t dp;
+    memset(&dp, 0, sizeof dp);
+    CHECK(!nv_dp_detect(&E, &dp) && dp.lanes_max == 4 && dp.bw_max == 0x1e, "the LG's link: %d lanes, rate %02x", dp.lanes_max, dp.bw_max);
+    for (unsigned i = 0; i < ARRAY_SIZE(lg); i++) CHECK(nv_dp_fits(dp.lanes_max, dp.bw_max, lg[i].khz, 24), "mode_valid: %u kHz fits", lg[i].khz);
+    static const int order[] = { 3, 2, 0, 1 };
+    static const u32 pll_reg[] = { 0, 0, (3u << 16) | (66u << 8) | 1u, (2u << 16) | (49u << 8) | 1u };
+    static const u32 pll_frac[] = { 0, 0, 0x1472u << 16, 0x1a31u << 16 };
+    for (unsigned j = 0; j < ARRAY_SIZE(order); j++) {
+        int i = order[j];
+        nv_evo_timing_t t;
+        lg_timing(i, &t);
+        S.nw = 0;
+        u32 sup = E.supers;
+        int r = set_timing(0, 0, 0, EVO_PROTO_DP_A, &dp, &t);
+        CHECK(!r && E.supers == sup + 3, "%u kHz: mode set (%s)", lg[i].khz, E.why);
+        CHECK(dp.trained && dp.nr == 4 && dp.bw == 0x1e && K.dpcd[0x100] == 0x1e && (K.dpcd[0x101] & 0x1F) == 4,
+              "%u kHz: the link trained at 4 x 8.1 GHz (%d x %02x)", lg[i].khz, dp.nr, dp.bw);
+        CHECK(S.arm[(0x400 + 0x14) / 4] == ((u32)lg[i].vtotal << 16 | 2720u), "%u kHz: raster armed (%08x)", lg[i].khz, S.arm[(0x400 + 0x14) / 4]);
+        CHECK(wrote_reg(0x00e800 + 0x04) && wrote_reg(0x616610), "%u kHz: VPLL0 and the DP watermark written", lg[i].khz);
+        if (pll_reg[i]) CHECK(wrote(0x00e800 + 0x04, pll_reg[i]) && wrote(0x00e800 + 0x10, pll_frac[i]), "%u kHz: VPLL0 coefficients", lg[i].khz);
+    }
+    /* both at 165 Hz on two heads: within the Pascal heads' total */
+    nv_evo_use_t use[EVO_HEADS];
+    memset(use, 0, sizeof use);
+    use[0].on = 1; use[0].khz = 679300;
+    char why[80];
+    CHECK(!nv_evo_bw_check(&E, use, 1, 679300, why, sizeof why), "two monitors at 165 Hz: %s", why);
+    /* the DCB says 5.4 GHz: 165 Hz still fits (94 % of the link) and trains at 4 x 5.4 */
+    evo_setup(0x134);
+    fw_state();
+    BIOS.out[0].dp_max_rate = 2;
+    sink_init(4, 0x1e);
+    CHECK(!nv_evo_takeover(&E), "takeover");
+    memset(&dp, 0, sizeof dp);
+    nv_dp_detect(&E, &dp);
+    nv_evo_timing_t t;
+    lg_timing(3, &t);
+    CHECK(dp.bw_max == 0x14 && nv_dp_fits(dp.lanes_max, dp.bw_max, 679300, 24) && !set_timing(0, 0, 0, EVO_PROTO_DP_A, &dp, &t) && dp.trained &&
+          dp.nr == 4 && dp.bw == 0x14, "HBR2: 165 Hz at 4 x 5.4 GHz (%d x %02x, %s)", dp.nr, dp.bw, dp.why);
+    /* a sink with 2 lanes: mode_valid leaves 144 and 165 Hz out; forced, no configuration fits */
+    evo_setup(0x134);
+    fw_state();
+    BIOS.out[0].dp_max_rate = 3;
+    sink_init(2, 0x1e);
+    CHECK(!nv_evo_takeover(&E), "takeover");
+    memset(&dp, 0, sizeof dp);
+    nv_dp_detect(&E, &dp);
+    CHECK(dp.lanes_max == 2 && !nv_dp_fits(dp.lanes_max, dp.bw_max, 679300, 24) && !nv_dp_fits(dp.lanes_max, dp.bw_max, 604250, 24) &&
+          nv_dp_fits(dp.lanes_max, dp.bw_max, 497750, 24), "2-lane sink: 120 Hz at most");
+    set_timing(0, 0, 0, EVO_PROTO_DP_A, &dp, &t);
+    CHECK(!dp.trained && strstr(dp.why, "needs more than 2 lanes"), "2-lane sink, 165 Hz forced: %s", dp.why);
+    build_rom(0x40);
 }
 
 static u64 run_script(u16 at, nv_init_ctx_t c, int *ret) {
@@ -1970,6 +2117,7 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < ARRAY_SIZE(chips); i++) test_takeover(chips[i]);
     test_hangs();
     test_dp_training();
+    test_refresh_rates();
     test_scripts();
     test_streams_10d();
     for (size_t i = 0; i < ARRAY_SIZE(chips); i++) test_chans(chips[i]);
@@ -1977,7 +2125,7 @@ int main(int argc, char **argv) {
     test_alloc();
     if (failed) printf("evotest: %d of %d checks FAILED\n", failed, checks);
     else printf("evotest: all %d checks passed (generations, method streams of 507d / 827d / 907d / 917d and 507c / 827c / 907c / "
-                "507a, rasters, object table, VRAM, PLLs, DisplayPort, VBIOS tables and scripts, takeover / mode set / restore, base and "
+                "507a, rasters, object table, VRAM, PLLs, DisplayPort, refresh rates up to 165 Hz, VBIOS tables and scripts, takeover / mode set / restore, base and "
                 "cursor channels, flips, vertical blank on %u simulated chips, hangs, heads and output resources for several monitors)\n",
                 checks, (unsigned)ARRAY_SIZE(chips));
     return failed != 0;
