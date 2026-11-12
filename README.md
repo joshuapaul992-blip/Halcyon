@@ -33,10 +33,10 @@ when there is no sound card) behind a mixer that plays any number of streams at 
 | CD/DVD | ISO 9660 with Joliet (long Unicode names) and Rock Ridge names, multi-sector directories and multi-extent files, hardened against corrupt discs. Hybrid ISO images written to USB sticks or disks mount too. |
 | Keyboard | 20 layouts that follow Windows': US, US-International, UK, German, Swiss German, French, Belgian (AZERTY), Spanish, Italian, Portuguese, Brazilian (ABNT2), Swedish/Finnish, Norwegian, Danish, Dutch, Polish (Programmers), Czech, Turkish Q, Russian and Greek. AltGr (Right Alt, or Ctrl+Alt), dead keys (a dead key followed by a key it does not compose with gives the accent, then the key), Caps Lock per key, the ISO key next to left Shift and the ABNT2 keys. Ctrl shortcuts go by the letter on the key (Ctrl+A is the AZERTY "A"; US letters on Russian and Greek). Several layouts can be installed: Left Alt+Shift or the indicator on the taskbar switches; Keyboard settings in the Control Panel or the `KEYBOARD` command. Characters reach programs as Unicode code points. |
 | Unicode | File names and text are UTF-8 throughout; FAT long names are stored as UTF-16 (including characters outside the BMP), with Unicode case-insensitive lookup. The fonts cover Latin, Greek, Cyrillic and common symbols; other characters are kept and drawn as a replacement box. |
-| GUI | Compositing window manager (move, resize, minimize, maximize), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Theme and wallpaper are kept across restarts (`C:\HALCYON\SETTINGS.INI`). |
+| GUI | Compositing window manager (move, resize, minimize, maximize), drag and drop between windows of any program and the desktop (a drag image, copy / move / no-entry feedback, a right-drag menu), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Theme and wallpaper are kept across restarts (`C:\HALCYON\SETTINGS.INI`). |
 | Display | The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; the QEMU/Bochs/VirtualBox adapter switches at once, with Windows' "keep these settings?" 15-second revert. The frame buffer is write-combining (PAT). |
 | Web | A web browser (Web Browser, `BROWSER.EXE`): HTTP/1.1 and HTTPS, pages with headings, lists, tables, forms and PNG / GIF / BMP images, history, error pages, local files; `WGET.EXE` on the command line. HTTPS through BearSSL (TLS 1.2) with certificates checked against Mozilla's root list. Both are user programs on libweb, a library for URLs, HTTP, TLS and gzip. They reach the network through the internet stack (see Network). See [docs/DESIGN-M6-WEB.md](docs/DESIGN-M6-WEB.md). |
-| Apps | Explorer (My Computer with drive properties and a padlock on read-only drives, file management; copies and deletes in a worker thread), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Media Player (WAV files), Sonar (a mine-hunting puzzle), Control Panel (with Time Zone), Display Properties, Keyboard settings, Network Connections, Sounds and Audio Devices, About. |
+| Apps | Explorer (My Computer with drive properties and a padlock on read-only drives, file management; copies and deletes in a worker thread; multiple selection with Ctrl and Shift clicks, a rubber band and the keyboard; drag and drop between Explorer windows, the desktop, Notepad, Paint and Media Player; the Recycle Bin: per-drive, restore, empty, a size limit; view and sort order kept; see [docs/DESIGN-M8-EXPLORER.md](docs/DESIGN-M8-EXPLORER.md)), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Media Player (WAV files), Sonar (a mine-hunting puzzle), Control Panel (with Time Zone), Display Properties, Keyboard settings, Network Connections, Sounds and Audio Devices, About. |
 
 ## Building
 
@@ -137,7 +137,10 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   xorriso. Results are cross-checked with mtools, `fsck.fat`, `fsck.exfat` and an
   independent exFAT implementation in Python (`tests/host/exfat_tool.py`), and
   a few hundred deliberately corrupted images plus the fuzzer's regression
-  inputs must fail cleanly
+  inputs must fail cleanly; and the Recycle Bin (`tests/host/recycletest.c`,
+  scenario `recycle`: its index format, unique names, restores into deleted
+  folders, conflicts, the size limit's oldest-first purge, damaged and
+  half-written indexes) on FAT32, exFAT and NTFS
 - the host NTFS formatter tests (`tests/host/ntfsfmt.c`, also run by
   `tests/host/run.sh`): volumes of 2 MiB to 2 TiB, 512-, 2048- and 4096-byte
   sectors and every cluster size, checked with `ntfsfix -n`, `ntfsinfo -m`, an
@@ -159,7 +162,10 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   (512- and 4096-byte blocks, INTx, polled), a CD drive with a disc swap, a
   scratch disk formatted as NTFS by the kernel and checked with ntfs-3g, an
   internal NTFS disk written by `NTFSTEST.EXE` once writing is allowed and
-  checked with ntfs-3g afterwards, and
+  checked with ntfs-3g afterwards, the Recycle Bin and drag and drop
+  (`recycle`: delete to the bin, restore, empty, and a file dragged from C:
+  onto `EXPLORER.EXE` showing another drive, checked on the host images with
+  mtools, fsck and exfat_tool.py), and
   network adapters (virtio-net in its three PCI forms, e1000, e1000e, igb and
   rtl8139: an ARP exchange with QEMU's gateway and a few thousand more frames
   through every ring, with MSI-X, INTx and polled), the internet stack
@@ -230,7 +236,11 @@ Explorer (My Computer, folder views, copy / move / delete in a worker thread
 behind a progress window; it opens files with `shell_open`, the shell's own
 tools with `shell_app`, reads Properties details with `stat_ex` and a drive's
 read-only state with `volume_info`, and allows writing to an NTFS drive with
-`volume_set_write`); `CALC.EXE` and
+`volume_set_write`; multiple selection, drag and drop with `dnd_begin` /
+`dnd_accept` / `dnd_data` and `EVT_DRAG`, the Recycle Bin with
+`recycle_delete` / `recycle_list` / `recycle_restore` / `recycle_purge`, its
+settings with `shell_setting_get` / `shell_setting_set`: see
+[docs/DESIGN-M8-EXPLORER.md](docs/DESIGN-M8-EXPLORER.md)); `CALC.EXE` and
 `SONAR.EXE` are full GUI programs (they draw into their own pixel buffer and
 blit it, then add text). `NOTEPAD.EXE` is Notepad: menus, a scroll bar and a
 status bar from the API below, the text drawn line by line and measured with
@@ -286,6 +296,11 @@ The window API in `hal.h` (comments there give the details):
   list box) send a command.
 - **Dialogs and clipboard:** `msgbox`, `file_dialog`, `inputbox` (a one-line
   question), `clipboard_set_n` for text up to 1 MiB, `clipboard_get`.
+- **Drag and drop:** `dnd_begin` starts a drag of paths while a button is
+  held; targets get `EVT_DRAG` (enter, over, leave, drop, end) and answer
+  with `dnd_accept`; `dnd_data` gives the paths; `dnd_open_target` is a whole
+  target for programs that open a dropped file (Notepad, Paint, Media
+  Player).
 
 Every call checks the program's pointers and bounds its work, and a window's
 menus, controls and canvas go away with the window or the program.

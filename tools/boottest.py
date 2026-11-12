@@ -65,6 +65,16 @@ interrupts on, get a working interrupt:
           desktop is up; afterwards the partition table must say 0x07 and the
           partition must pass ntfsfix -n, ntfsinfo -m (label, cluster size)
           and tests/host/ntfs_tool.py check on the host (ntfs-3g tools)
+  recycle the Recycle Bin and drag and drop (QEMU fw_cfg recycletest, a kernel
+          thread: kernel/apps/recycletest.c): on the FAT32 test disk a file
+          goes to the bin and stays, another goes to the bin, its folder is
+          deleted for good and it is restored; on the exFAT disk two files
+          go to the bin, which is emptied; and C:\\Documents\\Getting
+          Started.txt is dragged onto EXPLORER.EXE showing the FAT32 disk's
+          RBTEST folder, which must answer "copy" (another drive) and copy
+          it. Afterwards, on the host: the bin's INDEX.TXT and D1.txt (mtools),
+          the restored and copied files, no bin left on the exFAT disk
+          (exfat_tool.py), and fsck.fat / fsck.exfat / exfat_tool.py check
   cd      also an AHCI CD-ROM drive with an ISO 9660 + Joliet test disc
           (built with xorriso): the disc must mount, and after the desktop is
           up the disc is ejected and another one inserted through the QEMU
@@ -146,9 +156,10 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
           "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:bios:ac97+dusk", "xhci:uefi:hda+tide", "xhci:uefi:virtiosnd", "xhci:bios:audio",
-          "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw"]
+          "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:bios:recycle"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
-            "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0}
+            "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0,
+            "recycle": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -637,6 +648,56 @@ def ntfsrw_failures(text, disk):
     return fails
 
 
+RB_DELETED = b"This file waits in the Recycle Bin.\r\n"
+RB_RESTORED = b"This file came back from the Recycle Bin.\r\n"
+
+
+def recycle_failures(text, sata, sata_x):
+    """the Recycle Bin test's disks, checked on the host"""
+    m = re.search(r"recycle test: done \((\d+) checks, (\d+) failed\)", text)
+    if not m:
+        return ["recycle test did not finish"]
+    fails = [l[l.index("recycle test:"):].strip() for l in text.splitlines() if "recycle test:" in l and "FAILED" in l][:4]
+    fat = sata + "@@1M"                 # (fat32gpt.img: the partition at LBA 2048)
+
+    def mtype(path):
+        r = subprocess.run(["mtype", "-i", fat, "::" + path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           env=dict(os.environ, MTOOLS_SKIP_CHECK="1"))
+        return r.stdout if r.returncode == 0 else None
+    index = mtype("/RECYCLED/INDEX.TXT") or b""
+    lines = index.split(b"\r\n")
+    if lines[0] != b"HALCYON RECYCLE BIN 1" or b"END 1" not in lines or \
+            not any(re.match(rb"1\t\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\t%d\tF\t[D-Z]:/RBTEST/deleted\.txt$" % len(RB_DELETED), l)
+                    for l in lines):
+        fails.append("the bin's index on the FAT32 disk: %r" % index[:160])
+    if mtype("/RECYCLED/D1.txt") != RB_DELETED:
+        fails.append("RECYCLED\\D1.txt")
+    if mtype("/RBTEST/deleted.txt") is not None:
+        fails.append("deleted.txt still in its folder")
+    if mtype("/RBTEST/Sub/restored.txt") != RB_RESTORED:
+        fails.append("RBTEST\\Sub\\restored.txt not restored")
+    want = open("rootfs/Documents/Getting Started.txt", "rb").read()
+    if mtype("/RBTEST/Getting Started.txt") != want:
+        fails.append("the dropped copy of Getting Started.txt")
+    part = os.path.join(BUILD, "ci_rb_part.img")
+    subprocess.run(["dd", "if=" + sata, "of=" + part, "bs=512", "skip=2048", "status=none"], check=True)
+    r = subprocess.run(["fsck.fat", "-n", part], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if r.returncode:
+        fails.append("fsck.fat: " + r.stdout.strip().splitlines()[-1])
+    xt = [sys.executable, "tests/host/exfat_tool.py", sata_x + "@@1048576"]
+    r = subprocess.run(xt + ["ls"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if r.returncode or "RECYCLED" in r.stdout.upper() or "D RBX" not in r.stdout or "RBX/" in r.stdout:
+        fails.append("the exFAT disk after emptying its bin: " + " ".join(r.stdout.split()[:12]))
+    r = subprocess.run(xt + ["check"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if r.returncode:
+        fails.append("exfat_tool.py check: " + r.stdout.strip().splitlines()[0])
+    subprocess.run(["dd", "if=" + sata_x, "of=" + part, "bs=512", "skip=2048", "status=none"], check=True)
+    if subprocess.run(["fsck.exfat", "-n", part], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        fails.append("fsck.exfat")
+    os.remove(part)
+    return fails
+
+
 def run(cfg):
     parts = cfg.split(":")
     hc, fw = parts[0], parts[1]
@@ -689,6 +750,8 @@ def run(cfg):
             return True
         extra += (" -drive if=none,id=d4,format=raw,file=%s -device ide-hd,drive=d4,bus=ide.3,model=NTFSRW"
                   % ntfsrw_disk)
+    if "recycle" in opts:
+        extra += " -fw_cfg name=opt/halcyon/recycletest,string=1"
     if flags:
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
     nic = next((v for v in opts if v in NICS), None)
@@ -817,6 +880,11 @@ def run(cfg):
         while time.time() - t1 < 30 and p.poll() is None and "format test: " not in text:
             time.sleep(0.5)
             text = open(log, errors="replace").read()
+    if "recycle" in opts:
+        t1 = time.time()
+        while time.time() - t1 < 60 and p.poll() is None and "recycle test: done" not in text:
+            time.sleep(0.5)
+            text = open(log, errors="replace").read()
     idle = None
     if p.poll() is None and "gui: desktop ready" in text and not prog:
         time.sleep(2)
@@ -858,6 +926,8 @@ def run(cfg):
         failures += ntfs_failures(text, ntfs_disk)
     if ntfsrw_disk:
         failures += ntfsrw_failures(text, ntfsrw_disk)
+    if "recycle" in opts and not nvme:
+        failures += recycle_failures(text, sata, sata_x)
     if nic:
         failures += net_failures(text, nic, opts)
     if beep:

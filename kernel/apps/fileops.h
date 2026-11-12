@@ -9,7 +9,8 @@ int  fileops_copy_tree(const char *src, const char *dst);   /* file or directory
 int  fileops_unique_name(const char *dir, const char *base, char *out, int outsz);  /* "Copy of x", "x (2)" */
 /* Copy / move / delete with progress, run by a worker thread (see
  * progress.c). The fields are read by the GUI thread while it runs. */
-enum { FOP_COPY = 1, FOP_MOVE, FOP_DELETE };
+enum { FOP_COPY = 1, FOP_MOVE, FOP_DELETE,
+       FOP_EMPTY };             /* empty the Recycle Bin of drive src[0], or of every drive (src "") */
 typedef struct fileop {
     int kind;
     char src[VFS_MAX_PATH], dst[VFS_MAX_PATH];
@@ -27,6 +28,15 @@ void fileop_execute(fileop_t *op);
  * rest of the desktop keeps working); returns op->result */
 struct window;
 int  fileop_run(struct window *owner, fileop_t *op);
+/* copy or move count NUL-separated paths into folder dst (each with
+ * fileop_run), asking before anything there is replaced; a copy into the
+ * item's own folder makes "Copy of x". 0, E_CANCELED or the last error
+ * (reported to the user) */
+int  fileop_transfer(struct window *owner, int kind, const char *paths, int count, const char *dst);
+/* delete paths: to the Recycle Bin of their drive, or permanently where
+ * there is none (removable drives, recycle.nuke) or the item is too big for
+ * it, asking first (ask: the "send to the Recycle Bin?" question too) */
+int  fileop_recycle(struct window *owner, const char *paths, int count, int ask);
 
 const char *file_type_name(const char *name, int is_dir);
 int  file_icon(const char *name, int is_dir);

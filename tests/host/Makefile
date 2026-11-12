@@ -50,7 +50,7 @@ OUT     ?= $(ROOT)/build/hosttest
 NTFS_SRCS := $(addprefix $(ROOT)/kernel/fs/,ntfs.c ntfs_mft.c ntfs_index.c ntfs_alloc.c ntfs_lznt1.c)
 KSRCS   := $(ROOT)/kernel/fs/block.c $(ROOT)/kernel/fs/vfs.c $(ROOT)/kernel/fs/fat.c $(ROOT)/kernel/fs/exfat.c $(ROOT)/kernel/fs/iso9660.c \
            $(NTFS_SRCS) $(ROOT)/kernel/core/unicode.c shim.c
-SRCS    := $(KSRCS) $(ROOT)/kernel/fs/ntfs_mkfs.c $(ROOT)/kernel/fs/ntfs_upcase.c fstest.c fuzz_fs.c
+SRCS    := $(KSRCS) $(ROOT)/kernel/fs/ntfs_mkfs.c $(ROOT)/kernel/fs/ntfs_upcase.c $(ROOT)/kernel/apps/recycle.c fstest.c fuzz_fs.c
 HDRS    := $(wildcard $(ROOT)/kernel/fs/*.h) $(wildcard $(ROOT)/kernel/core/*.h) fuzz_fs.h
 WARN    := -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
            -Wno-address-of-packed-member -Wno-unused-result -fno-strict-aliasing
@@ -117,7 +117,7 @@ $(OUT)/kbdtest: $(KBD_SRCS) $(ROOT)/kernel/drivers/keymap.h $(ROOT)/kernel/drive
 kbd: $(OUT)/kbdtest
 	$(OUT)/kbdtest
 
-$(OUT)/fstest: $(SRCS) isotest.c ntfstest.c $(HDRS) Makefile
+$(OUT)/fstest: $(SRCS) isotest.c ntfstest.c recycletest.c $(ROOT)/kernel/apps/recycle.h $(HDRS) Makefile
 	@mkdir -p $(OUT)
 	gcc $(CFLAGS) $(SRCS) -o $@
 

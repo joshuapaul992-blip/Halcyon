@@ -33,14 +33,15 @@ static void short_dir(const char *path, char *out, int n) {
 static void on_tick(window_t *w) {
     fileop_t *op = w->data;
     char t[VFS_MAX_NAME + 64];
-    const char *verb = op->kind == FOP_DELETE ? "Deleting" : op->kind == FOP_MOVE ? "Moving" : "Copying";
-    if (op->counting) snprintf(t, sizeof t, "Preparing to %s...", op->kind == FOP_DELETE ? "delete" : op->kind == FOP_MOVE ? "move" : "copy");
+    int del = op->kind == FOP_DELETE || op->kind == FOP_EMPTY;
+    const char *verb = del ? "Deleting" : op->kind == FOP_MOVE ? "Moving" : "Copying";
+    if (op->counting) snprintf(t, sizeof t, "Preparing to %s...", del ? "delete" : op->kind == FOP_MOVE ? "move" : "copy");
     else snprintf(t, sizeof t, "%s '%s'", verb, op->current);
     widget_t *wd = widget_find(w, ID_WHAT);
     if (wd && strcmp(wd->text, t)) widget_set_text(w, wd, t);
     /* progress by bytes; by items for deletes and empty files */
     int val = 0;
-    if (op->total_bytes && op->kind != FOP_DELETE) val = (int)(op->done_bytes * 1000 / op->total_bytes);
+    if (op->total_bytes && !del) val = (int)(op->done_bytes * 1000 / op->total_bytes);
     else if (op->total_items) val = (int)((u64)op->done_items * 1000 / op->total_items);
     widget_t *bar = widget_find(w, ID_BAR);
     if (bar && bar->value != val) { bar->value = MIN(val, 1000); wm_invalidate(w); }
@@ -65,15 +66,17 @@ int fileop_run(window_t *owner, fileop_t *op) {
     while (!op->done && time_ms() < show_at) gui_step();
     if (op->done) return op->result;
 
-    const char *title = op->kind == FOP_DELETE ? "Deleting..." : op->kind == FOP_MOVE ? "Moving..." : "Copying...";
-    window_t *w = wm_create(title, op->kind == FOP_DELETE ? ICON_RECYCLE : ICON_FOLDER, 0, 0, 380, 150, WF_DIALOG | WF_CENTER);
+    int del = op->kind == FOP_DELETE || op->kind == FOP_EMPTY;
+    const char *title = del ? "Deleting..." : op->kind == FOP_MOVE ? "Moving..." : "Copying...";
+    window_t *w = wm_create(title, del ? ICON_RECYCLE : ICON_FOLDER, 0, 0, 380, 150, WF_DIALOG | WF_CENTER);
     w->data = op;
     w->on_close = on_close;
     w->on_tick = on_tick;
     widget_add(w, W_LABEL, mkrect(14, 12, 352, 16), "", ID_WHAT);
     char a[VFS_MAX_NAME + 1], b[VFS_MAX_NAME + 1], line[2 * VFS_MAX_NAME + 32];
     short_dir(op->src, a, sizeof a);
-    if (op->kind == FOP_DELETE) snprintf(line, sizeof line, "From '%s'", a);
+    if (op->kind == FOP_EMPTY) snprintf(line, sizeof line, "From the Recycle Bin");
+    else if (op->kind == FOP_DELETE) snprintf(line, sizeof line, "From '%s'", a);
     else { short_dir(op->dst, b, sizeof b); snprintf(line, sizeof line, "From '%s' to '%s'", a, b); }
     widget_add(w, W_LABEL, mkrect(14, 32, 352, 16), line, ID_WHERE);
     widget_add(w, W_PROGRESS, mkrect(14, 56, 352, 16), "", ID_BAR);
