@@ -260,6 +260,8 @@ void shell_notepad(const char *path);     /* NOTEPAD.EXE, or the built-in Notepa
 void shell_paint(const char *path);
 void shell_explorer(const char *path);
 int  format_dialog(window_t *owner, char letter);   /* apps/format.c; 1 if formatted */
+void drive_props_dialog(window_t *owner, char letter);   /* apps/driveprops.c */
+void format_test_hook(void);                       /* apps/format.c: QEMU fw_cfg opt/halcyon/formattest */
 struct proc;
 int  gui_ask_permission(struct proc *asker, const char *title, const char *text);   /* permit.c */
 int  shell_run(const char *path, const char *args);   /* start a user program; pid or error (reported) */

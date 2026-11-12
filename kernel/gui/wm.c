@@ -1077,6 +1077,7 @@ void gui_main(void) {
         kprintf("gui: autorun %s\n", autorun);
         shell_run(autorun, args);
     }
+    format_test_hook();
     for (;;) gui_step();
 }
 
