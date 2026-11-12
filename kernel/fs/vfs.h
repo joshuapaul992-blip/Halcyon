@@ -63,7 +63,10 @@ struct volume {
     void *fs_priv;
     u8 alive;                      /* cleared on unmount; stale handles fail with E_NODEV */
     u8 is_boot;
+    u8 readonly;                   /* mounted read-only by the driver: every change fails with E_ROFS */
     u32 open_files;
+    char ro_reason[128];           /* why it is read-only, for Explorer ("" if writable or unknown) */
+    u64 serial;                    /* the volume's serial number (0 = none), e.g. for per-volume settings */
 };
 
 /* Interface implemented by file system drivers. Paths passed to the driver
@@ -125,6 +128,11 @@ int  vfs_unlink(const char *path);
 int  vfs_rename(const char *from, const char *to);   /* same volume only (E_NOTSUP otherwise) */
 int  vfs_copy(const char *from, const char *to);     /* file copy, any volumes */
 int  vfs_sync_all(void);
+
+/* Unmount a volume and mount it again on the same drive letter (after a
+ * setting that changes how it mounts, e.g. allowing writes to an NTFS
+ * volume). E_BUSY while it has open files or is the boot volume. */
+int  vfs_remount(char letter);
 
 /* Quick-format bd (a partition, or a disk without a partition table) with
  * fs = "FAT" (automatic), "FAT12", "FAT16", "FAT32" or "exFAT", and mount it

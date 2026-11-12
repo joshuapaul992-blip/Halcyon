@@ -91,8 +91,9 @@ static int vfs_try_mount_locked(blockdev_t *bd) {
     v->alive = 1;
     g_vol[slot] = v;
     g_gen++;
-    kprintf("vfs: %c: %s '%s' on %s%s\n", v->letter, v->fs_name, v->label, bd->name,
-            v->is_boot ? " (boot volume)" : "");
+    kprintf("vfs: %c: %s '%s' on %s%s%s%s\n", v->letter, v->fs_name, v->label, bd->name,
+            v->is_boot ? " (boot volume)" : "", v->readonly ? ", read-only: " : "",
+            v->readonly ? (v->ro_reason[0] ? v->ro_reason : "yes") : "");
     return 0;
 }
 
@@ -228,6 +229,7 @@ static int vfs_open_locked(const char *path, int flags, vfs_file_t **out) {
     int r = resolve(path, &v, rel, sizeof rel);
     if (r) return r;
     if (!rel[0]) return E_ISDIR;
+    if (v->readonly && (flags & (VFS_O_WRITE | VFS_O_CREATE | VFS_O_TRUNC))) return E_ROFS;
     vfs_file_t *f = kzalloc(sizeof *f);
     if (!f) return E_NOMEM;
     r = v->ops->open(v, rel, flags, &f->fh);
@@ -355,6 +357,7 @@ static int vfs_mkdir_locked(const char *path) {
     int r = resolve(path, &v, rel, sizeof rel);
     if (r) return r;
     if (!rel[0]) return E_EXIST;
+    if (v->readonly) return E_ROFS;
     return v->ops->mkdir(v, rel);
 }
 
@@ -364,6 +367,7 @@ static int vfs_unlink_locked(const char *path) {
     int r = resolve(path, &v, rel, sizeof rel);
     if (r) return r;
     if (!rel[0]) return E_INVAL;
+    if (v->readonly) return E_ROFS;
     return v->ops->unlink(v, rel);
 }
 
@@ -375,6 +379,7 @@ static int vfs_rename_locked(const char *from, const char *to) {
     if ((r = resolve(to, &vt, rt, sizeof rt))) return r;
     if (vf != vt) return E_NOTSUP;
     if (!rf[0] || !rt[0]) return E_INVAL;
+    if (vf->readonly) return E_ROFS;
     size_t lf = strlen(rf);
     if (!strncasecmp(rf, rt, lf) && rt[lf] == '/') return E_INVAL;   /* into itself */
     return vf->ops->rename(vf, rf, rt);
@@ -624,6 +629,28 @@ int vfs_read_file(const char *path, char **data, u32 *size) {
 int vfs_write_file(const char *path, const void *data, u32 size) {
     mutex_lock(&storage_lock);
     int r = vfs_write_file_locked(path, data, size);
+    mutex_unlock(&storage_lock);
+    return r;
+}
+
+static int vfs_remount_locked(char letter) {
+    if (letter >= 'a' && letter <= 'z') letter = (char)(letter - 32);
+    if (letter < 'A' || letter > 'Z') return E_INVAL;
+    volume_t *v = g_vol[letter - 'A'];
+    if (!v) return E_NOENT;
+    if (v->is_boot || v->open_files) return E_BUSY;
+    blockdev_t *bd = v->bd;
+    if (v->ops->sync) v->ops->sync(v);
+    unmount_slot(letter - 'A');
+    g_pref_letter = letter;
+    int r = vfs_try_mount_locked(bd);
+    g_pref_letter = 0;
+    return r;
+}
+
+int vfs_remount(char letter) {
+    mutex_lock(&storage_lock);
+    int r = vfs_remount_locked(letter);
     mutex_unlock(&storage_lock);
     return r;
 }
