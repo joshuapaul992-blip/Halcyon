@@ -40,8 +40,10 @@
 #
 # Needs: gcc, mkfs.fat, fsck.fat, mtools, exfatprogs (mkfs.exfat, fsck.exfat),
 # sfdisk, truncate, dd, gzip, python3, xorriso, ntfs-3g (ntfsfix, ntfsinfo,
-# mkntfs, ntfsls, ntfscat, the ntfs-3g FUSE driver and fusermount, used as
-# root; the NTFS tests are skipped without them);
+# ntfsresize, mkntfs, ntfsls, ntfscat, the ntfs-3g FUSE driver and
+# fusermount, used as root and with /dev/fuse: the NTFS formatter tests and
+# the NTFS driver scenarios ntfs, ntfsw, ntfssafe, ntfsbig of fstest
+# (ntfstest.c) are skipped with a message without them);
 # clang with the libFuzzer runtime (libclang-rt-18-dev) for fuzz / fuzz-run.
 ROOT    := ../..
 OUT     ?= $(ROOT)/build/hosttest
