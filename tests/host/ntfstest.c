@@ -292,3 +292,391 @@ static void s_ntfs(void) {
         unlink(im.path);
     }
 }
+
+/* ------------------------------------------------------------------ */
+/* verification of a written image                                      */
+
+static hdisk_t *ntfs_attach(const img_t *im, u32 ss, int removable, int readonly) {
+    hdisk_t *h = calloc(1, sizeof *h);
+    h->fd = open(im->path, readonly ? O_RDONLY : O_RDWR);
+    struct stat st;
+    fstat(h->fd, &st);
+    snprintf(h->bd.name, sizeof h->bd.name, "nt%d", g_disk_no++);
+    snprintf(h->bd.model, sizeof h->bd.model, "image");
+    h->bd.type = removable ? BDEV_DISK_USB : BDEV_DISK_SATA;
+    h->bd.sector_size = ss;
+    h->bd.sector_count = (u64)st.st_size / ss;
+    h->bd.removable = (u8)removable;
+    h->bd.readonly = (u8)readonly;
+    h->bd.read = hd_read;
+    h->bd.write = hd_write;
+    int r = blockdev_register(&h->bd);
+    CHECK(r == 0, "blockdev_register = %d", r);
+    return h;
+}
+
+/* run a command, capture its output; returns the exit status */
+static int sh_out(char *out, size_t outsz, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+static int sh_out(char *out, size_t outsz, const char *fmt, ...) {
+    char cmd[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(cmd, sizeof cmd, fmt, ap);
+    va_end(ap);
+    strlcat(cmd, " 2>&1", sizeof cmd);
+    FILE *p = popen(cmd, "r");
+    size_t n = 0;
+    out[0] = 0;
+    if (!p) return -1;
+    while (n + 1 < outsz) {
+        size_t k = fread(out + n, 1, outsz - 1 - n, p);
+        if (!k) break;
+        n += k;
+    }
+    out[n] = 0;
+    char sink[4096];
+    while (fread(sink, 1, sizeof sink, p) > 0) {}
+    int r = pclose(p);
+    return WIFEXITED(r) ? WEXITSTATUS(r) : -1;
+}
+
+static int g_ntfs_verifies;
+
+/* the independent checks of an image that is not mounted */
+static void ntfs_verify(const char *tag, const img_t *im) {
+    static char out[65536];
+    g_ntfs_verifies++;
+    int r = sh_out(out, sizeof out, "ntfsfix -n %s", q(im->path));
+    CHECK(r == 0 && strstr(out, "processed successfully"), "[%s] ntfsfix -n: %d\n%s", tag, r, out);
+    r = sh_out(out, sizeof out, "ntfsresize -i -f -n %s", q(im->path));
+    /* (a full volume is an error for resizing only) */
+    int full = strstr(out, "ERROR: Volume is full") != NULL;
+    char *fe = strstr(out, "ERROR: Volume is full");
+    if (fe) memset(fe, '-', 6);
+    CHECK((r == 0 || full) && !strstr(out, "ERROR") && !strstr(out, "rror") && strstr(out, "Accounting clusters"),
+          "[%s] ntfsresize -i: %d\n%s", tag, r, out);
+    r = sh_out(out, sizeof out, "python3 ntfs_check.py %s", q(im->path));
+    CHECK(r == 0 && strstr(out, "volume clean"), "[%s] ntfs_check.py: %d\n%s", tag, r, out);
+    if (shim_verbose) printf("    [%s] %s", tag, out);
+}
+
+/* ------------------------------------------------------------------ */
+/* the model of a random test: files and directories                    */
+
+typedef struct { char path[300]; int dir; u8 *data; u32 size; int used; } nm_t;
+#define NM_MAX 120
+static nm_t g_nm[NM_MAX];
+
+static nm_t *nm_find(const char *path) {
+    for (int i = 0; i < NM_MAX; i++) if (g_nm[i].used && !utf8_casecmp(g_nm[i].path, path)) return &g_nm[i];
+    return NULL;
+}
+
+static nm_t *nm_new(void) {
+    for (int i = 0; i < NM_MAX; i++) if (!g_nm[i].used) { memset(&g_nm[i], 0, sizeof g_nm[i]); return &g_nm[i]; }
+    return NULL;
+}
+
+static int nm_children(const char *dir) {
+    size_t l = strlen(dir);
+    int n = 0;
+    for (int i = 0; i < NM_MAX; i++)
+        if (g_nm[i].used && !strncasecmp(g_nm[i].path, dir, l) && g_nm[i].path[l] == '/') n++;
+    return n;
+}
+
+static const char *nm_random_dir(void) {
+    int cand[NM_MAX], n = 0;
+    for (int i = 0; i < NM_MAX; i++) if (g_nm[i].used && g_nm[i].dir) cand[n++] = i;
+    if (!n || rnd(4) == 0) return "";
+    return g_nm[cand[rnd(n)]].path;
+}
+
+static void nm_random_name(char *out, size_t sz) {
+    static const char *pool[] = { "f%u.txt", "Long File Name %u.dat", "MIXED case %u", "X%u", "With Space %u.c",
+                                  "UPPER%u.TXT", "dots.in.name.%u.tar.gz", "%u", "Grüße %u.txt", "日本語 %u",
+                                  "Ελληνικά%u", "README%u", "a_very_long_name_that_goes_on_and_on_and_on_and_on_%u_end_of_it.text",
+                                  "ПРИВЕТ%u.TXT", "emoji \xF0\x9F\x98\x80 %u" };
+    snprintf(out, sz, pool[rnd(ARRAY_SIZE(pool))], rnd(30));
+}
+
+static void nm_join(char *out, size_t sz, const char *dir, const char *name) {
+    snprintf(out, sz, "%s%s%s", dir, *dir ? "/" : "", name);
+}
+
+/* compare the model with the image mounted by ntfs-3g (everything under
+ * base must be in the model) */
+static void nm_cmp_ntfs3g(const char *tag, const img_t *im, const char *base) {
+    const char *mnt = ntfs3g_mount(im, 0);
+    if (!mnt) return;
+    int n = 0;
+    for (int i = 0; i < NM_MAX; i++) {
+        nm_t *m = &g_nm[i];
+        if (!m->used) continue;
+        char hp[2048];
+        snprintf(hp, sizeof hp, "%s/%s%s%s", mnt, base, *base ? "/" : "", m->path);
+        struct stat st;
+        int r = stat(hp, &st);
+        CHECK(r == 0, "[%s] ntfs-3g: %s missing", tag, m->path);
+        if (r) continue;
+        n++;
+        if (m->dir) { CHECK(S_ISDIR(st.st_mode), "[%s] ntfs-3g: %s not a directory", tag, m->path); continue; }
+        size_t hsz = 0;
+        u8 *hb = file_read_all(hp, &hsz);
+        CHECK(hb && hsz == m->size && !memcmp(hb, m->data, hsz), "[%s] ntfs-3g: %s content (%zu bytes, model %u)", tag,
+              m->path, hsz, m->size);
+        free(hb);
+    }
+    char dir[2048];
+    snprintf(dir, sizeof dir, "%s/%s", mnt, base);
+    static char out[256];
+    sh_out(out, sizeof out, "find %s -mindepth 1 | wc -l", q(dir));
+    CHECK(atoi(out) == n, "[%s] ntfs-3g lists %d entries, the model has %d", tag, atoi(out), n);
+    ntfs3g_umount(mnt);
+}
+
+static void nm_verify_all(char L, const char *base, const char *tag) {
+    for (int i = 0; i < NM_MAX; i++) {
+        nm_t *m = &g_nm[i];
+        if (!m->used) continue;
+        char p[VFS_MAX_PATH + 300];
+        snprintf(p, sizeof p, "%c:/%s%s%s", L, base, *base ? "/" : "", m->path);
+        if (m->dir) {
+            vfs_dirent_t st;
+            int r = vfs_stat(p, &st);
+            CHECK(r == 0 && st.is_dir, "[%s] %s: %s", tag, p, ename(r));
+        } else {
+            v_cmp(p, m->data, m->size);
+        }
+    }
+}
+
+static void nm_clear(void) {
+    for (int i = 0; i < NM_MAX; i++) { free(g_nm[i].data); g_nm[i].data = NULL; g_nm[i].used = 0; }
+}
+
+/* random operations below base (a new directory, "" = the root) */
+static void t_ntfs_random(const char *tag, img_t *im, u32 ss, u32 seed, int ops, u32 maxsz, const char *base) {
+    g_rng = seed;
+    nm_clear();
+    hdisk_t *h = ntfs_attach(im, ss, 1, 0);
+    char L = letter_of(h);
+    if (!L) { CHECK(0, "[%s] not mounted", tag); disk_detach(h); return; }
+    char bp[300];
+    snprintf(bp, sizeof bp, "%c:/%s", L, base);
+    if (*base) OK(vfs_mkdir(bp));
+    u8 *buf = malloc(maxsz + 1);
+    int nfull = 0, counts[8] = { 0 };
+    char path[300], name[200], full[VFS_MAX_PATH + 300], full2[VFS_MAX_PATH + 300];
+#define FULLP(dst, rel) snprintf(dst, sizeof dst, "%c:/%s%s%s", L, base, *base ? "/" : "", rel)
+    int paranoid = getenv("NTFS_PARANOID") != NULL;
+    for (int op = 0; op < ops; op++) {
+        if (paranoid) {
+            /* every operation leaves the image consistent (only the dirty flag is set) */
+            static char out[16384];
+            int r = sh_out(out, sizeof out, "python3 ntfs_check.py %s", q(im->path));
+            if (r) { printf("    [%s] inconsistent before op %d:\n%s", tag, op, out); CHECK(0, "paranoid"); break; }
+        }
+        int kind = rnd(100);
+        int idx = rnd(NM_MAX);
+        nm_t *m = &g_nm[idx];
+        if (paranoid && shim_verbose) printf("    op %d: kind %d on %s\n", op, kind, m->used ? m->path : "-");
+        if (kind < 18 || !m->used) {
+            /* create a file or a directory */
+            nm_random_name(name, sizeof name);
+            nm_join(path, sizeof path, nm_random_dir(), name);
+            if (strlen(path) > 250 || nm_find(path)) continue;
+            nm_t *n = nm_new();
+            if (!n) continue;
+            FULLP(full, path);
+            if (rnd(5) == 0) {
+                int r = vfs_mkdir(full);
+                if (r == E_NOSPC) { nfull++; if (shim_verbose) printf("    NOSPC at line %d: %s\n", __LINE__, m->used ? m->path : path); continue; }
+                CHECK(r == 0, "[%s] mkdir %s: %s", tag, path, ename(r));
+                if (r) continue;
+                strlcpy(n->path, path, sizeof n->path);
+                n->dir = 1;
+                n->used = 1;
+                counts[0]++;
+                continue;
+            }
+            u32 sz = rnd(3) == 0 ? rnd(900) : rnd(maxsz);
+            pattern(buf, sz, seed + (u32)op);
+            int r = vfs_write_file(full, buf, sz);
+            if (r < 0 && r != E_NOSPC) { CHECK(0, "[%s] create %s: %s", tag, path, ename(r)); continue; }
+            if (r == E_NOSPC && !v_exists(full)) { nfull++; if (shim_verbose) printf("    NOSPC at line %d: %s\n", __LINE__, m->used ? m->path : path); continue; }
+            strlcpy(n->path, path, sizeof n->path);
+            n->data = malloc(sz ? sz : 1);
+            memcpy(n->data, buf, sz);
+            n->size = sz;
+            n->used = 1;
+            counts[1]++;
+            if (r < 0) {
+                nfull++;
+                char *d = NULL;
+                u32 got = 0;
+                int k = vfs_read_file(full, &d, &got);
+                CHECK(k >= 0 && got <= sz && !memcmp(d, buf, got), "[%s] partial create of %s", tag, path);
+                n->size = got;
+                kfree(d);
+            }
+        } else if (kind < 40 && !m->dir) {
+            /* write somewhere (maybe past the end) */
+            u32 off = rnd(m->size + 20000), len = 1 + rnd(maxsz / 2);
+            pattern(buf, len, seed ^ (u32)op);
+            vfs_file_t *f;
+            FULLP(full, m->path);
+            int r = vfs_open(full, VFS_O_RDWR, &f);
+            CHECK(r == 0, "[%s] open %s: %s", tag, m->path, ename(r));
+            if (r) continue;
+            vfs_seek(f, off);
+            int w = vfs_write(f, buf, len);
+            vfs_close(f);
+            if (w == E_NOSPC) { nfull++; if (shim_verbose) printf("    NOSPC at line %d: %s\n", __LINE__, m->used ? m->path : path); continue; }
+            CHECK(w > 0, "[%s] write %s: %s", tag, m->path, ename(w));
+            if (w <= 0) continue;
+            if (w < (int)len) nfull++;
+            u32 end = off + (u32)w;
+            if (end > m->size) {
+                m->data = realloc(m->data, end);
+                if (off > m->size) memset(m->data + m->size, 0, off - m->size);
+                m->size = end;
+            }
+            memcpy(m->data + off, buf, (u32)w);
+            counts[2]++;
+        } else if (kind < 50 && !m->dir) {
+            u32 ns = rnd(3) ? rnd(m->size + 1) : rnd(m->size * 2 + 30000);
+            vfs_file_t *f;
+            FULLP(full, m->path);
+            if (vfs_open(full, VFS_O_RDWR, &f)) { CHECK(0, "[%s] open %s", tag, m->path); continue; }
+            int r = vfs_truncate(f, ns);
+            vfs_close(f);
+            if (r == E_NOSPC) { nfull++; if (shim_verbose) printf("    NOSPC at line %d: %s\n", __LINE__, m->used ? m->path : path); continue; }
+            CHECK(r == 0, "[%s] truncate %s to %u: %s", tag, m->path, ns, ename(r));
+            if (r) continue;
+            m->data = realloc(m->data, ns ? ns : 1);
+            if (ns > m->size) memset(m->data + m->size, 0, ns - m->size);
+            m->size = ns;
+            counts[3]++;
+        } else if (kind < 62) {
+            /* delete a file / remove a directory */
+            FULLP(full, m->path);
+            int r = vfs_unlink(full);
+            if (m->dir && nm_children(m->path)) { EXPECT(r, E_NOTEMPTY); continue; }
+            CHECK(r == 0, "[%s] unlink %s: %s", tag, m->path, ename(r));
+            if (r) continue;
+            free(m->data);
+            m->data = NULL;
+            m->used = 0;
+            counts[4]++;
+        } else if (kind < 80) {
+            /* rename / move a file or a directory */
+            const char *nd = nm_random_dir();
+            if (rnd(3) == 0) {
+                /* a new name only in case */
+                strlcpy(path, m->path, sizeof path);
+                for (char *c = strrchr(path, '/') ? strrchr(path, '/') + 1 : path; *c; c++)
+                    if (*c >= 'a' && *c <= 'z') *c = (char)(*c - 32);
+                    else if (*c >= 'A' && *c <= 'Z') *c = (char)(*c + 32);
+            } else {
+                nm_random_name(name, sizeof name);
+                nm_join(path, sizeof path, nd, name);
+            }
+            nm_t *other = nm_find(path);
+            size_t l = strlen(m->path), longest = l;
+            for (int i = 0; i < NM_MAX; i++)
+                if (g_nm[i].used && !strncasecmp(g_nm[i].path, m->path, l) && g_nm[i].path[l] == '/')
+                    longest = MAX(longest, strlen(g_nm[i].path));
+            if (strlen(path) + longest - l > 250) continue;     /* the model's paths are limited */
+            FULLP(full, m->path);
+            FULLP(full2, path);
+            int into_self = m->dir && !strncasecmp(path, m->path, l) && path[l] == '/';
+            int r = vfs_rename(full, full2);
+            if (into_self) { EXPECT(r, E_INVAL); continue; }
+            if (other && other != m) { EXPECT(r, E_EXIST); continue; }
+            if (r == E_NOSPC) { nfull++; if (shim_verbose) printf("    NOSPC at line %d: %s\n", __LINE__, m->used ? m->path : path); continue; }
+            CHECK(r == 0, "[%s] rename %s -> %s: %s", tag, m->path, path, ename(r));
+            if (r) continue;
+            if (m->dir) {
+                for (int i = 0; i < NM_MAX; i++) {
+                    nm_t *c = &g_nm[i];
+                    if (c->used && c != m && !strncasecmp(c->path, m->path, l) && c->path[l] == '/') {
+                        char np[600];
+                        snprintf(np, sizeof np, "%s%s", path, c->path + l);
+                        strlcpy(c->path, np, sizeof c->path);
+                    }
+                }
+            }
+            strlcpy(m->path, path, sizeof m->path);
+            counts[5]++;
+        } else if (kind < 97) {
+            if (!m->dir) { FULLP(full, m->path); v_cmp(full, m->data, m->size); }
+        } else {
+            /* unplug, check the image, plug in again */
+            disk_detach(h);
+            ntfs_verify(tag, im);
+            h = ntfs_attach(im, ss, 1, 0);
+            L = letter_of(h);
+            if (!L) { CHECK(0, "[%s] remount failed", tag); break; }
+            CHECK(!vfs_volume_by_letter(L)->readonly, "[%s] read-only after a session: %s", tag,
+                  vfs_volume_by_letter(L)->ro_reason);
+            nm_verify_all(L, base, tag);
+            counts[6]++;
+        }
+    }
+#undef FULLP
+    if (L) nm_verify_all(L, base, tag);
+    if (shim_verbose)
+        printf("    [%s] %d ops: %d mkdir, %d create, %d write, %d truncate, %d delete, %d rename, %d remount, %d disk full\n",
+               tag, ops, counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], nfull);
+    disk_detach(h);
+    ntfs_verify(tag, im);
+    nm_cmp_ntfs3g(tag, im, base);
+    nm_clear();
+    free(buf);
+}
+
+/* a debugging aid: NTFS_DBG="ops" runs c<name> (create) / d<name> (delete)
+ * / m<name> (mkdir) on an empty image and leaves it in the work directory */
+static void s_ntfsdbg(void) {
+    const char *ops = getenv("NTFS_DBG");
+    if (!ops || !ntfs_tools()) return;
+    img_t im;
+    ntfs_img(&im, "dbg.img", 64, "empty", getenv("NTFS_DBG_OPTS"));
+    hdisk_t *h = ntfs_attach(&im, 512, 1, 0);
+    char L = letter_of(h);
+    char buf[300];
+    while (L && *ops) {
+        char kind = *ops++;
+        const char *e = strchr(ops, ',');
+        size_t n = e ? (size_t)(e - ops) : strlen(ops);
+        char name[200];
+        snprintf(name, sizeof name, "%.*s", (int)n, ops);
+        ops += n + (e ? 1 : 0);
+        snprintf(buf, sizeof buf, "%c:/%s", L, name);
+        int r = kind == 'c' ? vfs_write_file(buf, (const u8 *)"data", 4) : kind == 'd' ? vfs_unlink(buf) : vfs_mkdir(buf);
+        printf("    %c %s: %s\n", kind, name, ename(r < 0 ? r : 0));
+    }
+    disk_detach(h);
+    ntfs_verify("dbg", &im);
+}
+
+static void s_ntfsw(void) {
+    if (!ntfs_tools()) return;
+    static const struct { u32 cluster, ss, mb; const char *name; u32 maxsz; } cfg[] = {
+        { 4096, 512, 64, "4k", 300000 }, { 512, 512, 48, "512", 100000 }, { 65536, 512, 128, "64k", 400000 },
+        { 4096, 4096, 64, "4kn", 300000 }, { 4096, 512, 12, "full", 2000000 },
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(cfg); i++) {
+        if (getenv("NTFS_ONLY") && strcmp(getenv("NTFS_ONLY"), cfg[i].name)) continue;
+        img_t im;
+        char name[64], opts[64], tag[64];
+        snprintf(name, sizeof name, "ntfsw_%s.img", cfg[i].name);
+        snprintf(opts, sizeof opts, "-c %u -s %u", cfg[i].cluster, cfg[i].ss);
+        snprintf(tag, sizeof tag, "ntfs random %s", cfg[i].name);
+        ntfs_img(&im, name, cfg[i].mb, "empty", opts);
+        t_ntfs_random(tag, &im, cfg[i].ss, (getenv("NTFS_SEED") ? (u32)atoi(getenv("NTFS_SEED")) : 100) + (u32)i, getenv("NTFS_OPS") ? atoi(getenv("NTFS_OPS")) : 1500,
+                      cfg[i].maxsz, "");
+        unlink(im.path);
+    }
+}

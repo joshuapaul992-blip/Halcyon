@@ -1018,7 +1018,7 @@ int nt_attr_store_runs(nino_t *ino, u32 type, const u16 *name, u8 nlen, const nr
         a->nr.allocated_size = (i64)ai->alloc;
         a->nr.data_size = (i64)ai->size;
         a->nr.initialized_size = (i64)ai->init;
-        if (mpoff >= 0x48) a->nr.compressed_size = (i64)ai->comp;
+        if ((a->flags & (NTFS_ATTR_COMPRESSED | NTFS_ATTR_SPARSE)) && mpoff >= 0x48) a->nr.compressed_size = (i64)ai->comp;
         c.rec->dirty = 1;
     }
     nt_actx_done(&c);

@@ -259,6 +259,7 @@ int  nt_idx_insert(nidx_t *ix, const ntfs_index_entry_t *e);
 int  nt_idx_delete(nidx_t *ix, const u8 *key, u32 klen, u64 file);
 int  nt_idx_update(nidx_t *ix, const ntfs_index_entry_t *e);   /* same key and length: rewrite in place */
 int  nt_idx_empty(nidx_t *ix);                                  /* 1 if no entries */
+int  nt_idx_reserve(nidx_t *ix, int n);     /* blocks for n deletions / insertions (E_NOSPC: none free) */
 
 /* ---- ntfs_lznt1.c ---- */
 int  nt_lznt1_decompress(const u8 *in, u32 inlen, u8 *out, u32 outlen);

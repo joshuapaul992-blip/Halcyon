@@ -30,6 +30,7 @@
 #define IE_HDR      ((u32)sizeof(ntfs_index_entry_t))
 #define BLK_HDR     0x18u           /* the index header's offset in a block */
 #define ROOT_HDR    0x10u           /* ... in the index root value */
+#define EIO_AT() (kprintf("ntfs: index check failed (ntfs_index.c:%d)\n", __LINE__), E_IO)
 
 /* ------------------------------------------------------------------ */
 /* collation                                                            */
@@ -546,7 +547,10 @@ static u32 blk_entries_off(nidx_t *ix) {
 
 static u32 blk_cap(nidx_t *ix) { return ix->bsize - BLK_HDR - blk_entries_off(ix); }
 
-/* the root's room: its current value plus the free space of its record */
+/* the root's room: its current value plus the free space of its record,
+ * less a reserve for the attributes a push-down needs ($INDEX_ALLOCATION,
+ * $BITMAP, their growth); an END entry always fits */
+#define ROOT_HEADROOM 256u
 static int root_cap(nidx_t *ix, u32 *cap) {
     actx_t c;
     ntfs_index_root_t *ir;
@@ -555,7 +559,9 @@ static int root_cap(nidx_t *ix, u32 *cap) {
     ntfs_attr_t *a = ac_attr(&c);
     u32 room = a->length - a->r.value_offset + nt_rec_free_space(c.rec);
     nt_actx_done(&c);
-    *cap = room > sizeof(ntfs_index_root_t) ? room - (u32)sizeof(ntfs_index_root_t) : 0;
+    u32 hdr = (u32)sizeof(ntfs_index_root_t) + ROOT_HEADROOM;
+    *cap = room > hdr ? room - hdr : 0;
+    if (*cap < IE_HDR + 8) *cap = IE_HDR + 8;
     return 0;
 }
 
@@ -708,6 +714,22 @@ int nt_idx_walk(nidx_t *ix, int (*cb)(void *ctx, const ntfs_index_entry_t *e), v
 
 static int any_cb(void *ctx, const ntfs_index_entry_t *e) { return 1; }
 
+/* reserve the blocks n later deletions (or insertions) may need */
+int nt_idx_reserve(nidx_t *ix, int n) {
+    if (!ix->have_alloc) return 0;
+    int depth = 0;
+    nbuf_t nb = { 0 };
+    i64 v = -1;
+    int r;
+    while (!(r = nb_load(ix, v, &nb)) && nb.large && depth < NT_MAX_DEPTH) {
+        v = ie_child(IE(nb.e));
+        depth++;
+    }
+    nb_free(&nb);
+    if (r) return r;
+    return ix_reserve(ix, (u32)(n * (depth + 3)));
+}
+
 int nt_idx_empty(nidx_t *ix) {
     int r = nt_idx_walk(ix, any_cb, NULL);
     return r < 0 ? r : r == 0;
@@ -744,6 +766,7 @@ static int fix_overflow(nidx_t *ix, plev_t *path, int d, nbuf_t *nb) {
     if (!med) return E_NOMEM;
     nbuf_t left = { 0 }, parent = { 0 };
     int r = 0;
+    r = E_NOSPC;
     for (int guard = 0; guard < 2 * NT_MAX_DEPTH + 4; guard++) {
         int fits;
         if ((r = nb_fits(ix, nb, &fits))) break;
@@ -912,17 +935,17 @@ static int fix_underflow(nidx_t *ix, plev_t *path, int d, nbuf_t *u) {
         if (nb_count(u) > 0) { r = nb_store(ix, u, 0); break; }
         if ((r = nb_load(ix, path[d - 1].vcn, &p))) break;
         u32 xo = path[d - 1].pos;
-        if (xo >= p.len) { r = E_IO; break; }
+        if (xo >= p.len) { r = EIO_AT(); break; }
         ntfs_index_entry_t *x = IE(p.e + xo);
-        if (!(x->flags & NTFS_IE_NODE) || ie_child(x) != u->vcn) { r = E_IO; break; }
+        if (!(x->flags & NTFS_IE_NODE) || ie_child(x) != u->vcn) { r = EIO_AT(); break; }
         i64 uchild = u->large ? ie_child(IE(u->e)) : 0;     /* u: only its END */
         if (!(x->flags & NTFS_IE_END)) {
             /* right sibling: the sub-node of the entry after x */
             u32 yo = nb_next_off(&p, xo);
             ntfs_index_entry_t *y = IE(p.e + yo);
-            if (!(y->flags & NTFS_IE_NODE)) { r = E_IO; break; }
+            if (!(y->flags & NTFS_IE_NODE)) { r = EIO_AT(); break; }
             if ((r = nb_load(ix, ie_child(y), &s))) break;
-            if (s.large != u->large) { r = E_IO; break; }
+            if (s.large != u->large) { r = EIO_AT(); break; }
             u32 xl = ie_copy(x, t1, u->large, uchild);  /* x moves down into u / s */
             if (nb_count(&s) >= 2) {
                 /* rotate left: x down into u, s's first key up into x's place */
@@ -947,10 +970,16 @@ static int fix_underflow(nidx_t *ix, plev_t *path, int d, nbuf_t *u) {
         } else {
             /* u is the last sub-node: left sibling under the last key w */
             u32 wo = nb_last_real(&p);
-            if (wo == ~0u) { r = E_IO; break; }      /* only the root can be keyless */
+            if (wo == ~0u && d - 1 == 0) {
+                /* a keyless root over u alone: the tree loses a level */
+                nb_set_end(&p, u->large, uchild);
+                if ((r = nb_store(ix, &p, 0)) || (r = blk_release(ix, u->vcn))) break;
+                break;
+            }
+            if (wo == ~0u) { r = EIO_AT(); break; }      /* only the root can be keyless */
             ntfs_index_entry_t *w = IE(p.e + wo);
             if ((r = nb_load(ix, ie_child(w), &s))) break;
-            if (s.large != u->large) { r = E_IO; break; }
+            if (s.large != u->large) { r = EIO_AT(); break; }
             u32 so = nb_end_off(&s);
             i64 send = s.large ? ie_child(IE(s.e + so)) : 0;
             u32 wl = ie_copy(w, t1, u->large, send);    /* w moves down */
@@ -1003,8 +1032,11 @@ int nt_idx_delete(nidx_t *ix, const u8 *key, u32 klen, u64 file) {
     if (r < 0) goto out;
     ntfs_index_entry_t *x = IE(nb.e + path[depth].pos);
     if (ix->coll == nt_coll_filename && x->file != file) { r = E_NOENT; goto out; }
-    /* rotations and splits may need new blocks */
-    if (ix->have_alloc && (r = ix_reserve(ix, (u32)depth + 3))) goto out;
+    /* rotations and splits may need new blocks (reserved first, so a full
+     * volume fails here, unchanged); removing a key from a leaf that keeps
+     * others needs none */
+    int simple = !nb.large && (depth == 0 || nb_count(&nb) >= 2);
+    if (ix->have_alloc && !simple && (r = ix_reserve(ix, (u32)depth + 3))) goto out;
     if (!nb.large) {
         nb_remove(&nb, path[depth].pos);
         if (depth == 0) r = nb_store(ix, &nb, 0);
@@ -1017,7 +1049,7 @@ int nt_idx_delete(nidx_t *ix, const u8 *key, u32 klen, u64 file) {
     int d = depth;
     i64 v = ie_child(x);
     for (;;) {
-        if (++d >= NT_MAX_DEPTH) { r = E_IO; goto out; }
+        if (++d >= NT_MAX_DEPTH) { r = EIO_AT(); goto out; }
         if ((r = nb_load(ix, v, &leaf))) goto out;
         path[d].vcn = v;
         path[d].pos = nb_end_off(&leaf);
@@ -1025,7 +1057,7 @@ int nt_idx_delete(nidx_t *ix, const u8 *key, u32 klen, u64 file) {
         v = ie_child(IE(leaf.e + path[d].pos));
     }
     u32 lo = nb_last_real(&leaf);
-    if (lo == ~0u) { r = E_IO; goto out; }
+    if (lo == ~0u) { r = EIO_AT(); goto out; }
     pd = kmalloc(NT_IE_MAX + 16);
     if (!pd) { r = E_NOMEM; goto out; }
     u32 pl = ie_copy(IE(leaf.e + lo), pd, 1, ie_child(x));
@@ -1045,14 +1077,14 @@ int nt_idx_delete(nidx_t *ix, const u8 *key, u32 klen, u64 file) {
         if (r != 1) { r = r < 0 ? r : E_IO; goto out; }
         v = ie_child(IE(nb.e + path[d2].pos));
         for (;;) {
-            if (++d2 >= NT_MAX_DEPTH) { r = E_IO; goto out; }
+            if (++d2 >= NT_MAX_DEPTH) { r = EIO_AT(); goto out; }
             if ((r = nb_load(ix, v, &leaf))) goto out;
             path[d2].vcn = v;
             path[d2].pos = nb_end_off(&leaf);
             if (!leaf.large) break;
             v = ie_child(IE(leaf.e + path[d2].pos));
         }
-        if (leaf.vcn != leaf_vcn) { r = E_IO; goto out; }
+        if (leaf.vcn != leaf_vcn) { r = EIO_AT(); goto out; }
         r = fix_underflow(ix, path, d2, &leaf);
     }
     if (!r) r = root_tidy(ix);

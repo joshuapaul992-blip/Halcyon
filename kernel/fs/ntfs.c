@@ -1137,6 +1137,20 @@ static int ntfs_stat(volume_t *v, const char *path, vfs_dirent_t *out) {
 /* ------------------------------------------------------------------ */
 /* creating                                                             */
 
+/* the descriptor of new files on volumes without a usable security id
+ * (formatted by mkntfs): self-relative, owner and group Administrators,
+ * Everyone full control (inherited by files and folders) */
+static const u8 default_sd[80] = {
+    1, 0, 0x04, 0x80, 48, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0,
+    /* DACL: revision 2, size 28, one ACE */
+    2, 0, 28, 0, 1, 0, 0, 0,
+    /* ACCESS_ALLOWED, OBJECT_INHERIT | CONTAINER_INHERIT, size 20, FILE_ALL_ACCESS, S-1-1-0 */
+    0, 3, 20, 0, 0xFF, 0x01, 0x1F, 0x00, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+    /* owner, group: S-1-5-32-544 */
+    1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 0x02, 0, 0,
+    1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 0x02, 0, 0,
+};
+
 /* a new file or directory name in directory dmref; *out: its reference */
 static int create_entry(ntfs_t *fs, u64 dmref, const u16 *name, int nlen, int is_dir, u64 *out) {
     nino_t d;
@@ -1146,18 +1160,25 @@ static int create_entry(ntfs_t *fs, u64 dmref, const u16 *name, int nlen, int is
     u8 *sd = NULL;
     u32 sdlen = 0;
     if ((r = si_get(&d, &psi))) goto out_d;
-    u32 secid = psi.secid ? psi.secid : fs->sec_id;
+    /* security: the directory's descriptor id in $Secure; else a copy of
+     * its own (resident) descriptor; else the root's id; else a default
+     * descriptor in the record ($Secure itself is never written) */
+    u32 secid = psi.secid;
     if (!secid) {
-        /* no security id to share: copy the directory's own descriptor */
         ainfo_t sa;
-        if (nt_attr_info(&d, NTFS_AT_SECURITY_DESCRIPTOR, NULL, 0, &sa, NULL) || !sa.resident || sa.size > 4096) {
-            r = E_NOTSUP;
-            goto out_d;
+        if (!nt_attr_info(&d, NTFS_AT_SECURITY_DESCRIPTOR, NULL, 0, &sa, NULL) && sa.resident && sa.size >= 20 &&
+            sa.size <= 512) {
+            sdlen = (u32)sa.size;
+            if (!(sd = kmalloc(sdlen))) { r = E_NOMEM; goto out_d; }
+            if ((r = nt_attr_read(&d, NTFS_AT_SECURITY_DESCRIPTOR, NULL, 0, 0, sdlen, sd)) < 0) goto out_d;
+            r = 0;
+        } else if (fs->sec_id) {
+            secid = fs->sec_id;
+        } else {
+            sdlen = sizeof default_sd;
+            if (!(sd = kmalloc(sdlen))) { r = E_NOMEM; goto out_d; }
+            memcpy(sd, default_sd, sdlen);
         }
-        sdlen = (u32)sa.size;
-        sd = kmalloc(sdlen ? sdlen : 1);
-        if (!sd) { r = E_NOMEM; goto out_d; }
-        if ((r = nt_attr_read(&d, NTFS_AT_SECURITY_DESCRIPTOR, NULL, 0, 0, sdlen, sd)) < 0) goto out_d;
     }
     u64 rec;
     if ((r = nt_mft_alloc(fs, &rec))) goto out_d;
@@ -1435,13 +1456,26 @@ static int ntfs_unlink(volume_t *v, const char *path) {
     {
         nidx_t ix;
         if ((r = nt_idx_open(&d, nt_I30, 4, nt_coll_filename, &ix))) goto out;
+        u64 me = NTFS_MK_MREF(ino.rec, ino.seq);
+        if (cnt > 1) nt_idx_reserve(&ix, cnt);
+        int done = 0;
         for (int i = 0; i < cnt && !r; i++) {
             ntfs_file_name_t *fn = (ntfs_file_name_t *)(names + (size_t)i * NT_FN_MAX);
-            r = nt_idx_delete(&ix, (u8 *)fn, (u32)sizeof *fn + 2u * fn->name_length, NTFS_MK_MREF(ino.rec, ino.seq));
+            r = nt_idx_delete(&ix, (u8 *)fn, (u32)sizeof *fn + 2u * fn->name_length, me);
             if (r == E_NOENT) {
                 kprintf("ntfs: %s: record %lu: a name missing from its directory\n", fs->bd->name, (unsigned long)ino.rec);
                 r = 0;
             }
+            if (!r) done++;
+        }
+        if (r && done > 0) {
+            /* the second name could not go: put the first one back */
+            ntfs_file_name_t *fn = (ntfs_file_name_t *)names;
+            u8 *ie = kmalloc(NT_IE_MAX);
+            if (ie) ie_build(ie, me, (u8 *)fn, (u32)sizeof *fn + 2u * fn->name_length);
+            if (!ie || nt_idx_insert(&ix, (ntfs_index_entry_t *)ie))
+                nt_corrupt(fs, "a failed deletion left the directory inconsistent", ino.rec);
+            kfree(ie);
         }
         nt_idx_close(&ix);
         if (r) goto out;
@@ -1576,16 +1610,38 @@ static int ntfs_rename(volume_t *v, const char *from, const char *to) {
     if ((r = nt_idx_open(&sd, nt_I30, 4, nt_coll_filename, &six))) goto out;
     if (!same_dir && (r = nt_idx_open(&dd, nt_I30, 4, nt_coll_filename, &dix))) { nt_idx_close(&six); goto out; }
     nidx_t *dixp = same_dir ? &six : &dix;
-    /* a new name only in case (same directory): remove first; otherwise add
-     * the new entry first, so a failure leaves the old name */
-    int case_only = same_file && same_dir;
-    if (!case_only) r = nt_idx_insert(dixp, (ntfs_index_entry_t *)nie);
+    /* the blocks the deletions may need; then the new entry first (a
+     * failure leaves the old name) and the old entries out (a failure
+     * takes the new one back out). A new name only in case (same
+     * directory) would clash with the old one: the old entries go first. */
+    u64 me = NTFS_MK_MREF(ino.rec, ino.seq);
+    int case_only = same_file && same_dir, done = 0, inserted = 0;
+    nt_idx_reserve(&six, cnt + 1);
+    if (!case_only && !(r = nt_idx_insert(dixp, (ntfs_index_entry_t *)nie))) inserted = 1;
     for (int i = 0; i < cnt && !r; i++) {
         ntfs_file_name_t *fn = (ntfs_file_name_t *)(names + (size_t)i * NT_FN_MAX);
-        int k = nt_idx_delete(&six, (u8 *)fn, (u32)sizeof *fn + 2u * fn->name_length, NTFS_MK_MREF(ino.rec, ino.seq));
+        int k = nt_idx_delete(&six, (u8 *)fn, (u32)sizeof *fn + 2u * fn->name_length, me);
         if (k && k != E_NOENT) r = k;
+        else done++;
     }
     if (!r && case_only) r = nt_idx_insert(dixp, (ntfs_index_entry_t *)nie);
+    if (r) {
+        /* put the old entries back, take the new one out */
+        int bad = 0;
+        if (inserted) {
+            ntfs_index_entry_t *ne = (ntfs_index_entry_t *)nie;
+            if (nt_idx_delete(dixp, ne->key, ne->key_length, me)) bad = 1;
+        }
+        for (int i = 0; i < done; i++) {
+            ntfs_file_name_t *fn = (ntfs_file_name_t *)(names + (size_t)i * NT_FN_MAX);
+            u8 *ie = kmalloc(NT_IE_MAX);
+            if (!ie) { bad = 1; continue; }
+            ie_build(ie, me, (u8 *)fn, (u32)sizeof *fn + 2u * fn->name_length);
+            if (nt_idx_insert(&six, (ntfs_index_entry_t *)ie)) bad = 1;
+            kfree(ie);
+        }
+        if (bad) nt_corrupt(fs, "a failed rename left the directories inconsistent", ino.rec);
+    }
     nt_idx_close(&six);
     if (!same_dir) nt_idx_close(&dix);
     if (r) goto out;
