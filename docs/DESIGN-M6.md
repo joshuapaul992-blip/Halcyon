@@ -285,7 +285,35 @@ each address). New errors: `E_HOSTUNREACH` (-30), `E_NETUNREACH` (-31),
 program may change the configuration (DESIGN-M4).
 
 `PING.EXE` and `IPCONFIG.EXE` (`/all`, `/renew`, `/release`, `/flushdns`,
-`/stats`, `/conns`) are small programs on these calls.
+`/stats`, `/conns`) are small programs on these calls. `NSLOOKUP.EXE`
+(`nslookup [-type=A|AAAA|CNAME|MX|NS|TXT|PTR|SOA|ANY] [-timeout=S] name
+[server]`) does not use `resolve()`: it sends its own query over a UDP
+socket to the first DNS server in use (or the one named) and prints every
+record of the answer in Windows' layout, so it shows what the server says
+rather than what the stack cached. An address as the name is a reverse
+(PTR) lookup.
+
+### Settings in the GUI
+
+Kernel code calls the same three operations without copying through user
+memory: `net_if_info`, `net_if_config` and `net_if_ctl` (net/netcfg.h, weak
+so the GUI links without the stack). On them:
+
+- **Network Connections** (kernel/apps/network.c; Control Panel's
+  "Network...", the Start menu, the tray icon): the adapters in a list; the
+  selected one's status, refreshed every second (link and speed, address and
+  mask, gateway, DNS servers, the DHCP server and the time left on the
+  lease, MAC, bytes sent and received); and its settings, as Windows' TCP/IP
+  properties: "Obtain an IP address automatically" or an address, mask and
+  gateway, "Obtain DNS server addresses automatically" or two servers (a
+  static address needs typed-in DNS servers). Fields are checked before
+  anything changes; Apply / OK change the interface at once and save the
+  `net.*` keys (`NETCFG_SAVE`). "Renew" asks DHCP again.
+- **The tray icon**: two computers on a cable, with a red cross while the
+  first adapter has no link or no address. It is checked once a second and
+  hidden when there is no adapter. Its menu shows the status line and opens
+  Network Connections or renews the address; a double click opens Network
+  Connections.
 
 ## Limits
 

@@ -5,13 +5,11 @@ that programs link (libweb), a TLS implementation (BearSSL, vendored), a
 command-line fetcher (`WGET.EXE`) and a small web browser (`BROWSER.EXE`,
 "Web Browser"). The kernel side of the milestone (network cards, IPv4, TCP,
 UDP, DHCP, DNS behind the BSD socket API) is separate work; libweb only
-uses the socket calls of `hal.h` and name lookup, system call 116.
+uses the socket calls of `hal.h` and `resolve()` (docs/DESIGN-M6.md).
 
-Until the internet stack is merged, `socket(AF_INET, ...)` returns
-`E_AFNOSUPPORT` and system call 116 `E_NOTSUP`: every network request ends
-with `WEB_E_NONET` and the browser shows its "not connected to a network"
-page. Everything else (local pages, the parser, layout, images, forms, TLS
-itself) works and is tested now.
+Without a network (no adapter, cable unplugged, no DNS server) a request
+ends with `WEB_E_NONET` and the browser shows its "not connected to a
+network" page.
 
 ## Structure
 
@@ -89,8 +87,7 @@ web_response_free(&rs);
   last for the session only (nothing is written to disk).
 - **Name lookup:** IPv4 literals directly; names through system call 116,
   `long resolve(const char *host, unsigned *ipv4_out, int max, int
-  timeout_ms)` of the internet stack, called by number from `plat.c`
-  (`net_resolve`) so libweb does not depend on that header change. No IPv6.
+  timeout_ms)` of the internet stack (`hal.h`). No IPv6.
 - **URLs:** `url_parse`, `url_format`, `url_resolve` (RFC 3986 section 5,
   with browsers' leniencies: backslashes, spaces and non-ASCII bytes are
   encoded, white space trimmed), `url_from_user` (address bar input:
@@ -138,10 +135,10 @@ calls to POSIX and errno to `E_*`), which is how most of it is tested.
   key, incomplete chain. The browser shows it on an error page; neither it
   nor wget offers to continue.
 - **The clock:** certificate dates need the time in UTC. Halcyon's
-  real-time clock keeps local time (as Windows does) and Halcyon has no
-  time zone setting yet. `wp_utc_now()` reads `datetime()`; if
-  `C:\HALCYON\SETTINGS.INI` has `clock.utc_offset = MINUTES` (minutes east
-  of UTC) the time is exact. Otherwise the true time lies within 14 hours of
+  real-time clock keeps local time (as Windows does). `wp_utc_now()` reads
+  `datetime()`; once a time zone is chosen in Control Panel (Time Zone,
+  `clock.utc_offset` = minutes east of UTC in `C:\HALCYON\SETTINGS.INI`)
+  the time is exact. Without one the true time lies within 14 hours of
   the clock, and the chain is validated twice side by side (two BearSSL
   X.509 contexts fed the same certificates) at both ends of that window: it
   is accepted if it is valid at either end. A certificate issued an hour
@@ -330,8 +327,8 @@ the trust anchor converter) is written for Halcyon.
   application data between a BearSSL client and server inside the program
   (over memory) with seven cipher suites and RSA and EC certificates of a
   test CA, a wrong name, an expired and a not-yet-valid certificate; gzip;
-  URLs; the clock; a fetch over the system's network (today: "no network")
-  and a cancelled job. Under QEMU (TCG) a handshake takes 15-30 ms.
+  URLs; the clock; a fetch over the system's network (in the boot test,
+  which has no adapter: "no network") and a cancelled job. Under QEMU (TCG) a handshake takes 15-30 ms.
 - In QEMU by hand: the sample pages in `C:\Documents\Web` (text, lists,
   tables, images, forms, Latin-1), folder listings, saved real-world pages
   (Wikipedia, Hacker News), the no-network error page, form submission,
@@ -345,16 +342,18 @@ the trust anchor converter) is written for Halcyon.
   anchor the pages load (so those runs tested the TLS code against the
   proxy, not against the sites' own certificates).
 
-## After the internet stack is merged
+- On Halcyon over the stack (QEMU user networking, virtio-net and e1000e):
+  the browser loads http://example.com/; https://example.com/ ends on the
+  certificate page, because the development machine's intercepting proxy
+  answers for every site (see above) and its CA is not one of Mozilla's.
+  On a normal network the same request completes the handshake against
+  the site's own certificate; that has not been tried yet.
 
-- Run the browser and wget against real sites from Halcyon (QEMU user
-  networking or a TAP bridge, and real hardware); check the timings of
-  connect and DNS failures and of Stop during each phase.
-- Replace the call by number in `plat.c` (`net_resolve`, system call 116)
-  with the stack's `resolve()` from `hal.h`, and the private
-  `web_sockaddr_in_t` with its `struct sockaddr_in`.
-- Add a time zone (or UTC) setting to the Control Panel and write
-  `clock.utc_offset`; with it the certificate dates are exact.
+## Still to do
+
+- Real sites over HTTPS from Halcyon on a network without an intercepting
+  proxy (real hardware, or QEMU on another machine), and the timings of
+  connect and DNS failures and of Stop in each phase.
 - Possible next steps for the browser: a CSS subset (selectors for
   `display: none`, colours, widths), JPEG decoding, rowspan, text selection
   and copy, find in page, bookmarks, persistent cookies, IPv6, TLS 1.3 when

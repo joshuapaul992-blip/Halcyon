@@ -23,11 +23,16 @@
    `poll`, permission to end other programs only with the user's OK. Notepad,
    Paint and Explorer are user programs. See docs/DESIGN-M9.md.
 
-## Planned (in recommended order)
+6. **Networking:** network card drivers (virtio-net; Intel e1000, e1000e
+   with the I217/I218/I219 of many boards, igb with the I210/I211/I350;
+   Realtek RTL8139 and RTL8111/8168), an IPv4 stack behind BSD sockets (ARP,
+   IP with fragments, ICMP and ping sockets, UDP, TCP with window scaling,
+   DHCP, DNS), PING / IPCONFIG / NSLOOKUP, Network Connections and a tray
+   icon, a time zone setting, and on the web side HTTP and HTTPS (BearSSL,
+   TLS 1.2) for programs, WGET and a small web browser. See
+   docs/DESIGN-M6.md and docs/DESIGN-M6-WEB.md.
 
-### M6: Networking
-- Network card drivers: Intel e1000, Realtek, virtio-net.
-- TCP/IP with DHCP and DNS; `PING`; a minimal web browser as a user program.
+## Planned (in recommended order)
 
 ### M7: Audio
 - Intel HD Audio, AC'97 (QEMU), a startup sound, a system call API for sound.
