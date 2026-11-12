@@ -56,7 +56,12 @@ $(BUILD)/gen/icons.c $(BUILD)/gen/icons.h &: tools/mkicons.py
 $(BUILD)/gen/%.o: $(BUILD)/gen/%.c
 	$(CC) $(KCFLAGS) -c $< -o $@
 
-GENH := $(BUILD)/gen/fonts.h $(BUILD)/gen/icons.h
+# the version (1.0.<number of commits>), checked on every build
+$(BUILD)/gen/version.h: FORCE
+	@mkdir -p $(BUILD)/gen
+	@sh tools/mkversion.sh $@
+
+GENH := $(BUILD)/gen/fonts.h $(BUILD)/gen/icons.h $(BUILD)/gen/version.h
 
 # ---- kernel ----
 $(BUILD)/kernel/%.o: kernel/%.c | $(GENH)

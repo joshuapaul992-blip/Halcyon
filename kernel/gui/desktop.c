@@ -12,6 +12,7 @@
 #include "core/settings.h"
 #include "usb/usb.h"
 #include "drivers/keymap.h"
+#include "version.h"
 
 static surface_t *wallpaper;
 static int wp_style;

@@ -124,6 +124,9 @@ typedef struct hal_sysinfo {
     unsigned long long uptime_ms, ram_kib, heap_kib, heap_used_kib;
     int cpu_load, nprocs, nthreads, pad;
     char cpu[48];
+    char version[24];                   /* "1.0.346": major.minor.build */
+    unsigned build;                     /* the build number (commits in the history built) */
+    int pad2;
 } hal_sysinfo_t;
 
 /* window events (SYS_WIN_GET_EVENT) */

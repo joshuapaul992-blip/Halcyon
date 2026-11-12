@@ -10,6 +10,7 @@
 #include "core/kernel.h"
 #include "core/kmath.h"
 #include "fs/vfs.h"
+#include "version.h"
 
 #define TOOL_W 62
 #define PAL_H 46

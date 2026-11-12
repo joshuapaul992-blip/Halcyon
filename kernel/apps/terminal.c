@@ -13,6 +13,7 @@
 #include "usb/usb.h"
 #include "drivers/keymap.h"
 #include "fileops.h"
+#include "version.h"
 
 #define MAX_LINES 1000
 #define LINE_MAX 512

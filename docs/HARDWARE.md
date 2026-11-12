@@ -53,7 +53,7 @@ offers:
 | Disable SATA | Hangs or errors while detecting disks. |
 | Disable NVMe | Hangs or errors while detecting NVMe SSDs. |
 | Disable ACPI | Hangs right at the start. Also switches to the legacy PIC (the I/O APIC is described by ACPI). |
-| Disable interrupts | Hangs or freezes after the "irq:" lines, or input stops working. Everything is polled, as in Halcyon 1.0, and the CPU never idles. |
+| Disable interrupts | Hangs or freezes after the "irq:" lines, or input stops working. Everything is polled, as in the first Halcyon releases, and the CPU never idles. |
 | Disable MSI | A USB 3 or SATA controller misbehaves: it then uses its INTx line instead. |
 | Use the legacy PIC | Interrupts misbehave with the I/O APIC. Uses the firmware's PCI interrupt lines. |
 | Safe video mode | Black or garbled screen: forces 800×600 and the firmware frame buffer, ignoring the saved resolution. |

@@ -632,10 +632,14 @@ static void calc_paste(void) {
 }
 
 static void calc_help(void) {
-    msgbox(win, "About Calculator", "Halcyon Calculator 1.0\n\nKeyboard: digits, + - * /, Enter (=), "
-           "Esc (C), Del (CE), Backspace, % , @ (square root), R (1/x), F9 (sign).\n\n"
-           "Ctrl+C copies the display and Ctrl+V pastes a number.\n"
-           "Memory keys: Ctrl+L, Ctrl+R, Ctrl+M, Ctrl+P and Ctrl+Q.", MBX_ICON_INFO, MBX_OK);
+    hal_sysinfo_t si;
+    char text[512];
+    if (sysinfo(&si) < 0 || !si.version[0]) strcpy(si.version, "1.0");
+    snprintf(text, sizeof text, "Halcyon Calculator %s\n\nKeyboard: digits, + - * /, Enter (=), "
+             "Esc (C), Del (CE), Backspace, %% , @ (square root), R (1/x), F9 (sign).\n\n"
+             "Ctrl+C copies the display and Ctrl+V pastes a number.\n"
+             "Memory keys: Ctrl+L, Ctrl+R, Ctrl+M, Ctrl+P and Ctrl+Q.", si.version);
+    msgbox(win, "About Calculator", text, MBX_ICON_INFO, MBX_OK);
 }
 
 static void command(int id) {

@@ -6,6 +6,7 @@
 #include "core/mm.h"
 #include "core/kernel.h"
 #include "core/kmath.h"
+#include "version.h"
 
 #define COLS 5
 #define ROWS 6

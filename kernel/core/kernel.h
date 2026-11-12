@@ -4,7 +4,6 @@
 #include "../../boot/bootinfo.h"
 
 #define OS_NAME    "Halcyon"
-#define OS_VERSION "1.0"
 
 extern struct bootinfo g_bootinfo;
 

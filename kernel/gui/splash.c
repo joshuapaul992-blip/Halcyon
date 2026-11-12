@@ -5,6 +5,7 @@
 #include "core/lib.h"
 #include "core/kernel.h"
 #include "drivers/input.h"
+#include "version.h"
 
 static int splash_on, verbose;
 

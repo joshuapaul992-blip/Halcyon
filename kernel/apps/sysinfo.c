@@ -12,6 +12,7 @@
 #include "fileops.h"
 #include "core/irq.h"
 #include "net/netdev.h"
+#include "version.h"
 
 blockdev_t *ahci_cd_get(int i) __attribute__((weak));   /* drivers/ahci.c */
 

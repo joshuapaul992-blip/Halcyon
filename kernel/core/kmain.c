@@ -9,6 +9,7 @@
 #include "drivers/pci.h"
 #include "drivers/display.h"
 #include "net/netdev.h"
+#include "version.h"
 
 /* Subsystems are linked in as they are written; weak references let the
  * kernel build while a subsystem is missing. */

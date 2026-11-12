@@ -12,6 +12,7 @@
 #include "fs/block.h"
 #include "gui/wm.h"
 #include "apps/fileops.h"
+#include "version.h"
 
 struct sysframe {
     u64 r15, r14, r13, r12, rbp, rbx, r9, r8, r10, rdx, rsi, rdi, rax, rip, rflags, rsp;
@@ -113,6 +114,8 @@ static long sys_sysinfo(u64 ubuf) {
     for (proc_t *p = proc_first(); p; p = p->next) if (p->state == P_RUNNING) si.nprocs++;
     si.nthreads = thread_count();
     strlcpy(si.cpu, cpu_brand(), sizeof si.cpu);
+    strlcpy(si.version, OS_VERSION, sizeof si.version);
+    si.build = OS_BUILD;
     return copyout(ubuf, &si, sizeof si);
 }
 

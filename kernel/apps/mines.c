@@ -7,6 +7,7 @@
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
+#include "version.h"
 
 #define TS 20            /* tile size */
 #define MARGIN 10

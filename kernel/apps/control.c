@@ -6,6 +6,7 @@
 #include "core/kernel.h"
 #include "core/kmath.h"
 #include "core/settings.h"
+#include "version.h"
 
 #define CP_W 560
 #define CP_H 420

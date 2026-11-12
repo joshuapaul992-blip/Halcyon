@@ -3,6 +3,7 @@
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
+#include "version.h"
 
 #define AB_W 440
 #define AB_H 300

@@ -1127,11 +1127,16 @@ static void menu_command(int id) {
         box(&img, 0, 0, img.w - 1, img.h - 1, bg);
         dirty = 1;
         break;
-    case PM_ABOUT:
-        pmsg("About Paint", "Halcyon Paint 1.0\n\nOpens 1, 4, 8, 16, 24 and 32-bit Windows bitmaps "
-             "and saves 24-bit bitmaps.\n\nLeft button: primary colour. Right button: secondary colour. "
-             "Double click a palette colour to change it.", HICON_PAINT, MBX_OK);
+    case PM_ABOUT: {
+        hal_sysinfo_t si;
+        char text[400];
+        if (sysinfo(&si) < 0 || !si.version[0]) strcpy(si.version, "1.0");
+        snprintf(text, sizeof text, "Halcyon Paint %s\n\nOpens 1, 4, 8, 16, 24 and 32-bit Windows bitmaps "
+                 "and saves 24-bit bitmaps.\n\nLeft button: primary colour. Right button: secondary colour. "
+                 "Double click a palette colour to change it.", si.version);
+        pmsg("About Paint", text, HICON_PAINT, MBX_OK);
         break;
+    }
     }
 }
 
