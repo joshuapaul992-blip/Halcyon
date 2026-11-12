@@ -65,7 +65,9 @@ int nt_coll_filename(ntfs_t *fs, const u8 *a, u32 al, const u8 *b, u32 bl) { ret
 int nt_coll_ulongs(ntfs_t *fs, const u8 *a, u32 al, const u8 *b, u32 bl) {
     u32 n = MIN(al, bl) / 4;
     for (u32 i = 0; i < n; i++) {
-        u32 x = *(const u32 *)(a + 4 * i), y = *(const u32 *)(b + 4 * i);
+        u32 x, y;
+        memcpy(&x, a + 4 * i, 4);
+        memcpy(&y, b + 4 * i, 4);
         if (x != y) return x < y ? -1 : 1;
     }
     return al < bl ? -1 : al > bl;

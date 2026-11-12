@@ -661,8 +661,214 @@ static void s_ntfsdbg(void) {
     ntfs_verify("dbg", &im);
 }
 
+/* ------------------------------------------------------------------ */
+/* writes into an image populated by ntfs-3g: every operation is also   */
+/* applied to a host copy of the original tree (the oracle)             */
+
+typedef struct { char L; const char *ref; const char *tag; } wx_t;
+
+static const char *wx_host(wx_t *x, const char *rel) {
+    static char b[4][2048];
+    static int i;
+    char *o = b[i++ & 3];
+    snprintf(o, 2048, "%s/%s", x->ref, rel);
+    return o;
+}
+
+static void wx_write(wx_t *x, const char *rel, u64 off, u32 len, u32 seed, int want) {
+    u8 *buf = pat_alloc(len, seed);
+    vfs_file_t *f;
+    int r = vfs_open(P(x->L, rel), VFS_O_RDWR | VFS_O_CREATE, &f);
+    if (!r) {
+        vfs_seek(f, off);
+        r = vfs_write(f, buf, len);
+        int c = vfs_close(f);
+        if (r >= 0 && c) r = c;
+    }
+    if (want) { EXPECT(r, want); free(buf); return; }
+    CHECK(r == (int)len, "[%s] write %s at %llu: %s", x->tag, rel, (unsigned long long)off, ename(r));
+    int fd = open(wx_host(x, rel), O_RDWR | O_CREAT, 0644);
+    pwrite(fd, buf, len, (off_t)off);
+    close(fd);
+    free(buf);
+}
+
+static void wx_trunc(wx_t *x, const char *rel, u64 size) {
+    vfs_file_t *f;
+    int r = vfs_open(P(x->L, rel), VFS_O_RDWR, &f);
+    if (!r) { r = vfs_truncate(f, size); vfs_close(f); }
+    CHECK(r == 0, "[%s] truncate %s: %s", x->tag, rel, ename(r));
+    truncate(wx_host(x, rel), (off_t)size);
+}
+
+static void wx_del(wx_t *x, const char *rel) {
+    int r = vfs_unlink(P(x->L, rel));
+    CHECK(r == 0, "[%s] delete %s: %s", x->tag, rel, ename(r));
+    if (unlink(wx_host(x, rel))) rmdir(wx_host(x, rel));
+}
+
+static void wx_ren(wx_t *x, const char *a, const char *b) {
+    int r = vfs_rename(P(x->L, a), P(x->L, b));
+    CHECK(r == 0, "[%s] rename %s -> %s: %s", x->tag, a, b, ename(r));
+    char ha[2048];
+    strlcpy(ha, wx_host(x, a), sizeof ha);
+    rename(ha, wx_host(x, b));
+}
+
+static void wx_mkdir(wx_t *x, const char *rel) {
+    OK(vfs_mkdir(P(x->L, rel)));
+    mkdir(wx_host(x, rel), 0755);
+}
+
+static void t_ntfs_write_existing(const char *tag, u32 cluster) {
+    img_t im;
+    char opts[64];
+    snprintf(opts, sizeof opts, "-c %u", cluster);
+    ntfs_img(&im, "ntfsx.img", 128, "basic", opts);
+    /* the oracle: a host copy of the original tree */
+    char ref[1100];
+    snprintf(ref, sizeof ref, "%s/ref", W);
+    sh("rm -rf %s", q(ref));
+    const char *mnt = ntfs3g_mount(&im, 0);
+    if (!mnt) return;
+    sh("cp -a %s %s", q(mnt), q(ref));
+    ntfs3g_umount(mnt);
+    hdisk_t *h = ntfs_attach(&im, 512, 1, 0);
+    wx_t x = { letter_of(h), ref, tag };
+    CHECK(x.L, "[%s] not mounted", tag);
+    if (!x.L) { disk_detach(h); return; }
+    /* data of existing files: resident -> non-resident, appends, overwrites */
+    wx_write(&x, "small.txt", 100, 9000, 1, 0);
+    wx_write(&x, "medium.bin", 50000, 123456, 2, 0);
+    wx_write(&x, "large.bin", 1000, 5000, 3, 0);
+    wx_trunc(&x, "large.bin", 2 * 1024 * 1024 + 17);
+    wx_trunc(&x, "page.bin", 10);
+    wx_trunc(&x, "empty.txt", 100000);
+    wx_write(&x, "one.bin", 300000, 10, 4, 0);
+    /* hard links and the file with 160 of them (an attribute list) */
+    wx_del(&x, "Links/second.txt");
+    wx_ren(&x, "Links/original.txt", "Links/other/renamed original.txt");
+    wx_write(&x, "Links/other/third.txt", 10, 100, 5, 0);
+    wx_ren(&x, "ManyLinks/link_with_a_long_name_000.bin", "ManyLinks/renamed link.bin");
+    wx_ren(&x, "ManyLinks/link_with_a_long_name_159.bin", "Links/moved link.bin");
+    for (int i = 1; i < 60; i += 2) {
+        char n[100];
+        snprintf(n, sizeof n, "ManyLinks/link_with_a_long_name_%03d.bin", i);
+        wx_del(&x, n);
+    }
+    wx_write(&x, "ManyLinks/target.bin", 19000, 50000, 6, 0);
+    /* an ntfs-3g B+ tree: deletions and insertions */
+    for (int i = 0; i < 3000; i += 3) {
+        char n[100];
+        snprintf(n, sizeof n, "BigDir/entry number %05d with padding.txt", i);
+        wx_del(&x, n);
+    }
+    for (int i = 0; i < 600; i++) {
+        char n[100];
+        snprintf(n, sizeof n, "BigDir/new %04d.dat", i * 7);
+        wx_write(&x, n, 0, (u32)(i % 5) * 300 + 1, 100 + (u32)i, 0);
+    }
+    /* files Halcyon may only read, but delete */
+    wx_write(&x, "Fragmented/frag_a.bin", 1000, 30000, 7, 0);      /* in place: fine */
+    {
+        vfs_dirent_t st;
+        if (!vfs_stat(P(x.L, "Fragmented/frag_a.bin"), &st))
+            wx_write(&x, "Fragmented/frag_a.bin", st.size, 100000, 8, E_NOTSUP);   /* the run list is in extents */
+    }
+    wx_del(&x, "Fragmented/frag_b.bin");
+    wx_write(&x, "Compressed/text.txt", 0, 10, 9, E_NOTSUP);
+    wx_del(&x, "Compressed/text.txt");
+    wx_del(&x, "Sparse/holes.bin");
+    wx_del(&x, "with_streams.txt");
+    wx_del(&x, "win_symlink");
+    wx_del(&x, "win_junction");
+    wx_del(&x, "link_to_small");
+    /* directories */
+    wx_del(&x, "EmptyDir");
+    EXPECT(vfs_unlink(P(x.L, "Unicode")), E_NOTEMPTY);
+    wx_ren(&x, "level00", "Deep tree");
+    wx_ren(&x, "Deep tree/level01/level02", "Unicode/level02 moved");
+    wx_mkdir(&x, "Unicode/Neuer Ordner");
+    wx_write(&x, "Unicode/Neuer Ordner/Größe.txt", 0, 777, 10, 0);
+    wx_ren(&x, "Unicode/Grüße.txt", "Unicode/GRÜßE.TXT");
+    wx_ren(&x, "DosNames/A long file name.txt", "DosNames/short.txt");
+    wx_del(&x, "DosNames/Program Files");
+    wx_write(&x, "NEWFILE.TXT", 0, 1234, 11, 0);
+    disk_detach(h);
+    ntfs_verify(tag, &im);
+    mnt = ntfs3g_mount(&im, 0);
+    if (mnt) {
+        static char out[8192];
+        int r = sh_out(out, sizeof out, "diff -r --no-dereference %s %s", q(ref), q(mnt));
+        CHECK(r == 0, "[%s] the image differs from the oracle:\n%s", tag, out);
+        ntfs3g_umount(mnt);
+    }
+    sh("rm -rf %s", q(ref));
+    unlink(im.path);
+}
+
+/* index splits and merges, MFT growth: thousands of files in one
+ * directory, deleted in random order */
+static void t_ntfs_many(const char *tag, u32 cluster, int n) {
+    img_t im;
+    char opts[64];
+    snprintf(opts, sizeof opts, "-c %u", cluster);
+    ntfs_img(&im, "ntfsmany.img", 256, "empty", opts);
+    hdisk_t *h = ntfs_attach(&im, 512, 1, 0);
+    char L = letter_of(h);
+    if (!L) { CHECK(0, "[%s] not mounted", tag); disk_detach(h); return; }
+    OK(vfs_mkdir(P(L, "Many")));
+    char p[300];
+    int *order = malloc(sizeof(int) * (size_t)n);
+    for (int i = 0; i < n; i++) order[i] = i;
+    g_rng = 7;
+    for (int i = n - 1; i > 0; i--) { int j = (int)rnd((u32)i + 1); int t = order[i]; order[i] = order[j]; order[j] = t; }
+    for (int i = 0; i < n; i++) {
+        snprintf(p, sizeof p, "Many/%0*d %s.txt", 6, order[i], (order[i] % 5) == 0 ? "with a much longer name to vary the entry sizes" : "f");
+        int r = vfs_write_file(P(L, p), (const u8 *)p, (u32)strlen(p));
+        if (r < 0) { CHECK(0, "[%s] create %s: %s", tag, p, ename(r)); break; }
+    }
+    CHECK(v_count(P(L, "Many")) == n, "[%s] %d listed, want %d", tag, v_count(P(L, "Many")), n);
+    disk_detach(h);
+    ntfs_verify(tag, &im);
+    h = ntfs_attach(&im, 512, 1, 0);
+    L = letter_of(h);
+    for (int i = n - 1; i > 0; i--) { int j = (int)rnd((u32)i + 1); int t = order[i]; order[i] = order[j]; order[j] = t; }
+    int left = n;
+    for (int i = 0; i < n && L; i++) {
+        snprintf(p, sizeof p, "Many/%0*d %s.txt", 6, order[i], (order[i] % 5) == 0 ? "with a much longer name to vary the entry sizes" : "f");
+        int r = vfs_unlink(P(L, p));
+        if (r) { CHECK(0, "[%s] delete %s: %s", tag, p, ename(r)); break; }
+        left--;
+        if (i == n / 2) {
+            CHECK(v_count(P(L, "Many")) == left, "[%s] %d listed, want %d", tag, v_count(P(L, "Many")), left);
+            disk_detach(h);
+            ntfs_verify(tag, &im);
+            h = ntfs_attach(&im, 512, 1, 0);
+            L = letter_of(h);
+        }
+    }
+    if (L) {
+        CHECK(v_count(P(L, "Many")) == 0, "[%s] not empty", tag);
+        OK(vfs_unlink(P(L, "Many")));
+    }
+    disk_detach(h);
+    ntfs_verify(tag, &im);
+    free(order);
+    unlink(im.path);
+}
+
 static void s_ntfsw(void) {
     if (!ntfs_tools()) return;
+    if (!getenv("NTFS_ONLY") || !strcmp(getenv("NTFS_ONLY"), "existing")) {
+        t_ntfs_write_existing("ntfs write existing 4k", 4096);
+        t_ntfs_write_existing("ntfs write existing 64k", 65536);
+    }
+    if (!getenv("NTFS_ONLY") || !strcmp(getenv("NTFS_ONLY"), "many")) {
+        t_ntfs_many("ntfs many 4k", 4096, 5000);
+        t_ntfs_many("ntfs many 64k", 65536, 3000);
+        t_ntfs_many("ntfs many 512", 512, 3000);
+    }
     static const struct { u32 cluster, ss, mb; const char *name; u32 maxsz; } cfg[] = {
         { 4096, 512, 64, "4k", 300000 }, { 512, 512, 48, "512", 100000 }, { 65536, 512, 128, "64k", 400000 },
         { 4096, 4096, 64, "4kn", 300000 }, { 4096, 512, 12, "full", 2000000 },

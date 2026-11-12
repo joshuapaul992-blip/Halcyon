@@ -1495,10 +1495,11 @@ static int ntfs_unlink(volume_t *v, const char *path) {
         /* the last name: the file goes */
         nsi_t si;
         if (!si_get(&ino, &si) && (si.attrs & NTFS_FA_REPARSE_POINT)) {
-            u8 key[12];
-            *(u32 *)key = reparse_tag(&ino);
-            *(u64 *)(key + 4) = NTFS_MK_MREF(ino.rec, ino.seq);
-            extend_index_remove(fs, "$Reparse", nt_R, key, 12);
+            u32 key[3];
+            u64 me = NTFS_MK_MREF(ino.rec, ino.seq);
+            key[0] = reparse_tag(&ino);
+            memcpy(key + 1, &me, 8);
+            extend_index_remove(fs, "$Reparse", nt_R, (const u8 *)key, 12);
         }
         u8 guid[16];
         if (nt_attr_read(&ino, NTFS_AT_OBJECT_ID, NULL, 0, 0, 16, guid) == 16)
@@ -1579,7 +1580,7 @@ static int ntfs_rename(volume_t *v, const char *from, const char *to) {
     /* the new name must fit in the base record once the old ones are gone */
     {
         u32 freed = 0;
-        for (int i = 0; i < cnt; i++) {
+        for (int i = 0; i < cnt && !ino.al; i++) {     /* (with a list the old names may be elsewhere) */
             ntfs_file_name_t *fn = (ntfs_file_name_t *)(names + (size_t)i * NT_FN_MAX);
             freed += ALIGN_UP(0x18u + (u32)sizeof *fn + 2u * fn->name_length, 8u);
         }
