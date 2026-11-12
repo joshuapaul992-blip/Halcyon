@@ -94,7 +94,7 @@ static void wiz_paint(window_t *w, gc_t *g) {
     if (z->page == P_WELCOME || z->page == P_FINISH) {
         /* a blue banner on the left, white on the right */
         gfx_gradient_v(g, mkrect(0, 0, BANNER_W, body), color_lighten(g_theme->title_top, 10), g_theme->title_bottom);
-        gfx_gradient_h(g, mkrect(BANNER_W - 30, 0, 30, body), g_theme->title_bottom, color_lighten(g_theme->title_bottom, -25));
+        gfx_vline(g, BANNER_W - 1, 0, body, color_lighten(g_theme->title_bottom, -30));
         for (int i = 0; i < 5; i++)        /* soft rings behind the logo */
             gfx_circle(g, BANNER_W / 2, 92, 58 - i * 9, color_lighten(g_theme->title_mid, 8 + i * 6));
         gfx_circle(g, BANNER_W / 2, 92, 30, HEX(0xFFFFFF));
@@ -189,7 +189,7 @@ static void mode_texts(wiz_t *z) {
                  "are kept as they are%s; none is shrunk or moved.", sz,
                  d->windows ? ", and Windows still starts" : "");
     } else {
-        snprintf(t, sizeof t, "Not available: %s", d->free_why);
+        snprintf(t, sizeof t, "Not available. %s", d->free_why);
     }
     set_text(z, ID_FREE_TEXT, t);
 }
@@ -320,6 +320,30 @@ static void disk_changed(window_t *w, widget_t *wd) {
 
 static void thread_main(void *arg) { inst_run(arg); }
 
+/* "Are you sure you want to erase...": a message box whose default button
+ * (Enter) and Esc are No, so that no stray key erases a disk */
+static volatile int erase_answer;
+static void erase_click(window_t *w, widget_t *wd) { erase_answer = wd->id; }
+static int erase_close(window_t *w) { erase_answer = ID_NO; return 0; }
+static int confirm_erase(window_t *owner, const char *msg) {
+    window_t *d = msgbox_window("Halcyon Setup", msg, ICON_WARNING, MB_YESNO, erase_click);
+    if (!d) return 0;
+    for (widget_t *b = d->widgets; b; b = b->next) {
+        if (b->type != W_BUTTON) continue;
+        if (b->id == ID_YES) b->style &= ~WS_DEFAULT;
+        if (b->id == ID_NO) { b->style |= WS_DEFAULT | WS_CANCEL; d->focus = b; }
+    }
+    d->on_close = erase_close;
+    erase_answer = 0;
+    owner->modal = d;
+    d->owner = owner;
+    while (!erase_answer && wm_alive(d)) gui_step();
+    if (owner->modal == d) owner->modal = NULL;
+    if (wm_alive(d)) { d->on_close = NULL; wm_destroy(d); }
+    if (wm_alive(owner)) wm_raise(owner);
+    return erase_answer == ID_YES;
+}
+
 static void start_install(wiz_t *z) {
     inst_disk_t *d = cur_disk(z);
     if (z->plan.mode == INST_WHOLE) {
@@ -337,7 +361,7 @@ static void start_install(wiz_t *z) {
             n += snprintf(msg + n, sizeof msg - n, ".\n");
         }
         snprintf(msg + n, sizeof msg - n, "\nAre you sure you want to erase this disk and install Halcyon on it?");
-        if (msgbox(z->w, "Halcyon Setup", msg, ICON_WARNING, MB_YESNO) != ID_YES) return;
+        if (!confirm_erase(z->w, msg)) return;
     }
     inst_job_t *j = kzalloc(sizeof *j);
     if (!j) { msgbox(z->w, "Halcyon Setup", "Out of memory.", ICON_ERROR, MB_OK); return; }
@@ -350,6 +374,8 @@ static void start_install(wiz_t *z) {
 static void go_next(window_t *w, widget_t *wd) {
     wiz_t *z = w->data;
     char why[300];
+    /* (Enter reaches a focused button even while it is disabled or hidden) */
+    if (wd && (wd->style & (WS_DISABLED | WS_HIDDEN))) return;
     switch (z->page) {
     case P_WELCOME:
         survey(z);
@@ -525,19 +551,19 @@ static void welcome_paint(window_t *w, gc_t *g) {
 }
 
 void install_welcome(void) {
-    window_t *w = wm_create("Welcome to Halcyon", ICON_LOGO, 0, 0, 420, 232, WF_DIALOG | WF_CENTER);
+    window_t *w = wm_create("Welcome to Halcyon", ICON_LOGO, 0, 0, 420, 250, WF_DIALOG | WF_CENTER);
     if (!w) return;
     w->on_paint = welcome_paint;
     w->on_close = welcome_close;
-    widget_add(w, W_LABEL, mkrect(20, 78, 380, 80),
+    widget_add(w, W_LABEL, mkrect(20, 78, 380, 92),
                "Halcyon is running from a USB stick. You can keep using it this way, or install it on this "
                "computer's hard disk so that it starts without the stick.\n\nIt can go next to Windows: the "
                "partitions already on the disk are kept.", 0)->style |= WS_WRAP;
-    widget_add(w, W_CHECKBOX, mkrect(20, 162, 220, 18), "Don't show this again", ID_W_DONTSHOW);
-    widget_t *b = widget_add(w, W_BUTTON, mkrect(196, 196, 120, 23), "Install Halcyon...", ID_W_INSTALL);
+    widget_add(w, W_CHECKBOX, mkrect(20, 180, 220, 18), "Don't show this again", ID_W_DONTSHOW);
+    widget_t *b = widget_add(w, W_BUTTON, mkrect(196, 214, 120, 23), "Install Halcyon...", ID_W_INSTALL);
     b->style |= WS_DEFAULT;
     b->on_click = welcome_install;
-    b = widget_add(w, W_BUTTON, mkrect(324, 196, 80, 23), "Not now", ID_W_LATER);
+    b = widget_add(w, W_BUTTON, mkrect(324, 214, 80, 23), "Not now", ID_W_LATER);
     b->style |= WS_CANCEL;
     b->on_click = welcome_later;
     w->focus = widget_find(w, ID_W_INSTALL);

@@ -111,7 +111,7 @@ static void describe_vols(inst_disk_t *d) {
 static void free_space(inst_disk_t *d) {
     pt_table_t *t = d->pt;
     char sz[32];
-    if (t->kind == PT_NONE) { strlcpy(d->free_why, "The disk is empty: it has no partitions, so use the whole disk.", sizeof d->free_why); return; }
+    if (t->kind == PT_NONE) { strlcpy(d->free_why, "The disk is empty (it has no partitions), so Halcyon uses the whole disk.", sizeof d->free_why); return; }
     if (t->kind == PT_OTHER) { snprintf(d->free_why, sizeof d->free_why, "%s", t->problem); return; }
     if (t->kind == PT_MBR && !t->free_slots) {
         strlcpy(d->free_why, "All four primary partition entries of the disk are in use.", sizeof d->free_why);

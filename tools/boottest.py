@@ -3,7 +3,8 @@
 the kernel serial log.
 
 usage: tools/boottest.py [CONFIG ...]     CONFIG = hc:fw[:variant[+variant]], e.g. xhci:uefi,
-       xhci:bios:nvme+nomsi (default: the full matrix)
+       xhci:bios:nvme+nomsi (default: the full matrix); "matrix" and
+       "install" (the installer's variants) name sets of CONFIGs
 
 Each boot must reach "gui: desktop ready", mount the boot stick as C:, mount
 the SATA test disks (FAT32/GPT and exFAT/MBR), write \\HALCYON\\BOOT.LOG, and
@@ -145,7 +146,7 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
           "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:uefi:virtiosnd", "xhci:bios:audio",
-          "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw"]
+          "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:uefi:install", "xhci:bios:install"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
@@ -648,6 +649,8 @@ INSTALL_DOC = """
                 the firmware must start the "Halcyon" boot entry it added),
                 and each boot must reach the desktop with the disk as C:
   installnvme   the same on an NVMe disk
+  installnvme4k the same on an NVMe namespace with 4096-byte blocks (UEFI
+                only: GPT without BIOS boot code, which PC BIOSes cannot start)
   installntfs   (needs root, mkntfs, ntfs-3g) an MBR disk with Windows' NTFS
                 partition (active, \\Windows\\System32, made by mkntfs and
                 ntfs-3g) and 512 MiB free: Halcyon goes into the free space
@@ -668,9 +671,9 @@ INSTALL_DOC = """
                 through its firmware boot entry (UEFI) and through its BIOS
                 boot partition (BIOS)
 """
-INSTALL_SET = ["xhci:uefi:install", "xhci:bios:install", "xhci:uefi:installnvme", "xhci:bios:installntfs",
+INSTALL_SET = ["xhci:uefi:install", "xhci:bios:install", "xhci:uefi:installnvme", "xhci:uefi:installnvme4k", "xhci:bios:installntfs",
                "xhci:uefi:installgpt"]
-for _n in ("install", "installnvme", "installntfs", "installgpt"):
+for _n in ("install", "installnvme", "installnvme4k", "installntfs", "installgpt"):
     VARIANTS[_n] = 0
 
 
@@ -760,7 +763,7 @@ def make_install_disk(kind):
     disk = os.path.abspath(os.path.join(BUILD, "ci_install.img"))
     if os.path.exists(disk):
         os.remove(disk)
-    if kind in ("install", "installnvme"):
+    if kind in ("install", "installnvme", "installnvme4k"):
         with open(disk, "wb") as f:
             f.truncate(1 << 30)
         return disk, []
@@ -810,23 +813,31 @@ def make_install_disk(kind):
     return disk, [esp, msr, nt]
 
 
+def nvme_dev(disk, ss):
+    """an NVMe controller with the disk as namespace 1 (512- or 4096-byte blocks)"""
+    if ss == 512:
+        return "-drive if=none,id=d0,format=raw,file=%s -device nvme,serial=HALCINST,drive=d0" % disk
+    return ("-device nvme,id=nvme0,serial=HALCINST -drive if=none,id=d0,format=raw,file=%s "
+            "-device nvme-ns,drive=d0,bus=nvme0,nsid=1,logical_block_size=%d,physical_block_size=%d" % (disk, ss, ss))
+
+
 def gpt_entries(disk):
     with open(disk, "rb") as f:
         f.seek(1024)
         return f.read(128 * 128)
 
 
-def installed_disk_failures(disk, gpt, windows):
+def installed_disk_failures(disk, gpt, windows, ss=512):
     """the installed disk, on the host"""
     fails = []
-    r = subprocess.run([sys.executable, "tests/host/gpt_check.py", disk], stdout=subprocess.PIPE,
+    r = subprocess.run([sys.executable, "tests/host/gpt_check.py", disk, str(ss)], stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT, text=True)
     if r.returncode:
         fails.append("gpt_check: " + r.stdout.strip().replace("\n", "; "))
     lines = [l.split() for l in r.stdout.splitlines() if l.startswith(("gpt ", "mbr "))]
-    if not sh_ok("sfdisk -V '%s'" % disk):
+    if ss == 512 and not sh_ok("sfdisk -V '%s'" % disk):
         fails.append("sfdisk -V")
-    if gpt and sh_ok("command -v sgdisk") and not sh_ok("sgdisk -v '%s' | grep -q 'No problems found'" % disk):
+    if gpt and ss == 512 and sh_ok("command -v sgdisk") and not sh_ok("sgdisk -v '%s' | grep -q 'No problems found'" % disk):
         fails.append("sgdisk -v")
     # Halcyon's partition: the ESP-type / type 0c one that is not Windows'
     win_starts = {s for s, _ in windows}
@@ -839,7 +850,7 @@ def installed_disk_failures(disk, gpt, windows):
     if not part:
         return fails + ["no Halcyon partition in the table"], None, None
     img = os.path.join(BUILD, "ci_install_part.img")
-    subprocess.run(["dd", "if=" + disk, "of=" + img, "bs=512", "skip=%d" % part[0], "count=%d" % part[1],
+    subprocess.run(["dd", "if=" + disk, "of=" + img, "bs=%d" % ss, "skip=%d" % part[0], "count=%d" % part[1],
                     "conv=sparse", "status=none"], check=True)
     r = subprocess.run(["fsck.fat", "-n", img], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if r.returncode:
@@ -882,11 +893,12 @@ def run_install(cfg, hc, fw, opts):
     if fw == "uefi":
         subprocess.run(["cp", "/usr/share/OVMF/OVMF_VARS_4M.fd", vars_file], check=True)
     spec = os.path.abspath(os.path.join(BUILD, "ci_installtest.txt"))
-    nvme = kind == "installnvme"
+    nvme = kind.startswith("installnvme")
+    ss = 4096 if kind == "installnvme4k" else 512
     with open(spec, "w") as f:
         f.write("%s %s" % ("nvme0" if nvme else "INSTALLDISK", "free" if kind in ("installntfs", "installgpt") else "whole"))
     if nvme:
-        target = "-drive if=none,id=d0,format=raw,file=%s -device nvme,serial=HALCINST,drive=d0" % disk
+        target = nvme_dev(disk, ss)
     else:
         target = "-drive if=none,id=d0,format=raw,file=%s -device ide-hd,drive=d0,bus=ide.0,model=INSTALLDISK" % disk
     extra = "-device usb-tablet,bus=usb.0 -device usb-kbd,bus=usb.0 %s -fw_cfg name=opt/halcyon/installtest,file=%s" % (
@@ -905,7 +917,7 @@ def run_install(cfg, hc, fw, opts):
         fails.append("no firmware boot entry")
     boots = []
     if not fails:
-        f2, part, partimg = installed_disk_failures(disk, gpt, windows)
+        f2, part, partimg = installed_disk_failures(disk, gpt, windows, ss)
         fails += f2
         for i, (s, n) in enumerate(windows):
             if file_hash(disk, s * 512, n * 512) != win_hash[i]:
@@ -935,7 +947,7 @@ def run_install(cfg, hc, fw, opts):
         if windows and not any(l.endswith(", Windows") for l in survey):
             fails.append("Windows not detected on the disk")
         # boot the installed disk alone
-        dev = ("-drive if=none,id=d0,format=raw,file=%s -device nvme,serial=HALCINST,drive=d0" % disk if nvme else
+        dev = (nvme_dev(disk, ss) if nvme else
                "-drive if=none,id=d0,format=raw,file=%s -device ide-hd,drive=d0,bus=ide.0" % disk)
         dev += " -device usb-tablet,bus=usb.0 -device usb-kbd,bus=usb.0"
         runs = []
@@ -1257,7 +1269,9 @@ def run(cfg):
 def main():
     cfgs = []
     for a in sys.argv[1:] or MATRIX:
-        cfgs += INSTALL_SET if a == "install" else [a]      # (the named set of installer variants)
+        for c in INSTALL_SET if a == "install" else MATRIX if a == "matrix" else [a]:     # (named sets)
+            if c not in cfgs:
+                cfgs.append(c)
     if not all(os.path.exists(os.path.join(BUILD, f)) for f in ("fat32gpt.img", "exfat.img")):
         subprocess.run(["make", "testdisks"], check=True, stdout=subprocess.DEVNULL)
     failed = sum(0 if run(c) else 1 for c in cfgs)
