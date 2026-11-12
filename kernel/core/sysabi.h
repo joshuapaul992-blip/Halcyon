@@ -253,5 +253,7 @@ enum { IDR_OK = 1, IDR_CANCEL = 2, IDR_YES = 6, IDR_NO = 7 };
 
 /* sockets and poll (100-139) */
 #include "../net/sockabi.h"
+/* sound (140-151) */
+#include "../sound/sndabi.h"
 
 #endif

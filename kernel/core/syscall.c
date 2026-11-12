@@ -445,6 +445,7 @@ void syscall_dispatch(struct sysframe *f) {
     case SYS_CLOSE: {
         if (handle_get(p, (int)a1, H_SHM)) { r = shm_close(p, (int)a1); break; }
         if (handle_get(p, (int)a1, H_SOCKET)) { r = socket_handle_close ? socket_handle_close(p, (int)a1) : E_INVAL; break; }
+        if (handle_get(p, (int)a1, H_SOUND)) { r = sound_handle_close ? sound_handle_close(p, (int)a1) : E_INVAL; break; }
         vfs_file_t *fl = handle_get(p, (int)a1, H_FILE);
         if (!fl) { r = E_INVAL; break; }
         handle_free(p, (int)a1);
@@ -454,6 +455,7 @@ void syscall_dispatch(struct sysframe *f) {
     case SYS_READ:
     case SYS_WRITE:
         if (handle_get(p, (int)a1, H_SOCKET) && socket_handle_io) r = socket_handle_io(p, (int)a1, a2, a3, nr == SYS_WRITE);
+        else if (handle_get(p, (int)a1, H_SOUND)) r = nr == SYS_WRITE && sound_handle_write ? sound_handle_write(p, (int)a1, a2, a3) : E_INVAL;
         else r = file_io(p, (int)a1, a2, a3, nr == SYS_WRITE);
         break;
     case SYS_SEEK: {

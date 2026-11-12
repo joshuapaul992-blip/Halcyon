@@ -25,7 +25,7 @@ struct regs;
 #define MAP_SLOT        (64ull << 20)
 #define MAP_SLOTS       256
 
-enum { H_NONE = 0, H_FILE, H_WINDOW, H_DIR, H_SOCKET, H_SHM };
+enum { H_NONE = 0, H_FILE, H_WINDOW, H_DIR, H_SOCKET, H_SHM, H_SOUND };
 
 typedef struct handle { int type; void *obj; } handle_t;
 
@@ -143,6 +143,14 @@ extern void (*proc_crash_hook)(proc_t *p);         /* show "has encountered a pr
 int  socket_handle_close(proc_t *p, int h) __attribute__((weak));
 long socket_handle_io(proc_t *p, int h, u64 buf, u64 len, int write) __attribute__((weak));
 void socket_release_all(proc_t *p) __attribute__((weak));
+
+/* sound streams (sound/sndsys.c, weak): close of an H_SOUND handle, poll,
+ * and the streams of an ending process */
+int  sound_handle_close(proc_t *p, int h) __attribute__((weak));
+long sound_handle_write(proc_t *p, int h, u64 buf, u64 len) __attribute__((weak));   /* write() */
+int  sound_handle_poll(proc_t *p, int h) __attribute__((weak));    /* POLL* bits */
+u32  sound_wait_gen(void) __attribute__((weak));                   /* changes when a stream may have room */
+void sound_release_all(proc_t *p) __attribute__((weak));
 
 /* called from isr_dispatch for exceptions and interrupts taken in user mode */
 void proc_user_fault(struct regs *r);

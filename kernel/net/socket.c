@@ -704,6 +704,8 @@ typedef struct { sock_t *s, *w; u32 g, wg; } pent_t;
 typedef struct {
     proc_t *p;
     int n, windows;
+    int sound;                      /* a sound stream is polled: wake when streams play on */
+    u32 sgen;
     pent_t e[NET_POLL_MAX];
 } pwait_t;
 
@@ -713,6 +715,7 @@ static int poll_cond(void *arg) {
         if (w->e[i].s->gen != w->e[i].g) return 1;
         if (w->e[i].w && w->e[i].w->gen != w->e[i].wg) return 1;
     }
+    if (w->sound && sound_wait_gen() != w->sgen) return 1;
     u64 next;
     return w->windows && usergui_poll_ready && usergui_poll_ready(w->p, &next);
 }
@@ -751,6 +754,10 @@ static short poll_one(proc_t *p, const struct pollfd *f, pwait_t *w, u64 *next_m
         if (e->w) { sock_get(e->w); e->wg = e->w->gen; }
         return (short)(m & ev);
     }
+    case H_SOUND:                                  /* sound streams (sound/sndsys.c): POLLOUT when there is room */
+        if (!sound_handle_poll || !sound_wait_gen) return POLLNVAL;
+        w->sound = 1;
+        return (short)(sound_handle_poll(p, fd) & ev);
     case H_FILE:
         return (short)((POLLIN | POLLOUT) & ev);   /* files never wait */
     default:
@@ -773,6 +780,7 @@ static long sys_poll(proc_t *p, u64 ufds, u64 nfds, long timeout) {
         int ready = 0;
         u64 next_ms = ~0ull;
         w->windows = 0;
+        w->sound = 0;
         for (u64 i = 0; i < nfds; i++) {
             f[i].revents = poll_one(p, &f[i], w, &next_ms);
             if (f[i].revents) ready++;
@@ -780,6 +788,7 @@ static long sys_poll(proc_t *p, u64 ufds, u64 nfds, long timeout) {
         if (ready || timeout == 0 || rdtsc() >= dl) { r = ready; break; }
         u64 d = dl;
         if (next_ms != ~0ull && time_ms_to_tsc(next_ms) < d) d = time_ms_to_tsc(next_ms);   /* a window timer */
+        if (w->sound) w->sgen = sound_wait_gen();
         r = proc_wait(poll_cond, w, d);
         pw_drop(w);
         if (r < 0) break;
