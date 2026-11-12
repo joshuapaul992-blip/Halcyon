@@ -229,6 +229,7 @@ typedef struct nv_fifo {
     struct { u32 reg, val; } saved[FIFO_SAVE_MAX];
     int nsaved;
     u32 pmc_set;                /* PMC_ENABLE bits we turned on */
+    u32 faults_noted;           /* MMU fault units of other clients already logged */
     /* statistics */
     u32 submits, copies, fills, waits, errors;
     u64 bytes;

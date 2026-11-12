@@ -806,8 +806,10 @@ int nv_fifo_check(nv_fifo_t *f) {
                 type = rd(f, 0x00280c + (u32)u * 0x10);
             int ours = (u64)(inst & 0x0fffffff) << 12 == inst_off(f);
             u32 reason = f->g->kind >= FIFO_GP100 ? (type & 0x1f) : (type & 0x0f);
-            nv_fifo_log(f, "MMU fault: unit %d, instance %08x%s, address %08x%08x, type %08x (%s)", u, inst, ours ? " (our channel)" : "", hi, lo,
-                        type, fault_reason(reason));
+            if (ours || !(f->faults_noted & (1u << u)))
+                nv_fifo_log(f, "MMU fault: unit %d, instance %08x%s, address %08x%08x, type %08x (%s)", u, inst, ours ? " (our channel)" : " (not ours: ignored)",
+                            hi, lo, type, fault_reason(reason));
+            f->faults_noted |= 1u << u;
             if (ours) {
                 f->errors++;
                 return fail(f, E_IO, "MMU fault at %08x%08x (%s)", hi, lo, fault_reason(reason));
