@@ -251,14 +251,14 @@ static int alloc_vector(int kind, void *ptr) {
  * set when a level input is masked between delivery and EOI; the input then
  * never delivers again. Clear it with the EOI register (version >= 0x20) or
  * by switching the entry to edge and back. */
-static void gsi_fix_irr(line_t *l) {
+static void gsi_fix_irr_vec(u32 gsi, int vector, int pending) {
     int pin;
-    ioapic_t *io = gsi_ioapic((u32)l->num, &pin);
+    ioapic_t *io = gsi_ioapic(gsi, &pin);
     if (!io) return;
     u64 f = irq_save();
     u32 lo = ioa_rd(io, 0x10 + 2 * pin);
-    if ((lo & (1u << 14)) && !(lo & RTE_MASKED) && !l->pending) {
-        if (io->ver >= 0x20) io->base[0x40 / 4] = (u32)l->vector;
+    if ((lo & (1u << 14)) && !(lo & RTE_MASKED) && !pending) {
+        if (io->ver >= 0x20) io->base[0x40 / 4] = (u32)vector;
         else {
             ioa_wr(io, 0x10 + 2 * pin, (lo | RTE_MASKED) & ~RTE_LEVEL);
             ioa_wr(io, 0x10 + 2 * pin, lo | RTE_MASKED);
@@ -266,6 +266,24 @@ static void gsi_fix_irr(line_t *l) {
         }
     }
     irq_restore(f);
+}
+static void gsi_fix_irr(line_t *l) { gsi_fix_irr_vec((u32)l->num, l->vector, l->pending); }
+
+/* ISA interrupts on a level-triggered input (an MADT override says so, or
+ * the ELCR in PIC mode; QEMU's q35 declares IRQs 5, 9, 10 and 11 level, for
+ * PCI): like a PCI line, the input is masked when it fires, and
+ * irq_service() calls the driver's ack and unmasks it again. Edge-triggered
+ * ISA inputs (the usual case) are left alone. */
+static u16 isa_level;
+static volatile u16 isa_pending;
+static u32 isa_gsi_num[16];
+
+static void isa_mask(int irq, int masked) {
+    if (mode == IRQ_MODE_PIC) pic_set(irq, masked);
+    else {
+        gsi_mask(isa_gsi_num[irq], masked);
+        if (!masked) gsi_fix_irr_vec(isa_gsi_num[irq], VEC_ISA_BASE + irq, (isa_pending >> irq) & 1);
+    }
 }
 
 static void line_mask(line_t *l, int masked) {
@@ -387,6 +405,19 @@ static void give_up(irq_handle_t *h, const char *why) {
 
 void irq_service(void) {
     if (mode == IRQ_MODE_POLL || !irq_enabled_now()) return;   /* e.g. the crash screen */
+    if (isa_pending) {
+        u64 f = irq_save();
+        u16 p = isa_pending;
+        isa_pending = 0;
+        irq_restore(f);
+        for (int irq = 0; irq < 16; irq++) {
+            if (!(p & (1u << irq)) || !(isa_level & (1u << irq))) continue;
+            struct vec *v = &vecs[(mode == IRQ_MODE_PIC ? VEC_PIC_BASE : VEC_ISA_BASE) + irq];
+            irq_handle_t *h = v->kind == V_HANDLE ? v->ptr : NULL;
+            if (h && h->ack) h->ack(h->ctx);
+            isa_mask(irq, 0);
+        }
+    }
     for (int i = 0; i < nlines; i++) {
         line_t *l = &lines[i];
         if (!l->pending) continue;
@@ -466,7 +497,10 @@ void irq_dispatch(u64 vector) {
         v->count++;
         random_add(rdtsc() ^ vector);
         if (v->kind == V_LINE) { line_t *l = v->ptr; pic_set(irq, 1); l->pending = 1; l->fires++; dev_gen++; }
-        else if (v->kind == V_HANDLE) { ((irq_handle_t *)v->ptr)->events++; dev_gen++; }
+        else if (v->kind == V_HANDLE) {
+            ((irq_handle_t *)v->ptr)->events++; dev_gen++;
+            if (isa_level & (1u << irq)) { pic_set(irq, 1); isa_pending |= (u16)(1u << irq); }
+        }
         else if (v->kind == V_TIMER) { timer_fires++; if (thread_current() && thread_current()->proc) g_need_resched = 1; }
         pic_eoi(irq);
         return;
@@ -474,7 +508,13 @@ void irq_dispatch(u64 vector) {
     v->count++;
     if (v->kind != V_TIMER) random_add(rdtsc() ^ vector);
     switch (v->kind) {
-    case V_HANDLE: ((irq_handle_t *)v->ptr)->events++; dev_gen++; break;
+    case V_HANDLE:
+        ((irq_handle_t *)v->ptr)->events++; dev_gen++;
+        if (vector >= VEC_ISA_BASE && vector < VEC_ISA_BASE + 16 && (isa_level & (1u << (vector - VEC_ISA_BASE)))) {
+            gsi_mask(isa_gsi_num[vector - VEC_ISA_BASE], 1);
+            isa_pending |= (u16)(1u << (vector - VEC_ISA_BASE));
+        }
+        break;
     case V_LINE: {
         line_t *l = v->ptr;
         gsi_mask((u32)l->num, 1);
@@ -568,14 +608,22 @@ int irq_attach(irq_handle_t *h) {
 int irq_attach_isa(irq_handle_t *h, int irq) {
     h->kind = IRQ_NONE; h->line = irq; h->vector = -1;
     if (mode == IRQ_MODE_POLL || irq < 0 || irq >= 16) return IRQ_NONE;
+    int level, low;
+    u32 gsi = isa_gsi(irq, &level, &low);
+    if (mode == IRQ_MODE_PIC) level = (inb((u16)(0x4D0 + (irq >> 3))) >> (irq & 7)) & 1;     /* ELCR */
+    if (level && !h->ack) {
+        kprintf("irq: %s: IRQ %d is level-triggered and cannot be acknowledged, polled\n", h->name, irq);
+        return IRQ_NONE;
+    }
     handle_link(h);
+    isa_gsi_num[irq] = gsi;
+    if (level) isa_level |= (u16)(1u << irq);
+    else isa_level &= (u16)~(1u << irq);
     if (mode == IRQ_MODE_PIC) {
         h->vector = VEC_PIC_BASE + irq;
         vecs[h->vector].kind = V_HANDLE; vecs[h->vector].ptr = h;
         pic_set(irq, 0);
     } else {
-        int level, low;
-        u32 gsi = isa_gsi(irq, &level, &low);
         h->vector = VEC_ISA_BASE + irq;
         vecs[h->vector].kind = V_HANDLE; vecs[h->vector].ptr = h;
         if (gsi_program(gsi, h->vector, level, low, 0) < 0) { vecs[h->vector].kind = V_FREE; return IRQ_NONE; }
@@ -600,6 +648,8 @@ void irq_detach(irq_handle_t *h) {
     } else if (h->kind == IRQ_ISA && h->vector > 0) {
         if (mode == IRQ_MODE_PIC) pic_set(h->line, 1);
         else { int l, p; gsi_mask(isa_gsi(h->line, &l, &p), 1); }
+        isa_level &= (u16)~(1u << h->line);
+        isa_pending &= (u16)~(1u << h->line);
         vecs[h->vector].kind = V_FREE;
     }
     h->kind = IRQ_NONE;
