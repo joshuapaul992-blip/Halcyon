@@ -595,6 +595,7 @@ static const sitem_t right_items[] = {
     { "System Information", NULL, ICON_SYSINFO, l_sysinfo },
     { "Task Manager", NULL, ICON_DISPLAY, l_taskmgr },
     { "About Halcyon", NULL, ICON_HELP, l_about },
+    { "Install Halcyon", NULL, ICON_SETUP, app_installer },
 };
 #define SM_W 400
 #define SM_H 528                   /* 8 programs on the left */
@@ -685,7 +686,7 @@ static void sm_event(window_t *w, gui_event_t *e) {
     } else if (e->type == GE_KEY && e->key.pressed) {
         if (e->key.key == KEY_ESC) menu_close_all();
         else if (e->key.key == KEY_DOWN || e->key.key == KEY_UP) {
-            int order[] = { 0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 20, 21 };
+            int order[] = { 0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21 };
             int n = ARRAY_SIZE(order), cur = -1;
             for (int i = 0; i < n; i++) if (order[i] == sm_hover) cur = i;
             cur = cur < 0 ? 0 : (cur + (e->key.key == KEY_DOWN ? 1 : n - 1)) % n;

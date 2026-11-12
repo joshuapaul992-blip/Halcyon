@@ -558,6 +558,22 @@ def ic_media():
     return finish(img, m)
 
 
+def ic_setup():
+    """Install Halcyon: a disc and a green arrow going down into a hard disk"""
+    img = new()
+    d = fill(img, ellipse((3, 1, 21, 19)), "#EEF5FF", "#93B6E6", outline="#3D5E9A")
+    gloss(img, d, 0.5, 90)
+    fill(img, ellipse((9.5, 7.5, 14.5, 12.5)), "#FFFFFF", "#DCE6F4", outline="#3D5E9A")
+    m = fill(img, rrect((2, 18, 30, 29.5), 2.2), "#F0F2F6", "#A3A9B6", outline="#5A6070")
+    fill(img, rrect((4, 24, 28, 28), 0.8), "#C8CDD8", "#8D94A4")
+    gloss(img, m, 0.45, 120)
+    fill(img, ellipse((23.8, 24.6, 26.4, 27.2)), "#9CFF7A", "#25B020")
+    a = fill(img, poly([(19.5, 3), (25.5, 3), (25.5, 11), (30, 11), (22.5, 20.5), (15, 11), (19.5, 11)]),
+             "#8EE68A", "#2BAA2B", outline="#145A0C")
+    gloss(img, a, 0.45, 90)
+    return finish(img)
+
+
 ICONS = [
     ("computer", ic_computer),
     ("hdd", ic_hdd),
@@ -607,6 +623,7 @@ ICONS = [
     ("speaker_muted", lambda: ic_speaker(True)),
     ("file_audio", lambda: ic_page("audio")),
     ("media", ic_media),
+    ("setup", ic_setup),
 ]
 
 SIZES = (16, 32, 48)

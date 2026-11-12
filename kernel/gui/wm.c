@@ -1078,6 +1078,7 @@ void gui_main(void) {
         shell_run(autorun, args);
     }
     format_test_hook();
+    installer_boot_hook();
     for (;;) gui_step();
 }
 

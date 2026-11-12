@@ -123,6 +123,9 @@ or attach a sound card, its output recorded by QEMU's wav backend (48 kHz):
           recording must hold the startup sound and then SNDTEST's signal, a
           660 Hz sine written as 8-bit mono at 32 kHz for 1 s, at the right
           pitch and length without dropouts.
+or install Halcyon on a second disk with the installer and start that disk
+alone ("install" as a CONFIG runs the whole set; see INSTALL_DOC below for
+each variant): install, installnvme, installntfs, installgpt
 NETDUMP=file.pcap records the net variants' frames (128 bytes each) for debugging.
 Exit status is the number of failed configurations.
 """
@@ -630,10 +633,369 @@ def ntfsrw_failures(text, disk):
     return fails
 
 
+# ---------------- the installer (M8): install, then boot the installed disk ----------------
+# Variants (the "install" set; see INSTALL_DOC below):
+INSTALL_DOC = """
+  install       the stick (BIOS: MBR, UEFI: GPT) and a blank 1 GiB SATA disk
+                (model INSTALLDISK): the installer's test hook (fw_cfg
+                installtest "INSTALLDISK whole") installs Halcyon on the whole
+                disk as the wizard would. On the host: the partition table
+                (gpt_check.py, sfdisk -V, sgdisk -v), fsck.fat on Halcyon's
+                partition, the kernel, loaders and boot code byte for byte.
+                Then QEMU starts from that disk alone, BIOS and UEFI (a fresh
+                variable store: the disk's \\EFI\\BOOT\\BOOTX64.EFI; after a
+                UEFI install also with the installer's variable store, where
+                the firmware must start the "Halcyon" boot entry it added),
+                and each boot must reach the desktop with the disk as C:
+  installnvme   the same on an NVMe disk
+  installntfs   (needs root, mkntfs, ntfs-3g) an MBR disk with Windows' NTFS
+                partition (active, \\Windows\\System32, made by mkntfs and
+                ntfs-3g) and 512 MiB free: Halcyon goes into the free space
+                ("free"). The NTFS partition must be byte for byte unchanged
+                (hash), pass ntfsfix -n, and keep its MBR entry; the disk's
+                original first sector is saved as \\HALCYON\\BOOT\\MBRSAVE.BIN.
+                BIOS: the boot menu offers Windows and starts Halcyon after
+                the countdown; a second boot chooses Windows (arrow down,
+                Enter), and the NTFS boot sector must run (its message on the
+                text screen). UEFI: Halcyon starts through its boot entry.
+  installgpt    (needs root, mkntfs, ntfs-3g) a Windows-like GPT disk: an EFI
+                system partition with \\EFI\\Microsoft\\Boot\\bootmgfw.efi and
+                \\EFI\\BOOT\\BOOTX64.EFI, a Microsoft reserved partition, an
+                NTFS basic data partition with \\Windows\\System32, 600 MiB
+                free; installed from a UEFI boot into the free space. Windows'
+                three partitions and their GPT entries must be unchanged, the
+                NTFS one must pass ntfsfix -n; the disk must start Halcyon
+                through its firmware boot entry (UEFI) and through its BIOS
+                boot partition (BIOS)
+"""
+INSTALL_SET = ["xhci:uefi:install", "xhci:bios:install", "xhci:uefi:installnvme", "xhci:bios:installntfs",
+               "xhci:uefi:installgpt"]
+for _n in ("install", "installnvme", "installntfs", "installgpt"):
+    VARIANTS[_n] = 0
+
+
+def sh_ok(cmd):
+    return subprocess.run(["sh", "-c", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def file_hash(path, start=0, length=None):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        f.seek(start)
+        left = length
+        while left is None or left > 0:
+            b = f.read(1 << 20 if left is None else min(1 << 20, left))
+            if not b:
+                break
+            h.update(b)
+            if left is not None:
+                left -= len(b)
+    return h.hexdigest()
+
+
+def qemu_boot(hc, fw, extra, stick=None, vars_file=None, done=None, timeout=60, during=None):
+    """boot headless through run.sh; wait until every pattern of done is in
+    the serial log (or a BAD one, or timeout); during(log) runs meanwhile
+    (keys through the monitor). Returns the log."""
+    log = os.path.join(BUILD, "serial.log")
+    if os.path.exists(log):
+        os.remove(log)
+    env = dict(os.environ, HEADLESS="1", BUILD=BUILD, EXTRA=extra)
+    if stick:
+        env["IMG_OVERRIDE"] = stick
+    else:
+        env["NOSTICK"] = "1"
+    env.pop("VARS", None)
+    if vars_file:
+        env["VARS"] = vars_file
+    p = subprocess.Popen(["sh", "tools/run.sh", hc, fw], env=env, stdout=subprocess.DEVNULL,
+                         stderr=open(os.path.join(BUILD, "qemu.err"), "w"))
+    t0, text = time.time(), ""
+    done = done or ["gui: desktop ready", "bootlog: saved"]
+    result = None
+    try:
+        while time.time() - t0 < timeout and p.poll() is None:
+            time.sleep(0.5)
+            try:
+                text = open(log, errors="replace").read()
+            except OSError:
+                continue
+            if during:
+                result = during(text)
+                if result is not None:
+                    break
+            if all(d in text for d in done) or any(b in text for b in BAD):
+                break
+        time.sleep(1.5)
+        try:
+            text = open(log, errors="replace").read()
+        except OSError:
+            pass
+    finally:
+        p.terminate()
+        try:
+            p.wait(5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    return text, result
+
+
+def vga_text():
+    """the VGA text screen (80 x 25) through the QEMU monitor"""
+    dump = os.path.abspath(os.path.join(BUILD, "ci_vga.bin"))
+    subprocess.run([sys.executable, "tools/qemu_ctl.py", os.path.join(BUILD, "mon.sock"),
+                    "pmemsave 0xb8000 4000 \"%s\"" % dump], stdout=subprocess.DEVNULL)
+    time.sleep(0.3)
+    try:
+        b = open(dump, "rb").read()
+    except OSError:
+        return ""
+    return "\n".join(bytes(b[r * 160 + i] for i in range(0, 160, 2)).decode("latin-1") for r in range(25))
+
+
+def make_install_disk(kind):
+    """the target disk of an install variant; (path, Windows partitions as
+    [(start, sectors)], which disk model) or None if the tools are missing"""
+    disk = os.path.abspath(os.path.join(BUILD, "ci_install.img"))
+    if os.path.exists(disk):
+        os.remove(disk)
+    if kind in ("install", "installnvme"):
+        with open(disk, "wb") as f:
+            f.truncate(1 << 30)
+        return disk, []
+    if os.geteuid() != 0 or not sh_ok("command -v mkntfs && command -v ntfs-3g && test -w /dev/fuse"):
+        return None
+    vol = os.path.join(BUILD, "ci_install_ntfs.img")
+    if kind == "installntfs":
+        start, count = 2048, 512 * 2048
+        subprocess.run([sys.executable, "tests/host/ntfs_mkimg.py", vol, "512", "boot", "-p", str(start), "-H", "255",
+                        "-S", "63"], check=True, stdout=subprocess.DEVNULL)
+        with open(disk, "wb") as f:
+            f.truncate(1 << 30)
+        subprocess.run(["sfdisk", "-q", disk], input="label: dos\nlabel-id: 0x77696e00\nstart=%d, size=%d, type=7, bootable\n"
+                       % (start, count), text=True, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(["dd", "if=" + vol, "of=" + disk, "bs=512", "seek=%d" % start, "conv=notrunc,sparse", "status=none"],
+                       check=True)
+        return disk, [(start, count)]
+    # installgpt: ESP 100 MiB, MSR 16 MiB, NTFS 700 MiB, 600 MiB free (+ the GPT's own room)
+    with open(disk, "wb") as f:
+        f.truncate((2048 + (100 + 16 + 700 + 600) * 2048 + 2048) * 512)
+    esp, msr, nt = (2048, 100 * 2048), (2048 + 100 * 2048, 16 * 2048), (2048 + 116 * 2048, 700 * 2048)
+    subprocess.run(["sfdisk", "-q", disk], text=True, check=True, stdout=subprocess.DEVNULL, input=(
+        "label: gpt\nstart=%d, size=%d, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=\"EFI system partition\"\n"
+        "start=%d, size=%d, type=E3C9E316-0B5C-4DB8-817D-F92DF00215AE, name=\"Microsoft reserved partition\"\n"
+        "start=%d, size=%d, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=\"Basic data partition\"\n") % (esp + msr + nt))
+    espimg = os.path.join(BUILD, "ci_install_esp.img")
+    if os.path.exists(espimg):
+        os.remove(espimg)
+    subprocess.run(["mkfs.fat", "-F", "32", "-C", espimg, str(esp[1] // 2)], check=True, stdout=subprocess.DEVNULL)
+    stub = os.path.join(BUILD, "ci_install_stub.efi")
+    with open(stub, "wb") as f:
+        f.write(b"not a real boot manager\n" * 100)
+    env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+    for d in ("::/EFI", "::/EFI/Microsoft", "::/EFI/Microsoft/Boot", "::/EFI/BOOT"):
+        subprocess.run(["mmd", "-i", espimg, d], check=True, env=env)
+    subprocess.run(["mcopy", "-i", espimg, stub, "::/EFI/Microsoft/Boot/bootmgfw.efi"], check=True, env=env)
+    subprocess.run(["mcopy", "-i", espimg, stub, "::/EFI/BOOT/BOOTX64.EFI"], check=True, env=env)
+    subprocess.run(["dd", "if=" + espimg, "of=" + disk, "bs=512", "seek=%d" % esp[0], "conv=notrunc", "status=none"],
+                   check=True)
+    with open(disk, "r+b") as f:                   # something in the MSR partition too
+        f.seek(msr[0] * 512)
+        f.write(bytes(range(256)) * 64)
+    subprocess.run([sys.executable, "tests/host/ntfs_mkimg.py", vol, "700", "boot", "-p", str(nt[0])], check=True,
+                   stdout=subprocess.DEVNULL)
+    subprocess.run(["dd", "if=" + vol, "of=" + disk, "bs=512", "seek=%d" % nt[0], "conv=notrunc,sparse", "status=none"],
+                   check=True)
+    return disk, [esp, msr, nt]
+
+
+def gpt_entries(disk):
+    with open(disk, "rb") as f:
+        f.seek(1024)
+        return f.read(128 * 128)
+
+
+def installed_disk_failures(disk, gpt, windows):
+    """the installed disk, on the host"""
+    fails = []
+    r = subprocess.run([sys.executable, "tests/host/gpt_check.py", disk], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True)
+    if r.returncode:
+        fails.append("gpt_check: " + r.stdout.strip().replace("\n", "; "))
+    lines = [l.split() for l in r.stdout.splitlines() if l.startswith(("gpt ", "mbr "))]
+    if not sh_ok("sfdisk -V '%s'" % disk):
+        fails.append("sfdisk -V")
+    if gpt and sh_ok("command -v sgdisk") and not sh_ok("sgdisk -v '%s' | grep -q 'No problems found'" % disk):
+        fails.append("sgdisk -v")
+    # Halcyon's partition: the ESP-type / type 0c one that is not Windows'
+    win_starts = {s for s, _ in windows}
+    part = None
+    for l in lines:
+        if l[0] == "gpt" and l[4] == "C12A7328-F81F-11D2-BA4B-00A0C93EC93B" and int(l[2]) not in win_starts:
+            part = (int(l[2]), int(l[3]) - int(l[2]) + 1)
+        if l[0] == "mbr" and l[4] == "0c" and int(l[2]) not in win_starts:
+            part = (int(l[2]), int(l[3]))
+    if not part:
+        return fails + ["no Halcyon partition in the table"], None, None
+    img = os.path.join(BUILD, "ci_install_part.img")
+    subprocess.run(["dd", "if=" + disk, "of=" + img, "bs=512", "skip=%d" % part[0], "count=%d" % part[1],
+                    "conv=sparse", "status=none"], check=True)
+    r = subprocess.run(["fsck.fat", "-n", img], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if r.returncode:
+        fails.append("fsck.fat: " + r.stdout.strip().splitlines()[-1])
+    env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+    for src, dst in (("KERNEL.BIN", "::/HALCYON/KERNEL.BIN"), ("efi/BOOTX64.EFI", "::/EFI/BOOT/BOOTX64.EFI"),
+                     ("boot/stage2.bin", "::/HALCYON/BOOT/STAGE2.BIN"), ("user/notepad.exe", "::/PROGRAMS/NOTEPAD.EXE"),
+                     ("media/STARTUP.WAV", "::/HALCYON/MEDIA/STARTUP.WAV")):
+        out = os.path.join(BUILD, "ci_install_file.bin")
+        if os.path.exists(out):
+            os.remove(out)
+        subprocess.run(["mcopy", "-n", "-i", img, dst, out], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not os.path.exists(out) or open(out, "rb").read() != open(os.path.join(BUILD, src), "rb").read():
+            fails.append("%s differs from the build" % dst)
+    r = subprocess.run(["mdir", "-b", "-/", "-i", img, "::/Documents"], env=env, stdout=subprocess.PIPE, text=True)
+    if "Getting Started.txt" not in r.stdout:
+        fails.append("Documents not copied")
+    return fails, part, img
+
+
+def run_install(cfg, hc, fw, opts):
+    kind = next(v for v in opts if v.startswith("install"))
+    t_start = time.time()
+    made = make_install_disk(kind)
+    if not made:
+        print("%-22s SKIP (needs root, mkntfs and ntfs-3g)" % cfg, flush=True)
+        return True
+    disk, windows = made
+    win_hash = [file_hash(disk, s * 512, n * 512) for s, n in windows]
+    sector0 = open(disk, "rb").read(512)
+    entries0 = gpt_entries(disk) if kind == "installgpt" else None
+    stick = os.path.join(BUILD, "ci_boot.img")
+    subprocess.run(["cp", os.path.join(BUILD, "halcyon.img"), stick], check=True)
+    if kind == "installntfs":            # a short boot menu countdown (copied to the installed disk)
+        ini = os.path.join(BUILD, "ci_settings.ini")
+        with open(ini, "w") as f:
+            f.write("boot.timeout=3\r\n")
+        subprocess.run(["mcopy", "-o", "-i", stick + "@@1M", ini, "::/HALCYON/SETTINGS.INI"], check=True)
+    vars_file = os.path.abspath(os.path.join(BUILD, "ci_install_vars.fd"))
+    if fw == "uefi":
+        subprocess.run(["cp", "/usr/share/OVMF/OVMF_VARS_4M.fd", vars_file], check=True)
+    spec = os.path.abspath(os.path.join(BUILD, "ci_installtest.txt"))
+    nvme = kind == "installnvme"
+    with open(spec, "w") as f:
+        f.write("%s %s" % ("nvme0" if nvme else "INSTALLDISK", "free" if kind in ("installntfs", "installgpt") else "whole"))
+    if nvme:
+        target = "-drive if=none,id=d0,format=raw,file=%s -device nvme,serial=HALCINST,drive=d0" % disk
+    else:
+        target = "-drive if=none,id=d0,format=raw,file=%s -device ide-hd,drive=d0,bus=ide.0,model=INSTALLDISK" % disk
+    extra = "-device usb-tablet,bus=usb.0 -device usb-kbd,bus=usb.0 %s -fw_cfg name=opt/halcyon/installtest,file=%s" % (
+        target, spec)
+    text, _ = qemu_boot(hc, fw, extra, stick=stick, vars_file=vars_file if fw == "uefi" else None,
+                        done=["install test: "], timeout=150)
+    fails = []
+    line = next((l for l in text.splitlines() if l.startswith("install test: done") or l.startswith("install test: failed")), None)
+    plan = next((l for l in text.splitlines() if l.startswith("install test: plan:")), "")
+    if not line or "failed" in line:
+        fails.append(line.strip() if line else "the installation did not finish")
+    fails += ["log contains '%s'" % b for b in BAD if b in text]
+    gpt = "GPT" in plan
+    bios_code = "BIOS boot code yes" in plan
+    if fw == "uefi" and "boot entry -" in (line or ""):
+        fails.append("no firmware boot entry")
+    boots = []
+    if not fails:
+        f2, part, partimg = installed_disk_failures(disk, gpt, windows)
+        fails += f2
+        for i, (s, n) in enumerate(windows):
+            if file_hash(disk, s * 512, n * 512) != win_hash[i]:
+                fails.append("Windows' partition %d changed" % (i + 1))
+        if kind == "installntfs":
+            s0 = open(disk, "rb").read(512)
+            if s0[446:462] != sector0[446:462] or s0[440:444] != sector0[440:444]:
+                fails.append("Windows' MBR entry or the disk signature changed")
+            out = os.path.join(BUILD, "ci_install_file.bin")
+            subprocess.run(["mcopy", "-n", "-i", partimg, "::/HALCYON/BOOT/MBRSAVE.BIN", out],
+                           env=dict(os.environ, MTOOLS_SKIP_CHECK="1"), stdout=subprocess.DEVNULL)
+            if not os.path.exists(out) or open(out, "rb").read() != sector0:
+                fails.append("MBRSAVE.BIN is not the original first sector")
+        if kind == "installgpt":
+            e1 = gpt_entries(disk)
+            if e1[:3 * 128] != entries0[:3 * 128]:
+                fails.append("Windows' GPT entries changed")
+        for i, (s, n) in enumerate(windows):
+            if n > 200 * 2048:          # the NTFS partitions
+                vol = os.path.join(BUILD, "ci_install_ntfs.img")
+                subprocess.run(["dd", "if=" + disk, "of=" + vol, "bs=512", "skip=%d" % s, "count=%d" % n,
+                                "conv=sparse", "status=none"], check=True)
+                r = subprocess.run(["ntfsfix", "-n", vol], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                if r.returncode or "processed successfully" not in r.stdout:
+                    fails.append("ntfsfix -n on Windows' partition")
+        survey = [l for l in text.splitlines() if l.startswith("install test: disk ")]
+        if windows and not any(l.endswith(", Windows") for l in survey):
+            fails.append("Windows not detected on the disk")
+        # boot the installed disk alone
+        dev = ("-drive if=none,id=d0,format=raw,file=%s -device nvme,serial=HALCINST,drive=d0" % disk if nvme else
+               "-drive if=none,id=d0,format=raw,file=%s -device ide-hd,drive=d0,bus=ide.0" % disk)
+        dev += " -device usb-tablet,bus=usb.0 -device usb-kbd,bus=usb.0"
+        runs = []
+        if bios_code:
+            runs.append(("bios", None))
+        runs.append(("uefi", "fresh"))
+        if fw == "uefi":
+            runs.append(("uefi", "installer's"))
+        for bfw, vars_kind in runs:
+            vf = None
+            if bfw == "uefi":
+                vf = vars_file
+                if vars_kind == "fresh":
+                    vf = os.path.abspath(os.path.join(BUILD, "ci_install_vars2.fd"))
+                    subprocess.run(["cp", "/usr/share/OVMF/OVMF_VARS_4M.fd", vf], check=True)
+            if kind == "installgpt" and vars_kind == "fresh":
+                continue            # (Windows' ESP comes first: without the boot entry the firmware starts that)
+            t0 = time.time()
+            text2, _ = qemu_boot(hc, bfw, dev, vars_file=vf, timeout=60)
+            name = "%s%s" % (bfw, " (%s variables)" % vars_kind if vars_kind else "")
+            bf = []
+            if "gui: desktop ready" not in text2:
+                bf.append("no desktop")
+            pdev = "nvme0" if nvme else "sata0"
+            if not re.search(r"vfs: C: FAT32 'HALCYON' on %sp\d+ \(boot volume\)" % pdev, text2):
+                bf.append("the installed disk is not C:")
+            bf += ["log contains '%s'" % b for b in BAD if b in text2]
+            if vars_kind == "installer's" and not re.search(r"efi: started from firmware boot entry Boot[0-9A-F]{4} 'Halcyon'", text2):
+                bf.append("not started through the 'Halcyon' boot entry")
+            boots.append("%s %.0fs" % (name, time.time() - t0))
+            fails += ["%s boot: %s" % (name, f) for f in bf]
+        if kind == "installntfs" and not fails:
+            # the boot menu: choose Windows, its boot sector must run
+            def keys(text3):
+                if "Please select the operating system to start" not in vga_text():
+                    return None
+                subprocess.run([sys.executable, "tools/qemu_ctl.py", os.path.join(BUILD, "mon.sock"), "sendkey down",
+                                "sleep:0.3", "sendkey ret", "sleep:2"], stdout=subprocess.DEVNULL)
+                return vga_text()
+            _, screen = qemu_boot(hc, "bios", dev, done=["never"], timeout=10, during=keys)
+            if not screen or "This is not a bootable disk" not in screen:
+                fails.append("choosing Windows in the boot menu did not start its boot sector")
+            else:
+                boots.append("Windows chosen")
+    status = "PASS" if not fails else "FAIL (%s)" % ", ".join(fails)
+    print("%-22s %5.1fs  %s" % (cfg, time.time() - t_start, status), flush=True)
+    print("    %s; booted: %s" % (plan.replace("install test: plan: ", "").strip() or "no plan", ", ".join(boots) or "-"))
+    if fails:
+        print("    --- last lines of the serial log ---")
+        for l in text.strip().splitlines()[-15:]:
+            print("    " + l)
+    return not fails
+
+
 def run(cfg):
     parts = cfg.split(":")
     hc, fw = parts[0], parts[1]
     opts = [v for v in (parts[2] if len(parts) > 2 else "").split("+") if v]
+    if any(v.startswith("install") for v in opts):
+        return run_install(cfg, hc, fw, opts)
     flags = 0
     for v in opts:
         flags |= VARIANTS[v]
@@ -893,7 +1255,9 @@ def run(cfg):
 
 
 def main():
-    cfgs = sys.argv[1:] or MATRIX
+    cfgs = []
+    for a in sys.argv[1:] or MATRIX:
+        cfgs += INSTALL_SET if a == "install" else [a]      # (the named set of installer variants)
     if not all(os.path.exists(os.path.join(BUILD, f)) for f in ("fat32gpt.img", "exfat.img")):
         subprocess.run(["make", "testdisks"], check=True, stdout=subprocess.DEVNULL)
     failed = sum(0 if run(c) else 1 for c in cfgs)
