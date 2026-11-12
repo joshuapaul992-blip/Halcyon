@@ -108,6 +108,78 @@ static const char *link_text(const netdev_t *nd, char *b, int n) {
     return b;
 }
 
+static const char *conn_type_name(int t) {
+    static const char *n[] = { "unknown", "VGA", "DVI", "HDMI", "DisplayPort", "LVDS panel", "eDP panel", "TV", "virtual",
+                               "firmware frame buffer" };
+    return t >= 0 && t < (int)ARRAY_SIZE(n) ? n[t] : "unknown";
+}
+
+static void display_rows(si_t *s, char *d) {
+    static const char *state[] = { "found, not started", "in use", "failed", "disabled", "replaced by its native driver" };
+    pci_dev_t *shown[DISPLAY_MAX_ADAPTERS];
+    int nshown = 0;
+    for (int i = 0; i < display_adapter_count(); i++) {
+        display_adapter_t *a = display_adapter_at(i);
+        if (a->pci) { pci_detail(a->pci, d, 2048); strlcat(d, "\n", 2048); }
+        else d[0] = 0;
+        if (a->pci && nshown < DISPLAY_MAX_ADAPTERS) shown[nshown++] = a->pci;
+        char m[512];
+        int caps = 0;
+        for (int k = 0; k < a->nheads; k++) caps |= (int)a->heads[k].caps;
+        snprintf(m, sizeof m, "Adapter: %s\nDriver: %s (%s%s%s)\nState: %s%s%s\nHeads: %d%s%s\nConnectors: %d\n"
+                 "Resolution changes: %s\n",
+                 a->name, a->driver, a->live ? "modes switch at once" : "modes switch at the next start",
+                 a->owns_fw_fb ? ", shows the firmware frame buffer" : "", "",
+                 a->state >= 0 && a->state < (int)ARRAY_SIZE(state) ? state[a->state] : "?", a->why[0] ? ": " : "", a->why,
+                 a->nheads, caps & HEAD_CAP_CURSOR ? ", hardware cursor" : "", caps & HEAD_CAP_FLIP ? ", page flips at vertical blank" : "",
+                 a->nconns, a->live ? "at once" : "at the next start");
+        strlcat(d, m, 2048);
+        add(s, 1, ICON_DISPLAY, CAT_DISPLAY, d, "%s%s", a->name, a->state == ADAPTER_ACTIVE ? "" : a->state == ADAPTER_RETIRED ? " (replaced)" : " (not in use)");
+        for (int k = 0; k < a->nconns; k++) {
+            display_connector_t *c = &a->conns[k];
+            char mon[64];
+            edid_describe(&c->monitor, mon, sizeof mon);
+            int o = snprintf(d, 2048, "Connector: %s (%s)\nStatus: %s\n", c->name, conn_type_name(c->type),
+                             c->status == CONN_CONNECTED ? "monitor connected" : c->status == CONN_MAYBE ? "maybe connected" : "nothing connected");
+            if (c->monitor.valid) {
+                char yr[16] = "";
+                if (c->monitor.year) snprintf(yr, sizeof yr, ", %d", c->monitor.year);
+                o += snprintf(d + o, 2048 - o, "\nMonitor: %s\nManufacturer: %s, product %04X%s\nNative resolution: %dx%d at %d Hz\nSize: %d x %d mm\nEDID: %d bytes\n",
+                              mon, c->monitor.vendor, c->monitor.product, yr, c->monitor.native_w, c->monitor.native_h,
+                              c->monitor.native_hz, c->monitor.width_mm, c->monitor.height_mm, c->edid_len);
+            } else if (c->status != CONN_DISCONNECTED) {
+                o += snprintf(d + o, 2048 - o, "\nMonitor: %s (no EDID)\n", mon);
+            }
+            o += snprintf(d + o, 2048 - o, "Modes: %d\n", c->nmodes);
+            display_head_t *h = c->head;
+            if (h && o < 2048) {
+                char md[128];
+                mode_describe(&h->mode, md, sizeof md);
+                o += snprintf(d + o, 2048 - o, "\nOn the desktop: monitor %d%s at %d,%d\nMode: %s\nHead: %d, %d buffer%s\n"
+                              "Frames: %u, page flips: %u (longest wait %u ms)\nHardware cursor: %s\n",
+                              c->number, c == display_primary() ? " (primary)" : "", h->x, h->y, md, h->index, h->nfb,
+                              h->nfb == 1 ? "" : "s", h->frames, h->flips, h->flip_wait_max_ms,
+                              display_hw_cursor() ? "in use" : (h->caps & HEAD_CAP_CURSOR) ? "available" : "no");
+            } else if (o < 2048) {
+                o += snprintf(d + o, 2048 - o, "\nNot part of the desktop.\n");
+            }
+            add(s, 2, ICON_DISPLAY, CAT_DISPLAY, d, "%s: %s%s", c->name,
+                c->status == CONN_DISCONNECTED && !c->monitor.valid ? "(no monitor)" : mon, h ? "" : " (off)");
+        }
+    }
+    /* display devices without a driver of their own (shown through the firmware) */
+    for (int i = 0; i < pci_count(); i++) {
+        pci_dev_t *p = pci_get(i);
+        if (p->class_code != 3) continue;
+        int listed = 0;
+        for (int k = 0; k < nshown; k++) if (shown[k] == p) listed = 1;
+        if (listed) continue;
+        pci_detail(p, d, 2048);
+        strlcat(d, "\nNo Halcyon driver: the firmware frame buffer is used, if this card set it up.\n", 2048);
+        add(s, 1, ICON_DISPLAY, CAT_DISPLAY, d, "%s display adapter (no driver)", pci_vendor_name(p->vendor));
+    }
+}
+
 static void build(si_t *s) {
     for (int i = 0; i < s->n; i++) kfree(s->rows[i].detail);
     s->n = 0;
@@ -134,32 +206,9 @@ static void build(si_t *s) {
         live_fill(&s->rows[s->n - 1]);
     }
 
-    /* display */
+    /* display: adapters, their connectors and monitors (drivers/display.h) */
     add(s, 0, ICON_DISPLAY, CAT_DISPLAY, NULL, "%s", cat_names[CAT_DISPLAY]);
-    for (int i = 0; i < pci_count(); i++) {
-        pci_dev_t *p = pci_get(i);
-        if (p->class_code != 3) continue;
-        pci_detail(p, d, 2048);
-        char m[160];
-        snprintf(m, sizeof m, "\nDriver: %s (%s)\nMode: %ux%u, %u-bit, %d modes available\n",
-                 p->driver ? display_adapter() : "firmware frame buffer (VESA/GOP)",
-                 display_live() ? "resolution changes at once" : "resolution changes at the next start",
-                 g_bootinfo.fb_width, g_bootinfo.fb_height, g_bootinfo.fb_bpp, display_mode_count());
-        strlcat(d, m, 2048);
-        add(s, 1, ICON_DISPLAY, CAT_DISPLAY, d, "%s %s (%ux%u)", pci_vendor_name(p->vendor), "display adapter", g_bootinfo.fb_width, g_bootinfo.fb_height);
-    }
-    const edid_info_t *mon = display_monitor();
-    char mname[64];
-    edid_describe(mon, mname, sizeof mname);
-    if (mon->valid) {
-        char yr[16] = "";
-        if (mon->year) snprintf(yr, sizeof yr, ", %d", mon->year);
-        snprintf(d, 2048, "Monitor: %s\nManufacturer: %s, product %04X%s\nNative resolution: %dx%d at %d Hz\nSize: %d x %d mm",
-                 mname, mon->vendor, mon->product, yr, mon->native_w, mon->native_h, mon->native_hz, mon->width_mm, mon->height_mm);
-    }
-    else
-        snprintf(d, 2048, "The firmware did not report the monitor (no EDID).");
-    add(s, 1, ICON_DISPLAY, CAT_DISPLAY, d, "%s", mname);
+    display_rows(s, d);
 
     /* disks */
     add(s, 0, ICON_HDD, CAT_DISKS, NULL, "%s", cat_names[CAT_DISKS]);
