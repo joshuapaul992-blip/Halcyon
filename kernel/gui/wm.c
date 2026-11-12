@@ -1384,6 +1384,12 @@ void gui_main(void) {
     gui_full_redraw();
     kprintf("gui: desktop ready (%dx%d)\n", screen_w(), screen_h());
     gui_desktop_ready = 1;
+    /* a native display driver whose picture nobody confirmed yet (the start guard) */
+    display_adapter_t *ga = display_guard_confirm_needed();
+    if (ga) {
+        gui_full_redraw();
+        display_guard_confirm(ga, display_ask_native(ga->name));
+    }
     /* test hook: QEMU fw_cfg "opt/halcyon/setmode" = "WIDTHxHEIGHT" switches the
      * primary monitor's mode once the desktop is up (live adapters);
      * "CONNECTOR:WIDTHxHEIGHT" another monitor's */

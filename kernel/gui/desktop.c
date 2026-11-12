@@ -998,7 +998,8 @@ void start_menu_toggle(void) {
 /* ---------------- balloons ---------------- */
 static window_t *balloon;
 static u64 balloon_until;
-static char balloon_title[64], balloon_text[160];
+static char balloon_title[64], balloon_text[256];
+static char pend_title[64], pend_text[256];      /* shell_balloon before the desktop is up */
 
 static void balloon_paint(window_t *w, gc_t *g) {
     rect_t r = mkrect(0, 0, w->client->w, w->client->h - 10);
@@ -1032,6 +1033,12 @@ static void show_balloon(const char *title, const char *text) {
     balloon->on_destroy = balloon_destroy;
     balloon_until = time_ms() + 6000;
     sound_event(SNDEV_NOTIFY);
+}
+
+/* a balloon from the kernel (the display core): shown at the next shell tick */
+void shell_balloon(const char *title, const char *text) {
+    strlcpy(pend_title, title, sizeof pend_title);
+    strlcpy(pend_text, text, sizeof pend_text);
 }
 
 /* ---------------- shell tick ---------------- */
@@ -1075,6 +1082,11 @@ void shell_tick(void) {
         net_tray_poll();
     }
     if (balloon && time_ms() > balloon_until) wm_destroy(balloon);
+    if (pend_title[0]) {
+        show_balloon(pend_title, pend_text);
+        balloon_until = time_ms() + 15000;
+        pend_title[0] = 0;
+    }
     if (usb_generation() != last_ugen) {
         last_ugen = usb_generation();
         taskbar_invalidate();

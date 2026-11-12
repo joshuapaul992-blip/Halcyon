@@ -18,6 +18,9 @@
 void bochs_display_probe(void) __attribute__((weak));
 void virtio_gpu_probe(void) __attribute__((weak));
 void nv_display_probe(void) __attribute__((weak));
+/* the shell's notification balloon and the boot log (weak: host builds) */
+void shell_balloon(const char *title, const char *text) __attribute__((weak));
+int  bootlog_save(const char *reason) __attribute__((weak));
 
 static display_adapter_t adapter_store[DISPLAY_MAX_ADAPTERS];
 static int nadapters;
@@ -35,6 +38,8 @@ static struct {                                /* g_bootinfo's frame buffer as t
 } fwfb;
 
 static char fail_hook[48];                     /* test hook: "<driver>:<step>" */
+static int init_done;                          /* display_init finished (later registrations: nv_init) */
+static int fb_in_bars(const pci_dev_t *d, u64 addr);
 
 /* ---------------- registry ---------------- */
 display_adapter_t *display_register(const char *driver, const char *name, const display_ops_t *ops, void *priv,
@@ -48,6 +53,11 @@ display_adapter_t *display_register(const char *driver, const char *name, const 
     a->priv = priv;
     a->pci = pci;
     a->state = ADAPTER_PROBED;
+    if (init_done) {
+        /* registered after display_init (the NVIDIA driver, from nv_init) */
+        if (fb_in_bars(pci, fwfb.addr)) a->owns_fw_fb = 1;
+        kprintf("display: found %s (%s)%s\n", a->name, a->driver, a->owns_fw_fb ? ", shows the firmware frame buffer" : "");
+    }
     return a;
 }
 
@@ -738,7 +748,9 @@ static void firmware_back(void) {
 }
 
 /* a native adapter failed: give its device back, carry on without it */
-static void adapter_fail(display_adapter_t *a, const char *why) {
+static void adapter_fail(display_adapter_t *a, const char *why_in) {
+    char why[sizeof a->why];
+    strlcpy(why, why_in, sizeof why);
     for (int k = 0; k < a->nheads; k++) {
         display_head_t *h = &a->heads[k];
         if (h->conn) { h->conn->head = NULL; h->conn = NULL; }
@@ -880,6 +892,147 @@ static void log_outputs(void) {
     kprintf("display: desktop %dx%d on %d monitor%s\n", bw, bh, n, n == 1 ? "" : "s");
 }
 
+/* ---------------- the start guard ---------------- */
+static void guard_key(const char *driver, const char *what, char *k, int n) { snprintf(k, (size_t)n, "display.%s.%s", driver, what); }
+
+static void balloon(const char *title, const char *text) { if (shell_balloon) shell_balloon(title, text); }
+
+/* a marker left by the last boot: the driver stays off */
+static int guard_blocks(display_adapter_t *a) {
+    char k[SETTINGS_KEY_MAX];
+    guard_key(a->driver, "guard", k, sizeof k);
+    const char *v = settings_get(k, NULL);
+    if (!v || !v[0] || !strcmp(v, "0")) return 0;
+    int fresh = !strcmp(v, "start");
+    if (fresh) {
+        settings_set(k, "blocked");
+        settings_save();
+    }
+    a->state = ADAPTER_DISABLED;
+    strlcpy(a->why, "turned off: its last start did not finish (Display Properties turns it on again)", sizeof a->why);
+    kprintf("display: %s (%s) not started: %s (%s); the firmware frame buffer is used\n", a->name, a->driver,
+            fresh ? "its start at the last boot did not finish" : "it stays off after a start that did not finish", k);
+    char t[256];
+    snprintf(t, sizeof t, "Halcyon's driver for the %s did not finish starting last time, so the basic display is used. "
+             "You can turn it on again in Display Properties.", a->name);
+    balloon("Display driver turned off", t);
+    return 1;
+}
+
+int display_guard_begin(display_adapter_t *a) {
+    if (!a->guarded || a->guard_armed) return 0;
+    char k[SETTINGS_KEY_MAX];
+    guard_key(a->driver, "guard", k, sizeof k);
+    settings_set(k, "start");
+    int r = settings_save();
+    if (r) {
+        settings_set(k, NULL);
+        kprintf("display: %s: the start marker cannot be saved (%s)\n", a->driver, strerror(r));
+        return r;
+    }
+    a->guard_armed = 1;
+    kprintf("display: %s: start marker saved (%s=start)\n", a->driver, k);
+    if (bootlog_save) bootlog_save("display driver starting");
+    return 0;
+}
+
+void display_guard_checkpoint(display_adapter_t *a, const char *what) {
+    if (a->guard_armed && bootlog_save) bootlog_save(what);
+}
+
+static void guard_clear(display_adapter_t *a, const char *why) {
+    char k[SETTINGS_KEY_MAX];
+    guard_key(a->driver, "guard", k, sizeof k);
+    settings_set(k, NULL);
+    settings_save();
+    a->guard_armed = 0;
+    a->guard_clear_ms = 0;
+    a->guard_confirm = 0;
+    kprintf("display: %s: start marker cleared (%s)\n", a->driver, why);
+    if (bootlog_save) bootlog_save("display driver running");
+}
+
+/* "DP-1 1920x1080;HDMI-1 1280x1024;" */
+static void guard_signature(display_adapter_t *a, char *out, int n) {
+    out[0] = 0;
+    for (int k = 0; k < a->nconns; k++) {
+        display_connector_t *c = &a->conns[k];
+        if (!c->head) continue;
+        char one[40];
+        snprintf(one, sizeof one, "%s %dx%d;", c->name, c->head->mode.w, c->head->mode.h);
+        strlcat(out, one, (size_t)n);
+    }
+}
+
+/* display_start is done: what the marker of an adapter that started needs */
+static void guard_started(display_adapter_t *a) {
+    if (!a->guard_armed) return;
+    if (a->state != ADAPTER_ACTIVE) {
+        kprintf("display: %s: the start marker stays (the driver failed after touching the device): it stays off at the next start\n",
+                a->driver);
+        if (bootlog_save) bootlog_save("display driver failed");
+        return;
+    }
+    char k[SETTINGS_KEY_MAX], sig[SETTINGS_VAL_MAX];
+    guard_key(a->driver, "confirmed", k, sizeof k);
+    guard_signature(a, sig, sizeof sig);
+    const char *v = settings_get(k, "");
+    if (sig[0] && !strcmp(v, sig)) {
+        a->guard_clear_ms = time_ms() + 10000;
+        kprintf("display: %s: configuration confirmed before (%s)\n", a->driver, sig);
+    } else {
+        a->guard_confirm = 1;
+        kprintf("display: %s: new configuration (%s): the picture will be confirmed\n", a->driver, sig);
+    }
+}
+
+const char *display_guard_state(const char *driver) {
+    for (int i = 0; i < nadapters; i++) {
+        display_adapter_t *a = &adapter_store[i];
+        if (a->guarded && !strcmp(a->driver, driver) && (a->state == ADAPTER_DISABLED || a->state == ADAPTER_FAILED) &&
+            !strncmp(a->why, "turned off", 10))
+            return a->why;
+    }
+    return NULL;
+}
+
+void display_guard_reenable(const char *driver) {
+    char k[SETTINGS_KEY_MAX];
+    guard_key(driver, "guard", k, sizeof k);
+    settings_set(k, NULL);
+    settings_save();
+    kprintf("display: %s: turned on again (the next start uses it)\n", driver);
+}
+
+display_adapter_t *display_guard_confirm_needed(void) {
+    for (int i = 0; i < nadapters; i++)
+        if (adapter_store[i].guard_confirm && adapter_store[i].state == ADAPTER_ACTIVE) return &adapter_store[i];
+    return NULL;
+}
+
+void display_guard_confirm(display_adapter_t *a, int yes) {
+    if (!a || !a->guard_confirm) return;
+    a->guard_confirm = 0;
+    if (yes && a->state == ADAPTER_ACTIVE) {
+        char k[SETTINGS_KEY_MAX], sig[SETTINGS_VAL_MAX];
+        guard_key(a->driver, "confirmed", k, sizeof k);
+        guard_signature(a, sig, sizeof sig);
+        settings_set(k, sig);
+        guard_clear(a, "the picture was confirmed");
+        return;
+    }
+    kprintf("display: %s: the picture was not confirmed\n", a->driver);
+    adapter_fail(a, "turned off: nobody confirmed the picture (Display Properties turns it on again)");
+    number_connectors();
+    if (display_changed_hook && started) display_changed_hook();
+    log_outputs();
+    if (bootlog_save) bootlog_save("display driver not confirmed");
+    char t[256];
+    snprintf(t, sizeof t, "Nobody confirmed the picture of Halcyon's driver for the %s, so the basic display is used again. "
+             "You can turn the driver on again in Display Properties.", a->name);
+    balloon("Display driver turned off", t);
+}
+
 /* ---------------- start ---------------- */
 void display_start(void) {
     if (started) return;
@@ -901,10 +1054,11 @@ void display_start(void) {
             continue;
         }
         int before = cf.n, px = place_x;
+        if (a->guarded && guard_blocks(a)) continue;
         int r = adapter_start(a, &cf, &px);
         if (r) {
             cf.n = before;
-            adapter_fail(a, r == E_IO ? "the device did not start" : strerror(r));
+            adapter_fail(a, a->why[0] ? a->why : r == E_IO ? "the device did not start" : strerror(r));
             continue;
         }
         a->state = ADAPTER_ACTIVE;
@@ -960,6 +1114,7 @@ void display_start(void) {
     if (fwa && fwa->state == ADAPTER_ACTIVE && primary == &fwa->conns[0] && !started_any)
         kprintf("display: %s, %d modes (changes apply at the next start)\n", fwa->name, fwa->conns[0].nmodes);
     log_outputs();
+    for (int i = 0; i < nadapters; i++) guard_started(&adapter_store[i]);
 }
 
 void display_apply_saved(void) { display_start(); }
@@ -1028,6 +1183,7 @@ int display_service(void) {
     for (int i = 0; i < nadapters; i++) {
         display_adapter_t *a = &adapter_store[i];
         if (a->state != ADAPTER_ACTIVE) continue;
+        if (a->guard_clear_ms && time_ms() >= a->guard_clear_ms) guard_clear(a, "running for 10 seconds with a confirmed configuration");
         u32 before = 0;
         for (int k = 0; k < a->nheads; k++) before += a->heads[k].flips;
         if (a->ops->poll) a->ops->poll(a);
@@ -1095,6 +1251,7 @@ void display_init(void) {
     number_connectors();
     if (g_bootinfo.boot_flags & (BOOTF_SAFE_VIDEO | BOOTF_NO_DISPLAY)) {
         kprintf("display: native display drivers off (boot option)\n");
+        init_done = 1;
         return;
     }
     if (bochs_display_probe) bochs_display_probe();
@@ -1106,6 +1263,7 @@ void display_init(void) {
         if (fb_in_bars(a->pci, fwfb.addr)) a->owns_fw_fb = 1;
         kprintf("display: found %s (%s)%s\n", a->name, a->driver, a->owns_fw_fb ? ", shows the firmware frame buffer" : "");
     }
+    init_done = 1;
 }
 
 /* ---------------- after a fatal error ---------------- */

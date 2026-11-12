@@ -39,6 +39,7 @@
 #define DP_PRIMARY 14
 #define DP_EXTEND 15
 #define DP_IDENTIFY 16
+#define DP_DRIVER 17               /* turn a native driver on again (the start guard) */
 #define SS_SETTINGS 20
 #define SS_PREVIEW 21
 #define SS_WAIT 22
@@ -404,7 +405,7 @@ static void show_tab(window_t *w, int tab) {
     d->tab = tab;
     d->drag = 0;
     for (widget_t *wd = w->widgets; wd; wd = wd->next) {
-        int t = (wd->id >= DP_PRIMARY && wd->id <= DP_IDENTIFY) || wd->id == DP_LIST ? TAB_SETTINGS :
+        int t = (wd->id >= DP_PRIMARY && wd->id <= DP_DRIVER) || wd->id == DP_LIST ? TAB_SETTINGS :
                 (wd->id >= SS_SETTINGS && wd->id <= SS_WAIT) ? TAB_SAVER : -1;
         if (t < 0) continue;
         if (t == tab) wd->style &= ~WS_HIDDEN;
@@ -583,6 +584,60 @@ static int ask_keep(window_t *owner) {
     return k.keep;
 }
 
+
+/* ---- a native driver's first picture: "can you see this?" ---- */
+int display_ask_native(const char *adapter) {
+    keep_t k = { 0 };
+    k.deadline = time_ms() + 15000;
+    window_t *w = wm_create("Display Driver", ICON_DISPLAY, -1, -1, 360, 132, WF_DIALOG | WF_CENTER | WF_TOPMOST);
+    if (!w) return 0;
+    k.w = w;
+    w->data = &k;
+    w->on_tick = keep_tick;
+    w->on_close = keep_close;
+    widget_t *ic = widget_add(w, W_ICON, mkrect(14, 14, 32, 32), "", 0);
+    ic->value = ICON_QUESTION;
+    char t[200];
+    snprintf(t, sizeof t, "Halcyon now uses its own driver for the %s. Can you see this message?", adapter);
+    widget_add(w, W_LABEL, mkrect(58, 14, 290, 44), t, 0)->style |= WS_WRAP;
+    widget_add(w, W_LABEL, mkrect(58, 62, 290, 16), "Reverting in 15 seconds.", 20);
+    widget_t *y = widget_add(w, W_BUTTON, mkrect(360 - 2 * 83, 98, 75, 23), "Yes", ID_YES);
+    y->on_click = keep_click;
+    widget_t *n = widget_add(w, W_BUTTON, mkrect(360 - 83, 98, 75, 23), "No", ID_NO);
+    n->on_click = keep_click;
+    n->style |= WS_DEFAULT | WS_CANCEL;   /* Enter on a black screen goes back */
+    w->focus = n;
+    gui_run_until(&k.done);
+    if (wm_alive(w)) { w->on_close = NULL; w->data = NULL; wm_destroy(w); }
+    kprintf("display: \"%s\": the picture was %s\n", adapter, k.keep ? "confirmed" : "not confirmed");
+    return k.keep;
+}
+
+/* the native driver a guard turned off (NULL: none) */
+static display_adapter_t *guard_off_adapter(void) {
+    for (int i = 0; i < display_adapter_count(); i++) {
+        display_adapter_t *a = display_adapter_at(i);
+        if (a->guarded && display_guard_state(a->driver)) return a;
+    }
+    return NULL;
+}
+
+static void on_driver(window_t *w, widget_t *b) {
+    (void)b;
+    display_adapter_t *a = guard_off_adapter();
+    if (!a) return;
+    char msg[400];
+    snprintf(msg, sizeof msg, "Halcyon's own driver for the %s is %s.\n\n"
+             "Do you want to turn it on again? It starts with the next restart. If the screen stays dark, "
+             "it turns itself off again.", a->name, display_guard_state(a->driver));
+    if (msgbox(w, "Display Driver", msg, ICON_QUESTION, MB_YESNO) != ID_YES) return;
+    display_guard_reenable(a->driver);
+    widget_t *bt = widget_find(w, DP_DRIVER);
+    if (bt) bt->style |= WS_DISABLED;
+    if (msgbox(w, "System Settings Change", "The driver is used from the next start.\n\nDo you want to restart your computer now?",
+               ICON_QUESTION, MB_YESNO) == ID_YES)
+        desktop_restart();
+}
 
 /* ---------------- the settings tab: choosing ---------------- */
 static void update_buttons(window_t *w) {
@@ -922,6 +977,11 @@ void app_display(void) {
     widget_t *idb = widget_add(w, W_BUTTON, mkrect(DW - 16 - 75, TY + 175, 75, 23), "Identify", DP_IDENTIFY);
     idb->on_click = on_identify;
     strlcpy(idb->tip, "Shows each monitor's number on it", sizeof idb->tip);
+    if (guard_off_adapter()) {
+        widget_t *drv = widget_add(w, W_BUTTON, mkrect(DW - 16 - 75 - 8 - 112, TY + 175, 112, 23), "Turn on driver...", DP_DRIVER);
+        drv->on_click = on_driver;
+        strlcpy(drv->tip, "A display driver was turned off because its start did not finish", sizeof drv->tip);
+    }
     widget_t *pc = widget_add(w, W_CHECKBOX, mkrect(16, TY + 368, DW - 32, 18), "Use this device as the primary monitor.", DP_PRIMARY);
     pc->on_change = on_primary;
     widget_t *xc = widget_add(w, W_CHECKBOX, mkrect(16, TY + 390, DW - 32, 18), "Extend my desktop onto this monitor.", DP_EXTEND);

@@ -321,6 +321,8 @@ void saver_preview_close(int handle);  /* ends its program */
 window_t *saver_preview_host(int handle, u32 pid, rect_t *r);
 void mouse_dialog(void);               /* apps/mouse.c: Control Panel, Mouse */
 void app_display_saver(void);          /* Display Properties on its Screen Saver tab */
+int  display_ask_native(const char *adapter);   /* "can you see this?" after a native driver's first start (15 s) */
+void shell_balloon(const char *title, const char *text);   /* a notification balloon (queued until the desktop is up) */
 struct proc;
 int  gui_ask_permission(struct proc *asker, const char *title, const char *text);   /* permit.c */
 int  shell_run(const char *path, const char *args);   /* start a user program; pid or error (reported) */

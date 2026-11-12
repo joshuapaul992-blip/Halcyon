@@ -169,6 +169,8 @@ struct display_adapter {
     u32 max_clock_khz;         /* 0: no limit */
     u64 vram;                  /* bytes for scanout buffers (0: no limit) */
     int pitch_align;           /* informational */
+    int guarded;               /* a driver that may hang the machine while it starts: the
+                                  core keeps a start marker (display_guard_begin) */
     /* the core's */
     display_head_t heads[DISPLAY_MAX_HEADS];
     int nheads;
@@ -176,7 +178,10 @@ struct display_adapter {
     int nconns;
     int state;                 /* ADAPTER_* */
     int hotplug;               /* the driver reported a change */
-    char why[96];              /* why it failed or is off */
+    char why[96];              /* why it failed or is off (a driver may set it before failing) */
+    int guard_armed;           /* the start marker was saved this boot */
+    int guard_confirm;         /* the GUI asks whether the picture can be seen */
+    u64 guard_clear_ms;        /* the marker goes when the desktop has run this long */
 };
 enum { ADAPTER_PROBED = 0, ADAPTER_ACTIVE, ADAPTER_FAILED, ADAPTER_DISABLED, ADAPTER_RETIRED };
 
@@ -193,6 +198,26 @@ void display_connector_update(display_connector_t *c, int status, const u8 *edid
 void display_hotplug(display_adapter_t *a);
 /* the flip queued on h completed: its buffer is being scanned out */
 void display_flip_done(display_head_t *h);
+/* The start guard (drivers with a->guarded): right before the driver's
+ * first register write it calls display_guard_begin, which saves
+ * display.<driver>.guard=start in SETTINGS.INI and BOOT.LOG. The marker
+ * is cleared once the desktop runs on the driver and its picture was
+ * confirmed (display_guard_confirm, asked by the GUI for a configuration
+ * not confirmed before) or, for a confirmed one, after 10 seconds. A
+ * marker still there at the next start keeps the driver off ("blocked")
+ * until the user turns it on again (Display Properties, or removing the
+ * key). 0, or E_* when the marker cannot be saved (the driver must not go
+ * on then). display_guard_checkpoint saves BOOT.LOG before a risky step. */
+int  display_guard_begin(display_adapter_t *a);
+void display_guard_checkpoint(display_adapter_t *a, const char *what);
+/* NULL, or why the driver is off because of the guard */
+const char *display_guard_state(const char *driver);
+void display_guard_reenable(const char *driver);
+/* the GUI, once the desktop is up: an adapter whose picture must be
+ * confirmed (NULL: none); then the answer (0: no / no answer) */
+display_adapter_t *display_guard_confirm_needed(void);
+void display_guard_confirm(display_adapter_t *a, int yes);
+
 /* a fw_cfg test hook asked this step to fail (tests of the fallback):
  * "opt/halcyon/displayfail" = "<driver>:<step>" (step: enable, setmode, fb) */
 int  display_test_fail(display_adapter_t *a, const char *step);
