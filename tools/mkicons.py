@@ -444,14 +444,32 @@ def ic_drive_sys():
     return img
 
 
-def ic_recycle():
+def ic_recycle(full=False):
+    """a glass wastebasket with a curved rim; full: crumpled paper in it"""
     img = new()
-    m = fill(img, poly([(7, 8), (25, 8), (23, 30), (9, 30)]), "#DCE8F4", "#93A8C4", outline="#4E6290")
-    gloss(img, m, 0.5, 100)
-    fill(img, rrect((5, 5, 27, 9), 1), "#EEF2F8", "#A8B6CC", outline="#4E6290")
-    for x in (12, 16, 20):
-        line(img, [(x, 11), (x - 0.5 + (x - 16) * 0.05, 27)], "#6A7E9E", 0.8)
-    return finish(img, m)
+    if full:
+        # paper behind the rim: a page and crumpled sheets
+        fill(img, poly([(10, 2.5), (19, 1.5), (20.5, 9), (11, 10)]), "#FFFFFF", "#DCE4EE", outline="#7A8698")
+        line(img, [(12, 4.5), (18, 3.8)], "#9AA6B8", 0.6)
+        line(img, [(12.3, 6.3), (18.4, 5.6)], "#9AA6B8", 0.6)
+        fill(img, ellipse((6, 4.5, 15, 11.5)), "#FFFDF2", "#D8D2BC", outline="#8C8670")
+        line(img, [(8, 7), (10.5, 8.5), (12.5, 6.5)], "#A8A08A", 0.7)
+        fill(img, ellipse((16, 4, 26, 11)), "#F4F8FF", "#C6D2E4", outline="#7A8698")
+        line(img, [(18, 7.5), (21, 6), (23.5, 8)], "#98A4B8", 0.7)
+    # body: slightly tapered, bluish glass
+    body = fill(img, poly([(6, 9), (26, 9), (23.6, 29.4), (8.4, 29.4)]), "#E8F2FC", "#8FA9CC", outline="#41557E")
+    gloss(img, body, 0.55, 90)
+    # ribs
+    for x0, x1 in ((11, 11.8), (16, 16), (21, 20.2)):
+        line(img, [(x0, 12.5), (x1, 27)], "#5E7398", 0.9)
+        line(img, [(x0 + 0.9, 12.5), (x1 + 0.9, 27)], "#F4F8FF", 0.5)
+    # rim and base
+    fill(img, rrect((4.5, 7, 27.5, 11), 2), "#F6FAFF", "#A4B8D6", outline="#41557E")
+    fill(img, rrect((8.2, 28.2, 23.8, 30.2), 1), "#9AB0D0", "#5C7096", outline="#41557E")
+    if full:
+        # a sheet hanging over the rim
+        fill(img, poly([(20, 6), (25.5, 5.5), (25, 13), (22.5, 12)]), "#FFFFFF", "#E0E6F0", outline="#7A8698")
+    return finish(img)
 
 
 def ic_web():
@@ -607,6 +625,7 @@ ICONS = [
     ("speaker_muted", lambda: ic_speaker(True)),
     ("file_audio", lambda: ic_page("audio")),
     ("media", ic_media),
+    ("recycle_full", lambda: ic_recycle(True)),
 ]
 
 SIZES = (16, 32, 48)

@@ -11,6 +11,7 @@
  * starts below it (u->top), events and control rectangles are moved by it,
  * and adding one grows the window instead of shrinking the canvas. */
 #include "wm.h"
+#include "dnd.h"
 #include "core/lib.h"
 #include "core/mm.h"
 #include "core/kernel.h"
@@ -82,8 +83,9 @@ static ustate_t *state_of(proc_t *p) {
 static void push(proc_t *p, const hal_event_t *ev) {
     ustate_t *s = p ? p->gui : NULL;
     if (!s) return;
-    /* coalesce pointer motion and scroll bar thumb tracking */
-    if ((ev->type == EVT_MOUSE_MOVE || (ev->type == EVT_SCROLL && ev->button == SCROLL_THUMB_TRACK)) && s->qh != s->qt) {
+    /* coalesce pointer motion, scroll bar thumb tracking and drags moving over a window */
+    if ((ev->type == EVT_MOUSE_MOVE || (ev->type == EVT_SCROLL && ev->button == SCROLL_THUMB_TRACK) ||
+         (ev->type == EVT_DRAG && ev->button == DND_OVER)) && s->qh != s->qt) {
         hal_event_t *last = &s->q[(s->qh + QLEN - 1) % QLEN];
         if (last->type == ev->type && last->win == ev->win && last->id == ev->id && last->button == ev->button) { *last = *ev; return; }
     }
@@ -161,6 +163,26 @@ static void uw_menu(window_t *w, int id) {
 }
 
 static void uw_tick(window_t *w) { widgets_tick(w); }
+
+/* drag and drop: the program answers DND_ENTER / DND_OVER with SYS_DND_ACCEPT */
+static int uw_dnd(window_t *w, dnd_event_t *e) {
+    uwin_t *u = w->data;
+    if (!u || !u->p) return DND_ANSWER(DND_NONE, 0);
+    hal_event_t ev = { 0 };
+    ev.type = EVT_DRAG;
+    ev.win = u->handle;
+    ev.button = e->type;
+    ev.x = e->x;
+    ev.y = e->y - u->top;
+    ev.buttons = e->button;
+    ev.mods = e->mods;
+    ev.id = (int)e->serial;
+    ev.dz = e->count;
+    ev.vk = e->allowed;
+    ev.pressed = e->effect;
+    push(u->p, &ev);
+    return e->type == DND_ENTER || e->type == DND_OVER ? DND_LATER : 0;
+}
 
 /* status bars sit at the bottom of the client area */
 static void dock(window_t *w) {
@@ -261,6 +283,7 @@ static void job_create(void *a) {
     w->on_resize = uw_resize;
     w->on_destroy = uw_destroyed;
     w->on_menu = uw_menu;
+    w->on_dnd = uw_dnd;
     j->ok = 1;
 }
 
@@ -891,6 +914,13 @@ static int menu_set_flags(umenu_t *m, int id, u32 mask, u32 val) {
 
 static color_t shade_col(u64 c) { return HEX((u32)c & 0xFFFFFF); }
 
+typedef struct { uwin_t *u; char *paths; int len, count, effects, icon, result; } dnd_job_t;
+static void job_dnd_begin(void *a) {
+    dnd_job_t *j = a;
+    window_t *w = j->u->w;
+    j->result = !w ? E_INVAL : wm_mouse_buttons() ? dnd_begin(w, j->paths, j->len, j->count, j->effects, j->icon) : E_AGAIN;
+}
+
 static long usergui_syscall_more(proc_t *p, int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
     uwin_t *u;
     gc_t g;
@@ -1065,6 +1095,29 @@ static long usergui_syscall_more(proc_t *p, int nr, u64 a1, u64 a2, u64 a3, u64 
         widget_scroll_set(u->w, wd, (int)CLAMP((i64)a3, 0, 1 << 30), (int)CLAMP((i64)a4, 0, 1 << 30),
                           (int)CLAMP((i64)a5, 0, 1 << 30), (int)CLAMP((i64)a6, 1, 1 << 30));
         return 0;
+    }
+    case SYS_DND_BEGIN: {
+        /* win, paths (NUL-separated), len, effects | icon << 8, count */
+        if (!(u = uwin(p, (int)a1)) || (i64)a3 <= 0 || a3 > 256 * 1024 || (i64)a5 <= 0 || a5 > 65536) return E_INVAL;
+        if (mm_heap_free() < GUI_RESERVE + 2 * a3) return E_NOMEM;
+        dnd_job_t j = { u, kmalloc(a3), (int)a3, (int)a5, (int)(a4 & 0xFF), (int)((a4 >> 8) & 0xFFFF), 0 };
+        if (!j.paths) return E_NOMEM;
+        if (copyin(j.paths, a2, a3)) { kfree(j.paths); return E_INVAL; }
+        gui_call(job_dnd_begin, &j);
+        kfree(j.paths);
+        return j.result;
+    }
+    case SYS_DND_ACCEPT:
+        if (!(u = uwin(p, (int)a1))) return E_INVAL;
+        dnd_answer(u->w, (u32)a2, (int)a3, (int)a4);
+        return 0;
+    case SYS_DND_DATA: {
+        int len = 0, count = 0;
+        const char *d = dnd_paths((u32)a1, &len, &count);
+        if (!d) return E_NOENT;
+        u64 n = MIN((u64)len, a3);
+        if (n && copyout(a2, d, n)) return E_INVAL;
+        return len;
     }
     case SYS_CTL_SET_TOOL: {
         /* id, icon (HICON_*, -1 none), tooltip (NULL none; any control) */
