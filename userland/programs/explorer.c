@@ -1104,13 +1104,13 @@ static void columns(int *xs, const char **titles, int *align) {
     static const char *const bin[NCOLS] = { "Name", "Original Location", "Date Deleted", "Size" };
     int w[NCOLS];
     if (binview) {
-        int rest = MAX(240, cwid - 210);
-        w[2] = 130; w[3] = 80;
+        int rest = MAX(240, cwid - 232);
+        w[2] = 152; w[3] = 80;
         w[0] = MAX(120, rest * 45 / 100);
         w[1] = MAX(80, rest - w[0]);
     } else {
-        w[1] = 80; w[2] = 120; w[3] = 130;
-        w[0] = MAX(160, cwid - 330);
+        w[1] = 80; w[2] = 120; w[3] = 152;
+        w[0] = MAX(160, cwid - 352);
     }
     xs[0] = 0;
     for (int i = 0; i < NCOLS; i++) {

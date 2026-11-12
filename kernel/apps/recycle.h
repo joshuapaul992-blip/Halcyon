@@ -80,6 +80,8 @@ void rb_percent_key(char letter, char *out, size_t n);   /* "recycle.percent.<se
 int  rb_enforce(char letter, u64 limit, u32 keep_id);
 /* changes on every change of any bin (the desktop's icon follows it) */
 u32  rb_generation(void);
+/* another thread is working on a bin now (the GUI thread then waits for the next tick) */
+int  rb_busy(void);
 
 /* the stored name of an entry ("D17.txt") */
 void rb_stored_name(const rb_entry_t *e, char *out, size_t n);

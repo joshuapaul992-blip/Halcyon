@@ -16,6 +16,12 @@ static volatile u32 rb_gen = 1;
 
 u32 rb_generation(void) { return rb_gen; }
 
+int rb_busy(void) {
+    if (!mutex_trylock(&rb_lock)) return 1;
+    mutex_unlock(&rb_lock);
+    return 0;
+}
+
 typedef struct rb_index {
     char letter;
     rb_entry_t *e;

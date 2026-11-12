@@ -887,7 +887,7 @@ static int known_letters[26];
 /* the Recycle Bin icon shows whether any bin holds something */
 static void bin_state(void) {
     static u32 seen_gen, seen_vgen = ~0u;
-    if (rb_generation() == seen_gen && vfs_generation() == seen_vgen) return;
+    if ((rb_generation() == seen_gen && vfs_generation() == seen_vgen) || rb_busy()) return;
     seen_vgen = vfs_generation();
     int full = 0;
     for (int i = 0; i < vfs_volume_count() && !full; i++) {
