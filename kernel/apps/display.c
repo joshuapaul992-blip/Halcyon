@@ -609,7 +609,6 @@ int display_ask_native(const char *adapter) {
     w->focus = n;
     gui_run_until(&k.done);
     if (wm_alive(w)) { w->on_close = NULL; w->data = NULL; wm_destroy(w); }
-    kprintf("display: \"%s\": the picture was %s\n", adapter, k.keep ? "confirmed" : "not confirmed");
     return k.keep;
 }
 

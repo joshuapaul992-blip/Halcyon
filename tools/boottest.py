@@ -95,6 +95,14 @@ interrupts on, get a working interrupt:
           on the firmware frame buffer, visible in a screendump
   gpuoff  display.disable=virtio-gpu in SETTINGS.INI: the driver is not
           started, the firmware frame buffer is used
+  guard   the display core's start guard on the virtio GPU (fw_cfg
+          displayguard test hook): the start marker is saved before the
+          driver starts, nobody confirms the picture, so after 15 seconds
+          the driver is given up and the firmware frame buffer comes back;
+          SETTINGS.INI keeps display.virtio-gpu.guard=start
+  guardblock  the same with display.virtio-gpu.guard=start already in
+          SETTINGS.INI (a start that did not finish): the driver is not
+          started, the marker becomes "blocked"
   ntfsrw  an internal SATA disk (one MBR partition of type 7) with an NTFS
           volume made on the host by mkntfs and ntfs-3g (tests/host/
           ntfs_mkimg.py, needs root): it has \\Windows\\System32, so it
@@ -126,7 +134,10 @@ interrupts on, get a working interrupt:
           card and monitor must be logged, then NVREPORT.EXE /quiet runs and
           C:\\HALCYON\\NVREPORT must hold REPORT.TXT (with the frame buffer
           speed test), README.TXT, VBIOS_PROM.ROM and EDID0.BIN equal to
-          what was passed in (mtools on the host)
+          what was passed in (mtools on the host); the modesetting driver
+          (M10b) registers the card and must not touch it (BOOT.LOG says
+          why); with nvoff, nv.modeset=0 in SETTINGS.INI keeps it from
+          registering at all
   recycle the Recycle Bin and drag and drop (QEMU fw_cfg recycletest, a kernel
           thread: kernel/apps/recycletest.c): on the FAT32 test disk a file
           goes to the bin and stays, another goes to the bin, its folder is
@@ -223,10 +234,11 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:vgpu", "xhci:uefi:dual", "xhci:bios:arrange", "xhci:bios:multi", "xhci:bios:gpufail", "xhci:uefi:gpuoff",
           "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:bios:ac97+dusk", "xhci:uefi:hda+tide", "xhci:uefi:virtiosnd", "xhci:bios:audio",
           "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:bios:recycle", "xhci:bios:saver", "xhci:uefi:nvfake",
+          "xhci:bios:nvfake+nvoff", "xhci:bios:guard", "xhci:uefi:guardblock",
           "xhci:uefi:install", "xhci:bios:install"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "help": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "vgpu": 0, "dual": 0, "arrange": 0, "multi": 0, "gpufail": 0, "gpuoff": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0,
-            "recycle": 0, "saver": 0, "nvfake": 0}
+            "recycle": 0, "saver": 0, "nvfake": 0, "nvoff": 0, "guard": 0, "guardblock": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -1372,6 +1384,16 @@ def make_nvfake():
     return rom, edid
 
 
+def guard_failures(img, want):
+    """SETTINGS.INI after a guard test: the marker as it must be"""
+    r = subprocess.run(["mtype", "-i", img + "@@1M", "::/HALCYON/SETTINGS.INI"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                       env=dict(os.environ, MTOOLS_SKIP_CHECK="1"))
+    ini = r.stdout.decode(errors="replace")
+    if "display.virtio-gpu.guard=%s" % want not in ini:
+        return ["SETTINGS.INI lacks display.virtio-gpu.guard=%s" % want]
+    return []
+
+
 def nvfake_failures(text, img, rom, edid):
     fails = []
     out = os.path.join(BUILD, "ci_nvreport")
@@ -1389,7 +1411,7 @@ def nvfake_failures(text, img, rom, edid):
     p = os.path.join(out, "REPORT.TXT")
     if os.path.exists(p):
         rep = open(p, errors="replace").read()
-        for want in ("Card 0: NVIDIA GeForce GTX 1070", "DCB 4.1", "HALCYON TEST", "1920x1200 at 60 Hz",
+        for want in ("Card 0: NVIDIA GeForce GTX 1070", "DCB 4.1", "HALCYON TEST", "1920x1200 at 60 Hz", "Display driver: firmware frame buffer",
                      "RAM to screen copy", "MB/s"):
             if want not in rep:
                 fails.append("REPORT.TXT lacks '%s'" % want)
@@ -1565,9 +1587,27 @@ def run(cfg):
                 f.write("C:/PROGRAMS/GUIDEMO.EXE")
             extra += " -fw_cfg name=opt/halcyon/autorun,file=" + argf
     vnc_thread = None
-    if "vgpu" in opts or "gpufail" in opts or "gpuoff" in opts:
+    if "vgpu" in opts or "gpufail" in opts or "gpuoff" in opts or "guard" in opts or "guardblock" in opts:
         extra += " -vga virtio"
         checks.append(("virtio GPU found", "display: found Virtio GPU (1 output) (virtio-gpu), shows the firmware frame buffer"))
+    if "guard" in opts or "guardblock" in opts:
+        extra += " -fw_cfg name=opt/halcyon/displayguard,string=virtio-gpu"
+        checks.append(("guarded by the test hook", "display: virtio-gpu: guarded (test hook)"))
+    if "guard" in opts:
+        checks.append(("start marker saved", "display: virtio-gpu: start marker saved (display.virtio-gpu.guard=start)"))
+        checks.append(("confirmation asked", "the picture will be confirmed"))
+        checks.append(("nobody confirmed", "display: virtio-gpu: the picture was not confirmed"))
+        checks.append(("driver given up", "(virtio-gpu) failed: turned off: nobody confirmed the picture"))
+        checks.append(("firmware frame buffer back", "monitor 1: Default"))
+    if "guardblock" in opts:
+        checks.append(("blocked by the marker", "(virtio-gpu) not started: its start at the last boot did not finish"))
+        checks.append(("firmware frame buffer kept", "changes apply at the next start"))
+    if "nvoff" in opts:
+        checks.append(("nv.modeset=0", "nv0: native modesetting off (nv.modeset=0 in SETTINGS.INI)"))
+    elif "nvfake" in opts:
+        checks.append(("modesetting registered", "nv0: native modesetting: GP102 display engine (core class 987d), 4 heads, 5 connectors, simulated card"))
+        checks.append(("simulated card not touched", "display: NVIDIA GeForce GTX 1070 (nv) failed: simulated card (QEMU test hook): no registers, native modesetting not attempted"))
+        checks.append(("dry run of a mode set", "nv0: dry run: 1920x1200 at 153500 kHz on head 0, SOR0 DisplayPort: 56 method words (00040448 00000000 ... 00000000)"))
     if "vgpu" in opts:
         checks.append(("virtio GPU in use", "monitor 1: Virtual-1"))
         checks.append(("firmware frame buffer retired", "display: Default: off"))
@@ -1639,6 +1679,10 @@ def run(cfg):
         ini_lines += ["display.width=1280", "display.height=1024"]
     if "gpuoff" in opts:
         ini_lines += ["display.disable=virtio-gpu"]
+    if "guardblock" in opts:
+        ini_lines += ["display.virtio-gpu.guard=start"]
+    if "nvoff" in opts:
+        ini_lines += ["nv.modeset=0"]
     if "arrange" in opts:
         ini_lines += ["display.primary=Virtual-2", "display.virtual-2.width=800", "display.virtual-2.height=600",
                       "display.virtual-2.x=0", "display.virtual-2.y=0", "display.virtual-2.attach=1",
@@ -1705,6 +1749,11 @@ def run(cfg):
         while time.time() - t1 < 30 and p.poll() is None and "format test: " not in text:
             time.sleep(0.5)
             text = open(log, errors="replace").read()
+    if "guard" in opts:
+        wait_log(log, "the picture was not confirmed", 0, 45)
+        wait_log(log, "display: desktop ", text.find("the picture was not confirmed") if "the picture was not confirmed" in text else 0, 10)
+        time.sleep(1)
+        text = open(log, errors="replace").read()
     if "recycle" in opts:
         t1 = time.time()
         while time.time() - t1 < 60 and p.poll() is None and "recycle test: done" not in text:
@@ -1811,6 +1860,8 @@ def run(cfg):
         failures += recycle_failures(text, sata, sata_x)
     if nvfake:
         failures += nvfake_failures(text, img, *nvfake)
+    if "guard" in opts or "guardblock" in opts:
+        failures += guard_failures(img, "start" if "guard" in opts else "blocked")
     if nic:
         failures += net_failures(text, nic, opts)
     if beep:

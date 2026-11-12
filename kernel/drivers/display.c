@@ -38,6 +38,7 @@ static struct {                                /* g_bootinfo's frame buffer as t
 } fwfb;
 
 static char fail_hook[48];                     /* test hook: "<driver>:<step>" */
+static char guard_hook[24];                    /* test hook: a driver to guard (opt/halcyon/displayguard) */
 static int init_done;                          /* display_init finished (later registrations: nv_init) */
 static int fb_in_bars(const pci_dev_t *d, u64 addr);
 
@@ -1054,7 +1055,18 @@ void display_start(void) {
             continue;
         }
         int before = cf.n, px = place_x;
-        if (a->guarded && guard_blocks(a)) continue;
+        if (guard_hook[0] && !strcasecmp(guard_hook, a->driver) && !a->guarded) {
+            /* (the guard on a driver that does not use it itself: marker saved before enable) */
+            a->guarded = 1;
+            kprintf("display: %s: guarded (test hook)\n", a->driver);
+            if (!guard_blocks(a) && display_guard_begin(a)) {
+                a->state = ADAPTER_DISABLED;
+                strlcpy(a->why, "the start marker cannot be saved", sizeof a->why);
+                continue;
+            }
+            if (a->state == ADAPTER_DISABLED) continue;
+        }
+        if (a->guarded && !a->guard_armed && guard_blocks(a)) continue;
         int r = adapter_start(a, &cf, &px);
         if (r) {
             cf.n = before;
@@ -1239,6 +1251,7 @@ void display_init(void) {
     fwfb.pitch = g_bootinfo.fb_pitch; fwfb.bpp = g_bootinfo.fb_bpp;
     fwfb.rp = g_bootinfo.fb_red_pos; fwfb.gp = g_bootinfo.fb_green_pos; fwfb.bp = g_bootinfo.fb_blue_pos;
     if (!qemu_fw_file("opt/halcyon/displayfail", fail_hook, sizeof fail_hook)) fail_hook[0] = 0;
+    if (!qemu_fw_file("opt/halcyon/displayguard", guard_hook, sizeof guard_hook)) guard_hook[0] = 0;
     fwa = display_register("firmware", "Firmware frame buffer (VESA/GOP)", &fw_ops, NULL, fw_fb_device());
     display_head_t *h = display_add_head(fwa, 0, 0);
     display_connector_t *c = display_add_connector(fwa, "Default", CONN_FIRMWARE, 1);
