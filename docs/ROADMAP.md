@@ -92,9 +92,11 @@ interface) and virtio GPU (several outputs, cursor, flips, hotplug). Its
 
 **Status:** the display core, 10a and 10b are done. 10b ran on the GTX 1070
 (DisplayPort, 2560x1440 at 120 Hz); its one bug, a grayscale picture from a
-zero saturation setting, is fixed. Next is the NVIDIA side of 10d. 10e can
-wait: NVREPORT measured 205 frames/s for CPU drawing at 2560x1440 on the
-native driver. 10c stays deferred.
+zero saturation setting, is fixed. The NVIDIA side of 10d (hardware cursor,
+page flips at the vertical blank, several monitors) is written and
+host-tested against the simulated display engine; it awaits the GTX 1070.
+10e can wait: NVREPORT measured 205 frames/s for CPU drawing at 2560x1440
+on the native driver. 10c stays deferred.
 
 Two display engines cover all eight generations, so the work splits by engine:
 
@@ -112,7 +114,10 @@ Two display engines cover all eight generations, so the work splits by engine:
   RAMDAC, with output setup through the video BIOS's init scripts (needs a
   script interpreter). Until then these cards run on the firmware framebuffer
   (VBE) with the M5 features, and 10a still identifies them.
-- **10d:** hardware cursor, page flipping with vblank interrupts, several monitors.
+- **10d:** hardware cursor, page flipping at the vertical blank, several
+  monitors. Written (the base and cursor channels per head, flips and the
+  vertical blank polled, no interrupt path; host-tested, awaiting the GTX
+  1070): see [DESIGN-M10-NVIDIA.md](DESIGN-M10-NVIDIA.md).
 - **10e, optional 2D acceleration** (fill, copy) through the 2D engine:
   - Kelvin to Tesla: no firmware.
   - Fermi, Kepler, first-generation Maxwell: context-switch firmware; nouveau's

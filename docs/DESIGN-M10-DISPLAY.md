@@ -179,7 +179,9 @@ mode for one driver), `display.flip=0` (no page flips),
   `a->guarded`: the NVIDIA one): right before the driver's first register
   write the core saves `display.<driver>.guard=start` in SETTINGS.INI and
   BOOT.LOG. Once the desktop runs on the driver, a configuration (connectors
-  and modes) confirmed before clears the marker after 10 seconds; a new one
+  and modes, and whether each head flips pages and draws the hardware
+  cursor: `DP-1 2560x1440 fc;`) confirmed before clears the marker after 10
+  seconds; a new one
   makes the GUI ask "Halcyon now uses its own driver for the ... Can you
   see this message?" (15 seconds, No is the default): Yes stores it in
   `display.<driver>.confirmed` and clears the marker, anything else gives
@@ -228,8 +230,10 @@ composes its dirty rectangles into `g_screen` as before, then calls
   `g_screen`; the damage accumulates and goes out with the next flip, so a
   head shows complete frames only and at most one per vertical blank.
   `display_service()` (each GUI step) polls the drivers, completes flips,
-  commits again and runs hotplug; a flip that never completes (250 ms) turns
-  the head into a single-buffered one.
+  commits again and runs hotplug; a flip that never completes (250 ms) or
+  fails turns the head into a single-buffered one, on the buffer on screen
+  (it first gets the rectangles it lacks; a driver that gives flips up
+  itself clears `HEAD_CAP_FLIP` and the core does the same).
 - `display_sync()` (shutdown, restart) commits and waits for the flips,
   since the GUI loop stops.
 
@@ -495,9 +499,10 @@ six display variants `vgpu`, `dual`, `arrange`, `multi`, `gpufail`,
 and the host tests (modetest 42 checks + 200,000 random EDIDs, layouttest
 24 checks + 20,000 random arrangements, displaytest 19).
 
-Remaining, besides the list below: the NVIDIA cursor, page flips and
-several monitors (10d; 10b, the modesetting driver, is written against the
-interface above, see DESIGN-M10-NVIDIA.md); `dual+noirq` (hotplug found by
+The NVIDIA driver (10b, 10d) implements the whole interface above:
+cursor, page flips, vertical blank and several heads (see
+DESIGN-M10-NVIDIA.md; 10d has not run on a card yet). Remaining, besides
+the list below: `dual+noirq` (hotplug found by
 polling: the test knows how to check it, it was not run); screenshots for
 the documentation were looked at but are not in the repository.
 

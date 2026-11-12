@@ -8,7 +8,7 @@ GeForce 10 series (see the roadmap). It is built in steps:
 | 10a | Identification: chip, VRAM, video BIOS and its tables, EDIDs over I2C / DP AUX, System Information, NVREPORT | **this document** |
 | 10b | Modesetting on the NV50 "EVO" display engine (Tesla to Pascal) | written, host-tested; awaits the GTX 1070 |
 | 10c | Modesetting on the VGA-style CRTCs (Celsius to Curie) | deferred |
-| 10d | Hardware cursor, page flips with vblank interrupts, several monitors | to do |
+| 10d | Hardware cursor, page flips at vertical blank, several monitors | written, host-tested; awaits the GTX 1070 |
 | 10e | 2D acceleration, if the speed test says it is needed | to decide |
 
 The code lives in `kernel/drivers/nv/`:
@@ -22,6 +22,7 @@ The code lives in `kernel/drivers/nv/`:
 | `nv.h`, `nv.c` | the kernel side: probe, ROM sources, ports and pads, EDIDs, hot-plug sense; the API for 10b | QEMU test hook only |
 | `report.c` | BOOT.LOG lines, the report text and register dump, System Information rows, `SYS_NV_QUERY` and the frame buffer speed test | QEMU (`nvfake`) |
 | `evo.h`, `evo.c`, `evodp.c`, `evopll.c`, `evoscript.c`, `disp.c` | 10b: the EVO display engine and the modesetting driver (below) | `tests/host/evotest.c`; `disp.c` in QEMU (`nvfake`) |
+| `evochan.c` | 10d: base and cursor channels, the vertical blank, output resources for several heads | `tests/host/evotest.c` |
 
 ![System Information with the QEMU test hook's simulated GTX 1070](m10a-sysinfo.png)
 
@@ -543,6 +544,7 @@ enables are set as nouveau sets them, so that its status register latches
 the supervisor requests the update loop polls; everything else (channel
 completion, vertical blank, errors) is off and polled from status
 registers. AUX transactions and I2C are therefore always allowed in 10b.
+10d keeps this: no interrupt path (see "10d: interrupts").
 
 ### Safety
 
@@ -697,8 +699,8 @@ connector and monitor (with its resolution), and what the screen did.
 
 ### Not done (10b)
 
-- Hardware cursor, page flips, vertical blank, several monitors at once
-  (10d; a second head would use the same code, untested).
+- Hardware cursor, page flips, vertical blank, several monitors at once:
+  10d (below).
 - HDMI mode (infoframes, audio, scrambling above 340 MHz): HDMI sinks get
   a DVI-mode signal. LVDS / eDP panels, TV outputs, external encoders
   (PIOR), MST, LTTPRs, eDP link rate tables, DisplayPort retraining after
@@ -712,7 +714,327 @@ connector and monitor (with its resolution), and what the screen did.
 
 ## 10d: cursor, page flips, several monitors
 
-(to be written)
+10d gives every head of the EVO driver what the display core already
+offers on the virtio GPU: a **hardware cursor**, **tear-free page flips**
+completing at the vertical blank, **vertical blank waits**, and **several
+monitors at once**, each on its own head with its own output resource,
+video PLL and DisplayPort link. It is ported from nouveau (MIT): the base
+and cursor channels of `dispnv50` (`base507c.c`, `base827c.c`,
+`base907c.c`, `curs507a.c`, `wndw.c`), the cursor and base usage bounds in
+the core channel (`head507d.c` ... `head917d.c`), the channel bring-up of
+`nvkm/engine/disp` (`nv50.c`, `gf119.c`, `gp102.c`, `chan.c`), the
+scanline position (`nv50_head_rgpos`) and the output resource choice
+(`outp.c`). The hardware logic is in `evochan.c` (host-tested like the rest
+of the EVO code); `disp.c` uses it. Every feature degrades to the 10b
+behaviour on its own: single-buffered scanout from the core channel, the
+software cursor, one head.
+
+### Channels
+
+Besides the core channel, each head has two channels of its own:
+
+| Channel | Classes (by generation) | Ids: control / user | What it does |
+|---------|-------------------------|---------------------|--------------|
+| base (DMA, push buffer) | 507c (G80), 827c (G84), 837c (G94, GT200, MCP77), 857c (GT215, MCP89, GF100-GF116), 907c (GF119), 917c (GK104), 927c (GK110 to GP108) | 1 + head / 1 + head | the head's primary surface: page flips |
+| cursor (PIO, immediate) | 507a (G80), 827a (G84-MCP77), 857a (GT215-GF116), 907a (GF119), 917a (GK104 to GP108) | NV50 family 7 + head / 7 + head; GF119 to GP100 13 + head / 13 + head; GP102+ 13 + head / **17** + head | the cursor's position |
+
+The control register is `0x610200` (NV50 family) or `0x610490` (GF119+) +
+ctrl x 0x10; the push buffer registers `0x610204` / `0x610494` /
+`0x611494` (GP102) + ctrl x 0x10; PUT / GET or the PIO window at
+`0x640000 + user x 0x1000`. A channel's errors are bit `user` of `0x61009c`
+(registers at `0x6101f0` / `0x6111f0` + user x 12) or bit `16 + user` of
+`0x610020` (`0x610080` + user x 8), polled; its error reporting is enabled
+as nouveau does (`0x6100a0` / `0x610028`), saved and put back by release.
+
+**Bring-up** (`nv_evo_base_start`, `nv_evo_curs_start`), after the takeover,
+for every registered head:
+
+- base: two context DMAs bound to the channel in the object table (the
+  notifier page and all of VRAM; objects at `0x1040 + head x 0x40`, the
+  channel's id in the hash and the context word), a firmware channel that
+  runs is stopped first, error reporting on, the push buffer (4 KiB in VRAM)
+  at `ctrl` + 4 / 8 / 12, PUT 0, control `0x13`, wait for bit 31 to clear,
+  then the LUT methods (base and output LUT off, the LUT context DMA 0, the
+  colour space conversion owned by the core: `base*_xlut_clr`,
+  `base907c_csc_clr`) and GET = PUT;
+- cursor: a firmware channel stopped, error reporting on, on the NV50
+  family `0x2000` (out of reset) and bits 17:16 clear, then `0x1` and
+  bits 17:16 = 1.
+
+Every wait is 200 ms (nouveau: 2 s). One base channel that does not start
+turns page flips off on every head; one cursor channel the hardware cursor
+(a mixed desktop gains nothing); BOOT.LOG says which and why. The VRAM for
+them is in the 2 MiB block of 10b: base push buffers at +72 KiB (4 KiB per
+head), cursor images at +128 KiB (two 16 KiB images per head).
+
+### Page flips
+
+In a mode set the head's **base usage bounds** say the base channel may
+show 32 bpp surfaces (`0x301`; 917d also BASE_LUT USAGE_1025: `0x20301`);
+the core layer shows the mode's first buffer as in 10b, and the base layer
+starts off. `flip` queues on the head's base channel (base*_ntfy_set,
+base*_image_set, base507c_update, not interlocked with the core):
+
+```
+SET_NOTIFIER_CONTROL      offset of the slot in the notifier page   (0x00A0, with CONTEXT_DMA_NOTIFIER)
+SET_PRESENT_CONTROL       0x10: BEGIN_MODE NON_TEARING, MIN_PRESENT_INTERVAL 1
+SET_CONTEXT_DMA_ISO       the VRAM context DMA
+(507c / 827c)             SET_PROCESSING, SET_CONVERSION = 0
+SURFACE_SET_OFFSET        VRAM offset >> 8         (507c: 0x0800 x1 + 0x0808 x3; 827c: 0x0800 x5; 907c+: 0x0400 x5)
+SURFACE_SET_SIZE          height << 16 | width
+SURFACE_SET_STORAGE       PITCH layout, pitch / 256 (bit 20 or 24)
+SURFACE_SET_PARAMS        0xCF00 (A8R8G8B8)
+UPDATE                    0
+```
+
+The notifier slots are nouveau's (`0x40` per channel after the core's,
+`+0x20` and `+0x30` used in turn, reset to NOT_BEGUN before each image).
+**Completion** is polled from `poll`: the slot's status (bits 31:30) BEGUN
+or FINISHED and the channel's GET equal to its PUT; then
+`display_flip_done`. There is no interrupt: `flip` asks the idle loop to
+wake at the expected vertical blank (from the scanline position) + 1 ms,
+and `poll` asks again every millisecond while a flip is pending.
+
+**When flips end on a head** (a channel error, a flip that does not
+complete within four frames, at least 100 ms and at most 200 ms, before
+the display core's 250 ms, or a flip that cannot be queued): the base layer
+is switched off (bounded, 50 ms) and its channel stopped, the core layer is
+pointed at the buffer the display core takes as the front one (with the
+cursor re-specified: EVO refuses a new ISO surface with an active cursor
+otherwise), and `HEAD_CAP_FLIP` is cleared: the display core then
+single-buffers on that buffer (the display core gained that: a head whose
+flips were given up used to keep flipping). Before every mode set and head
+off the base layer is switched off (100 ms); if it does not go off, flips
+end on that head and the mode set goes on.
+
+### The hardware cursor
+
+64 x 64 A8R8G8B8 on every EVO generation (no 32 x 32-only chip is in
+range). Two images per head in VRAM: a new shape goes into the slot not on
+screen and the core channel is pointed at it (no tearing); an unchanged
+shape is not uploaded again. Shown and hidden through the core channel
+(`HEAD_SET_CONTROL_CURSOR` = `0x85000000` / `0x05000000`,
+`HEAD_SET_OFFSET_CURSOR`, and `HEAD_SET_CONTEXT_DMA_CURSOR` on 827d and
+later; 507d fetches it through the head's ISO context DMA), one core update
+each (no supervisor, about one frame). The position goes through the cursor
+channel: `FREE` (bits 5:0) at least 4 within 1 ms, then
+`SET_CURSOR_HOT_SPOT_POINT_OUT` (`0x84`: the image's top left, signed 16-bit
+x and y, so a hot spot near the left or top edge gives negative values the
+hardware clips) and `UPDATE` (`0x80`). The display core's position is the
+hot spot's; the driver subtracts the hot spot (as the virtio driver's
+device does). A move the channel has no room for is dropped and counted;
+100 in a row, an image that does not reach VRAM or a core update that fails
+turn the hardware cursor off on every head (the display core draws the
+software cursor). The display core shows the cursor on the head under the
+hot spot and hides it on the others.
+
+### The vertical blank
+
+`wait_vblank` reads the head's scanline position (`0x616340 + head x
+0x800`, as nouveau's `nv50_head_rgpos` on every EVO generation) against the
+armed raster (in the blank: line >= blank start or <= blank end): out of the
+blank if it is in it, then into the next one; bounded by the caller's limit
+(50 ms) and two frames; a counter that stays on one line for four lines'
+time plus 1 ms ends the wait (`E_TIMEOUT`, logged), a register reading all
+ones or a PRI error at once. Three failures in a row clear
+`HEAD_CAP_VBLANK`. The display core does not call it today; it is there for
+the interface and for the flip wake-up estimate (`nv_evo_us_to_vblank`).
+
+### Interrupts: none (the decision)
+
+10d adds **no interrupt path** and no `nv.irq` setting. Reasons: Halcyon's
+interrupts only wake, and polling must be correct anyway; the flip
+completion is polled with a wake-up scheduled at the expected vertical blank
+from the scanline counter, so its latency is the same as an interrupt's
+(within about 1 ms); an interrupt handler for a GPU that can only be tested
+on the user's card risks an interrupt storm (PMC's leaf interrupts, the
+display engine's vblank, completion and supervisor bits all need the right
+acknowledgement, and GP100+ routes them differently) on a machine where
+nothing can be watched; and 10b's guarantees (INTx off, `PMC_INTR_EN` = 0)
+stay as they are, so the AUX / I2C rules of 10a and 10b need no change. A
+later step can add an MSI path that only wakes the GUI thread, with polling
+staying the correctness path.
+
+### Several monitors
+
+Every head the engine has (`0x612004` / `0x022448`, two before GF119) is
+registered, up to `nv.heads`; a head whose video PLL the VBIOS PLL table
+lacks (when the table has VPLL0) is skipped. The display core assigns heads
+(the primary's first, then connector order, each connector's heads from the
+DCB); the driver picks the **output resource** for a head
+(`nv_evo_pick_or`, nouveau's `nvkm_outp_acquire`):
+
+- DACs and, before GM200, SORs are the DCB output's own: one another head
+  uses is refused ("SOR0 already drives DCB output 1 on head 0 (the outputs
+  share it)");
+- from GM200 on SORs are routed to pad macros: a macro's sub-link that
+  another head's output uses is refused (on the GTX 1070 the DisplayPort and
+  HDMI outputs of one connector share macro and link; DP-1 and DP-2 share
+  macro 2 on links B and A, so both can be lit), then the SOR already
+  routed to the output, a free one, one only the firmware used;
+- the pixel clock: at most what the generation's fastest output carries
+  per head (DisplayPort 4 lanes at its top rate at 24 bpp, dual-link TMDS,
+  the DAC: 400 MHz on Tesla, 720 MHz Fermi GF119 to Maxwell, 1080 MHz on
+  Pascal; modes above it are not offered), and the heads together within
+  heads x that (nouveau has no tighter limit, and neither do we);
+- each head has its video PLL (VPLL0 + head) and each DisplayPort output its
+  own link training (its SOR's DP state).
+
+A monitor that cannot be lit (more monitors than heads, a shared resource,
+too fast) makes that head's mode set fail with the reason in BOOT.LOG; the
+display core keeps the others (at start) or goes back to the previous
+configuration (Display Properties, hotplug). Hotplug is 10b's: the hot-plug
+lines polled once a second, `display_hotplug`, the display core re-runs
+detect and extends the desktop onto the new monitor (or at its saved
+place). The arrangement and the saved configuration are the display core's
+(`display.<connector>.*`). The start guard keeps its rules: a
+configuration not confirmed before asks "Can you see this message?" at the
+start; a second monitor plugged in while running is not asked about until
+the next start. The configuration's signature now also says whether each
+head flips pages and draws the hardware cursor (`DP-1 2560x1440 fc;`), so
+the first start with 10d asks once even where 10b's configuration was
+confirmed.
+
+`nv_evo_plan` places a list of wanted outputs the same way (for the host
+tests and the simulated card's log).
+
+### Restore
+
+`restore` first switches every base layer off and stops every base and
+cursor channel (bounded), then does what 10b does (the firmware's mode
+again if its frame buffer is in BAR1, else the heads off; the saved
+registers back, the error reporting enables included). The open question of
+the GTX 1070's "firmware frame buffer not in BAR1" is not touched.
+
+### Switches and logs
+
+- `nv.flip=0`: no page flips (single-buffered scanout from the core
+  channel, as 10b);
+- `nv.hwcursor=0`: the software cursor;
+- `nv.heads=N`: at most N heads registered, so at most N monitors lit
+  (`nv.heads=1`: one monitor, as 10b);
+- the 10b switches (`nv.modeset=0`, `nv.scripts=0`, `nv.disable=1`,
+  `display.disable=nv`, `display.flip=0` and `display.hwcursor=0` of the
+  display core) work as before.
+
+BOOT.LOG (`nv0:`) has the 10d registration ("10d: hardware cursor on
+(cursor channel 917a, 64x64), page flips on (base channel 927c), vertical
+blank polled; 4 of 4 heads; a head drives up to 1080000 kHz"), each
+channel's start (ids, push buffer, notifiers, image addresses) or why it
+failed, the first flip queued and completed (with the time it took), every
+fallback with its reason, and each head's mode set. NVREPORT adds, per head,
+the base and cursor channels' control and push registers, PUT / GET or
+FREE while they run and the scanline, and a "Heads" section: the settings,
+each head's capabilities, images shown, flips completed, channel errors,
+cursor updates, dropped moves, failed vertical blank waits, and why a
+feature is off.
+
+On the simulated card (`nvfake`) nothing is started; BOOT.LOG has dry runs
+of a page flip (15 base methods), the cursor (10 core methods and the
+position register) and a monitor on every connector (four of five lit,
+the fifth without a head), and says that no channel was started and no
+scanline read.
+
+### Tests
+
+- `tests/host/evotest.c` (45,505 checks with 10b's): the classes and
+  channel ids of every generation; the 507c, 827c / 837c and 907c / 927c
+  image, image-off and LUT / CSC streams, the 507d, 827d and 907d / 917d
+  cursor on / off streams, the base usage bounds in mode sets and the core
+  layer with the cursor, word for word against nouveau; on the simulated
+  engine (now with base and cursor channels, per-channel handles, images
+  armed and notified at the head's vertical blank, a scanline counter
+  driven by simulated time, core updates without the supervisor) for the
+  eleven chips: every head's channels started (push register, error
+  reporting, handles resolving for the channel), a 1080p mode with the base
+  bounds, flips that complete at the vertical blank and not before, 30
+  flips one per frame (the push buffer wraps), vertical blank waits that end
+  at the blank's first line and the next blank one frame later, the cursor
+  (64 x 64 and a padded 32 x 32 image, on without a supervisor round,
+  positions off the top left and at the bottom right), a second monitor on
+  head 1 with its own output resource, PLL and flips, the base layer off,
+  every channel stopped, release; the hangs: a base channel that never
+  starts or never fetches (given up within the limit, error reporting off
+  again), a firmware base channel that runs, a notifier never written (the
+  flip stays pending, removing it times out within 50 ms, the channel stops
+  anyway), base channel errors (both layouts), a cursor channel that never
+  starts or never has room (a move dropped within 1 ms), a scanline counter
+  stuck in and out of the blank, heads without a raster, a dead card, no
+  VRAM for the channels; several monitors: the GTX 1070's DCB (DP-1 and
+  DP-2 on SOR2 and SOR0, a connector's DP and HDMI refused, four monitors,
+  a fifth without a head, `nv.heads=1`, 1.2 GHz refused, four heads at
+  1 GHz), shared SORs and DACs on GF119 / GK104 / GM107, no DAC on GP100,
+  two heads on the Tesla and GF10x chips, a VBIOS without VPLL1, and 3,000
+  random plans on every chip (never two monitors on one head or OR, never
+  more than the heads).
+- QEMU: `nvfake` (BIOS and UEFI) checks the 10d registration, the dry runs
+  and the heads' section of REPORT.TXT; `nvfake+nvset` checks `nv.flip=0`,
+  `nv.hwcursor=0` and `nv.heads=1`.
+
+### What to check on the GTX 1070 (10d)
+
+The LG at 2560x1440 runs at 120 Hz, the EDID's preferred timing: the
+display core offers one timing per size. Its 144 and 165 Hz timings (604
+and 679 MHz) would fit DisplayPort at 4 x 8.1 GHz and the Pascal head
+limit, but cannot be chosen until the display core offers refresh rates.
+
+1. Boot from the stick (UEFI). The desktop should come up as with 10b,
+   and Halcyon asks "Can you see this message?" once more: the start
+   guard's configuration now includes whether each head flips pages and
+   draws the cursor (`DP-1 2560x1440 fc`), so the 10b confirmation does not
+   cover it. Click **Yes**. If the picture is broken or dark, do nothing:
+   after 15 seconds the firmware's picture comes back, and the driver stays
+   off until **Turn on driver...**; then try `nv.flip=0` and
+   `nv.hwcursor=0`.
+2. **Cursor**: move the mouse; it should look as before but cost nothing to
+   draw (System Information, Display: "hardware cursor in use"). Watch the
+   left and top edges: the arrow should slide off them, not stop. Shapes
+   (the text I-beam over Notepad, resize arrows on a window edge) should
+   change at once.
+3. **Page flips**: drag a window around quickly: no tearing (no horizontal
+   seam). BOOT.LOG should have "head 0: first page flip completed after N
+   ms" and System Information "page flips" counting up.
+4. **Second monitor**, if you have one: plug it into another DisplayPort
+   (or HDMI / DVI) while Halcyon runs; within a second or two the desktop
+   should extend onto it. Try Display Properties (arrange, primary,
+   resolution per monitor), then restart: Halcyon asks "Can you see this
+   message?" once for the two-monitor configuration.
+5. If something is wrong, narrow it down with one switch at a time in
+   `\HALCYON\SETTINGS.INI`: `nv.flip=0` (no page flips), `nv.hwcursor=0`
+   (software cursor), `nv.heads=1` (one monitor). If the screen stays dark,
+   10b's rules apply (wait 15 s; at the next start the driver stays off).
+
+Send back: `\HALCYON\BOOT.LOG`, `BOOTPREV.LOG`, the NVREPORT folder (run
+`NVREPORT` again while the desktop runs on the driver: its "Heads" section
+and the per-head channel registers are what is needed), which connectors
+and monitors, and what the cursor, a fast window drag and the second
+monitor did.
+
+### Verified only on the host (10d)
+
+Everything above that touches the card: whether the base channel's notifier
+says BEGUN at the vertical blank as nouveau relies on, whether the core
+layer under an opaque base layer is invisible (nouveau puts a dummy surface
+there; we put the first buffer), the cursor channel ids on GP102 (user 17),
+the cursor position semantics near the edges, the scanline register's
+behaviour (nouveau reads it for timestamps only), routing a second SOR on
+the GTX 1070's shared pad macro, and two DisplayPort links trained one
+after the other. Each failure has a fallback, but none of it has run on a
+card.
+
+### Not done (10d)
+
+- An interrupt path (above).
+- The cursor across a seam between two monitors shows on one head only
+  (the display core's limit, as with virtio).
+- Interlocked updates (the base and core channels together, as nouveau's
+  atomic commits): a mode set switches the base layer off first and the
+  next flip brings it back, so the first frame after a mode set is the core
+  layer's buffer.
+- Overlays, gamma / LUTs, 30-bit surfaces, cursor sizes above 64, MST.
+- A smarter head assignment than the display core's order (an output
+  limited to one head may find it taken).
+
 
 ## 10e: 2D acceleration
 

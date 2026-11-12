@@ -299,16 +299,18 @@ Halcyon draws on every graphics card through the frame buffer the firmware
 set up (VESA on a BIOS, GOP on UEFI). For NVIDIA cards a native driver is
 being written (milestone M10): its first step (10a) **identifies** the card
 and reads, never changes, what is on screen; the second (10b) **sets modes**
-on cards from the GeForce 8 to the GeForce 10 series. "Tested" below means
+on cards from the GeForce 8 to the GeForce 10 series, and 10d adds the
+**hardware cursor, page flips** and **several monitors** there. 10b has run
+on a GTX 1070; 10d has not run on a real card yet. "Tested" below means
 with generated video BIOS images and simulated I2C / DisplayPort buses and a
 simulated display engine on the host (`tests/host/nvtest.c`, `evotest.c`)
-and a simulated card in QEMU; no real NVIDIA card has run this code yet.
+and a simulated card in QEMU.
 
 | Generation | Cards | Identified | Video BIOS read from | Monitors (EDID) | Native modesetting |
 |------------|-------|------------|----------------------|-----------------|--------------------|
 | Celsius, Kelvin, Rankine, Curie (NV1x-NV4x, G7x) | GeForce 256 to GeForce 7 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C through the CRTC registers (C51: its own I2C) | Deferred (M10c) |
-| Tesla (G80-GT21x, MCP7x) | GeForce 8, 9, 200, 300 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C ports; DisplayPort AUX from G94 on | Written (M10b), untested: VGA, DVI (dual link), DisplayPort from G94 |
-| Fermi, Kepler, Maxwell, Pascal | GeForce 400 to GeForce 10 | Yes (untested; the GTX 1070 is the test card) | PRAMIN, PROM (with IFR data), ROM BAR, C0000 | I2C ports, hybrid pads, DisplayPort AUX (GM200 layout from GM20x) | Written (M10b), untested: DisplayPort, DVI / HDMI (DVI-mode signal), VGA up to Maxwell |
+| Tesla (G80-GT21x, MCP7x) | GeForce 8, 9, 200, 300 | Yes (untested) | PRAMIN, PROM, ROM BAR, C0000 | I2C ports; DisplayPort AUX from G94 on | Written (M10b, M10d), untested: VGA, DVI (dual link), DisplayPort from G94; cursor, page flips, two monitors |
+| Fermi, Kepler, Maxwell, Pascal | GeForce 400 to GeForce 10 | Yes (untested; the GTX 1070 is the test card) | PRAMIN, PROM (with IFR data), ROM BAR, C0000 | I2C ports, hybrid pads, DisplayPort AUX (GM200 layout from GM20x) | M10b runs on the GTX 1070 (DisplayPort); otherwise written, untested: DVI / HDMI (DVI-mode signal), VGA up to Maxwell. M10d written, untested: cursor, page flips, up to four monitors (two before GF119) |
 | Volta, Turing and later | Titan V, GeForce 16, RTX | Named only: "Turing or later: not supported until Halcyon 1.1" | - | - | - |
 
 What it finds is in System Information (an "NVIDIA graphics" book with the
@@ -362,6 +364,21 @@ picture (the card is still identified), `nv.scripts=0` runs no video BIOS
 display scripts (one try if a connector stays dark), `display.disable=nv`
 leaves the driver off, `display.nv.guard=` (empty) or **Turn on driver...**
 in Display Properties turns it on again after a start that did not finish.
+
+**Then the cursor, page flips and a second monitor (M10d)**, on the native
+driver: the mouse pointer is drawn by the card (it should slide off the
+left and top edges of the screen, and change shape at once), windows
+dragged quickly should not tear, and a second monitor plugged into another
+connector while Halcyon runs should extend the desktop within a second or
+two (then Display Properties arranges them; the next start asks "Can you
+see this message?" once for the new configuration). To narrow a problem
+down, one switch at a time: `nv.flip=0` (no page flips: one buffer per
+monitor, as M10b), `nv.hwcursor=0` (the software cursor), `nv.heads=1`
+(one monitor, as M10b). Send back the same files as above; run `NVREPORT`
+while the desktop runs on the driver, since its REPORT.TXT then has a
+"Heads" section and each head's channel registers. The details are in
+[DESIGN-M10-NVIDIA.md](DESIGN-M10-NVIDIA.md) ("What to check on the GTX
+1070 (10d)").
 
 What may go wrong: the register addresses come from nouveau (Linux's
 open-source driver) and are used the way it uses them, but nothing here has

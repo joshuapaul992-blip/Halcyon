@@ -91,6 +91,14 @@ driver...</b> tries it again at the next start. To keep using the firmware's
 picture for good, add <code>nv.modeset=0</code> to
 <code>\HALCYON\SETTINGS.INI</code> (Halcyon still lists the card in System
 Information); <code>nv.disable=1</code> leaves the card alone altogether.</p>
+<p>On these cards the driver also lets the card draw the mouse pointer,
+shows each new picture only between two screen refreshes (no tearing when
+you drag a window), and drives up to four monitors at once (two on most
+older cards), one per connector. If the pointer, the picture or a second
+monitor misbehaves, one of these lines in <code>\HALCYON\SETTINGS.INI</code>
+narrows it down: <code>nv.hwcursor=0</code> (Halcyon draws the pointer
+itself), <code>nv.flip=0</code> (no waiting for the refresh),
+<code>nv.heads=1</code> (one monitor only).</p>
 
 <p><b>Related topics:</b> <a href="control.htm">Changing the theme and wallpaper</a> &middot;
 <a href="windows.htm">Working with windows</a></p>
