@@ -5,7 +5,9 @@
 # built with xorriso). Also the keyboard layouts (kbdtest.c: kernel/drivers/
 # keymap.c and keylayouts.c), the USB HID report descriptor parser and report
 # decoder (kernel/usb/hidparse.c, hidtest.c), and the EDID parser and the
-# loaders' video mode choice (displaytest.c), and the HD Audio codec layer
+# loaders' video mode choice (displaytest.c), the display timings and mode
+# lists (modetest.c: kernel/drivers/modes.c), the monitor arrangement math
+# (layouttest.c: kernel/gui/layout.c), and the HD Audio codec layer
 # (kernel/sound/drivers/hda_codec.c against synthetic codecs, hdatest.c),
 # and the NTFS formatter (kernel/fs/ntfs_mkfs.c, ntfsfmt.c): volumes of many
 # sizes, sector and cluster sizes checked with ntfsfix, ntfsinfo, the
@@ -196,6 +198,19 @@ $(OUT)/displaytest: displaytest.c $(ROOT)/kernel/drivers/edid.c $(ROOT)/kernel/d
 	@mkdir -p $(OUT)
 	gcc $(CFLAGS) -I$(ROOT)/boot displaytest.c $(ROOT)/kernel/drivers/edid.c -o $@
 
+$(OUT)/modetest: modetest.c $(ROOT)/kernel/drivers/modes.c $(ROOT)/kernel/drivers/modes.h Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) modetest.c $(ROOT)/kernel/drivers/modes.c -o $@
+
+$(OUT)/layouttest: layouttest.c $(ROOT)/kernel/gui/layout.c $(ROOT)/kernel/gui/layout.h $(ROOT)/kernel/gui/rect.h Makefile
+	@mkdir -p $(OUT)
+	gcc $(CFLAGS) layouttest.c $(ROOT)/kernel/gui/layout.c -o $@
+
+display: $(OUT)/displaytest $(OUT)/modetest $(OUT)/layouttest
+	$(OUT)/displaytest
+	$(OUT)/modetest
+	$(OUT)/layouttest
+
 hid: $(OUT)/hidtest
 	$(OUT)/hidtest $(HIDARGS)
 
@@ -207,8 +222,7 @@ $(OUT)/hdatest: $(HDASRCS) $(ROOT)/kernel/sound/drivers/hda.h $(wildcard $(ROOT)
 hda: $(OUT)/hdatest
 	$(OUT)/hdatest $(HDAARGS)
 
-test: $(OUT)/fstest $(OUT)/displaytest hid hda
-	$(OUT)/displaytest
+test: $(OUT)/fstest display hid hda
 	@rm -rf $(OUT)/work && mkdir -p $(OUT)/work
 	$(OUT)/fstest $(OUT)/work $(ARGS)
 
