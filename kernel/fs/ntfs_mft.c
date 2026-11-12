@@ -835,21 +835,55 @@ int nt_attr_read(nino_t *ino, u32 type, const u16 *name, u8 nlen, u64 pos, u32 l
 /* ------------------------------------------------------------------ */
 /* the attribute list (writes)                                          */
 
+/* write the attribute list (ino->al) back: it is always in the base record
+ * (and never listed in itself); a non-resident list gets or gives back
+ * clusters as its length changes */
 static int al_store(nino_t *ino) {
-    actx_t c;
-    if (ino->al_nonres) return E_NOTSUP;
-    int r = nt_attr_find(ino, &c, NTFS_AT_ATTRIBUTE_LIST, NULL, 0);
-    if (r) return r == E_NOENT ? E_IO : r;
-    ntfs_attr_t *a = ac_attr(&c);
-    if (c.rec != ino->base || a->non_resident) { nt_actx_done(&c); return E_IO; }
-    r = nt_rec_attr_resize(ino->fs, c.rec, c.off, a->r.value_offset + ino->al_len);
-    if (!r) {
-        a = ac_attr(&c);
+    ntfs_t *fs = ino->fs;
+    u32 pos = 0, off;
+    ntfs_attr_t *a;
+    int r;
+    while ((r = nt_rec_walk(fs, ino->base, &pos, &off, &a)) == 1)
+        if (a->type == NTFS_AT_ATTRIBUTE_LIST) break;
+    if (r != 1) return E_IO;
+    if (!a->non_resident) {
+        r = nt_rec_attr_resize(fs, ino->base, off, a->r.value_offset + ino->al_len);
+        if (r) return r;
+        a = (ntfs_attr_t *)(ino->base->buf + off);
         a->r.value_length = ino->al_len;
         memcpy(attr_value(a), ino->al, ino->al_len);
-        c.rec->dirty = 1;
+        ino->base->dirty = 1;
+        return 0;
     }
-    nt_actx_done(&c);
+    nrl_t rl = { 0 }, tail = { 0 };
+    if (a->nr.lowest_vcn || (r = nrl_decode(fs, a, &rl))) { nrl_free(&rl); return r ? r : E_IO; }
+    u64 have = nrl_vcns(&rl), need = ((u64)ino->al_len + fs->csize - 1) >> fs->cshift;
+    if (!need) need = 1;
+    if (need > have && (r = nt_clus_alloc(fs, need - have, fs->alloc_hint, 0, &rl, (i64)have))) { nrl_free(&rl); return r; }
+    for (u32 i = 0; i < rl.n && !r; i++) {
+        u64 s = (u64)rl.r[i].vcn, e = s + rl.r[i].len, lim = MIN(have, need);
+        if (e <= lim || rl.r[i].lcn < 0) continue;
+        u64 f = MAX(s, lim);
+        r = nrl_add(&tail, (i64)f, rl.r[i].lcn + (i64)(f - s), e - f);
+    }
+    if (need < have) nrl_truncate(&rl, need);
+    if (!r) r = nt_runs_rw(fs, &rl, 0, ino->al_len, ino->al, 1);
+    int mplen = nrl_encode(&rl, 0, (i64)need, NULL, 0x7FFFFFFF);
+    u32 mpoff = a->nr.mapping_pairs_offset;
+    if (!r) r = nt_rec_attr_resize(fs, ino->base, off, mpoff + (u32)mplen);
+    if (!r) {
+        a = (ntfs_attr_t *)(ino->base->buf + off);
+        nrl_encode(&rl, 0, (i64)need, (u8 *)a + mpoff, a->length - mpoff);
+        a->nr.highest_vcn = (i64)need - 1;
+        a->nr.allocated_size = (i64)(need << fs->cshift);
+        a->nr.data_size = a->nr.initialized_size = ino->al_len;
+        ino->base->dirty = 1;
+        if (need < have) nt_clus_free_runs(fs, &tail, 0);
+    } else if (need > have) {
+        nt_clus_free_runs(fs, &tail, 0);
+    }
+    nrl_free(&rl);
+    nrl_free(&tail);
     return r;
 }
 
@@ -963,9 +997,55 @@ int nt_attr_set_resident(nino_t *ino, u32 type, const u16 *name, u8 nlen, const 
     return r;
 }
 
-/* add a resident attribute to the base record */
+/* put attribute a into an extension record with room for it (one the file
+ * has, or a new one) and list it */
+static int ext_insert(nino_t *ino, const ntfs_attr_t *a) {
+    ntfs_t *fs = ino->fs;
+    fblk_t *b = NULL;
+    u32 off;
+    int r;
+    for (u32 o = 0; o < ino->al_len && !b;) {
+        ntfs_attr_list_entry_t *e = (ntfs_attr_list_entry_t *)(ino->al + o);
+        o += e->length;
+        u64 rec = NTFS_MREF(e->mft_reference);
+        if (rec == ino->rec || nt_rec_get(fs, rec, &b)) continue;
+        ntfs_mft_record_t *m = fb_rec(b);
+        if (!(m->flags & NTFS_MFT_IN_USE) || NTFS_MREF(m->base_record) != ino->rec ||
+            nt_rec_free_space(b) < a->length + 8) {
+            nt_fb_put(fs, b);
+            b = NULL;
+        }
+    }
+    u64 newrec = 0;
+    if (!b) {
+        if ((r = nt_mft_alloc(fs, &newrec))) return r;
+        u16 seq = 1;
+        if (!nt_rec_get(fs, newrec, &b)) {
+            if (fb_rec(b)->flags & NTFS_MFT_IN_USE) { nt_fb_put(fs, b); nt_corrupt(fs, "a free MFT record is in use", newrec); return E_IO; }
+            seq = fb_rec(b)->sequence ? fb_rec(b)->sequence : 1;
+            nt_fb_put(fs, b);
+        }
+        if ((r = nt_rec_get_fresh(fs, newrec, &b))) { nt_mft_free(fs, newrec); return r; }
+        nt_rec_init(fs, b, newrec, seq, NTFS_MFT_IN_USE);
+        fb_rec(b)->base_record = NTFS_MK_MREF(ino->rec, ino->seq);
+    }
+    r = nt_rec_attr_insert(fs, b, a, &off);
+    if (!r) {
+        r = al_add(ino, b, (ntfs_attr_t *)(b->buf + off));
+        if (r) nt_rec_attr_remove(fs, b, off);
+    }
+    if (r && newrec) {
+        fb_rec(b)->flags = 0;
+        b->dirty = 1;
+        nt_mft_free(fs, newrec);
+    }
+    nt_fb_put(fs, b);
+    return r;
+}
+
+/* add a resident attribute to the base record (an extension record when
+ * the file has an attribute list and the base record is full) */
 int nt_attr_add_resident(nino_t *ino, u32 type, const u16 *name, u8 nlen, const void *val, u32 len, u8 rflags) {
-    if (ino->al_nonres) return E_NOTSUP;
     u32 noff = NTFS_ATTR_RESIDENT_HDR, voff = ALIGN_UP(noff + 2u * nlen, 8u);
     u32 total = ALIGN_UP(voff + len, 8u);
     u8 *buf = kzalloc(total);
@@ -982,6 +1062,12 @@ int nt_attr_add_resident(nino_t *ino, u32 type, const u16 *name, u8 nlen, const 
     memcpy(buf + voff, val, len);
     u32 off;
     int r = nt_rec_attr_insert(ino->fs, ino->base, a, &off);
+    if (r == E_NOSPC && ino->al && type != NTFS_AT_STANDARD_INFORMATION) {
+        /* the base record is full: an extension record of the file */
+        r = ext_insert(ino, a);
+        kfree(buf);
+        return r;
+    }
     kfree(buf);
     if (r) return r;
     if (ino->al) {

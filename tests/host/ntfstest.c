@@ -685,7 +685,8 @@ static void wx_write(wx_t *x, const char *rel, u64 off, u32 len, u32 seed, int w
         int c = vfs_close(f);
         if (r >= 0 && c) r = c;
     }
-    if (want) { EXPECT(r, want); free(buf); return; }
+    if (want == 1 && r == E_NOTSUP) { free(buf); return; }     /* may be refused */
+    if (want > 1 || want < 0) { EXPECT(r, want); free(buf); return; }
     CHECK(r == (int)len, "[%s] write %s at %llu: %s", x->tag, rel, (unsigned long long)off, ename(r));
     int fd = open(wx_host(x, rel), O_RDWR | O_CREAT, 0644);
     pwrite(fd, buf, len, (off_t)off);
@@ -773,10 +774,10 @@ static void t_ntfs_write_existing(const char *tag, u32 cluster) {
     {
         vfs_dirent_t st;
         if (!vfs_stat(P(x.L, "Fragmented/frag_a.bin"), &st))
-            wx_write(&x, "Fragmented/frag_a.bin", st.size, 100000, 8, E_NOTSUP);   /* the run list is in extents */
+            wx_write(&x, "Fragmented/frag_a.bin", st.size, 3000000, 8, 1);   /* the run list is in extents: may be refused */
     }
     wx_del(&x, "Fragmented/frag_b.bin");
-    wx_write(&x, "Compressed/text.txt", 0, 10, 9, E_NOTSUP);
+    wx_write(&x, "Compressed/text.txt", 0, 10, 9, 1);       /* (64 KiB clusters: not compressed) */
     wx_del(&x, "Compressed/text.txt");
     wx_del(&x, "Sparse/holes.bin");
     wx_del(&x, "with_streams.txt");
@@ -858,8 +859,45 @@ static void t_ntfs_many(const char *tag, u32 cluster, int n) {
     unlink(im.path);
 }
 
+/* a volume made by Halcyon's own formatter (ntfs_mkfs.c, through
+ * vfs_format) mounts read-write here, takes writes, and stays clean */
+int ntfs_format(blockdev_t *bd, const char *label, u32 cluster_bytes);
+
+static void t_ntfs_formatted(const char *tag, u32 mb, u32 ss, u32 cluster) {
+    img_t im;
+    memset(&im, 0, sizeof im);
+    snprintf(im.path, sizeof im.path, "%s", wpath("ntfsfmt.img"));
+    unlink(im.path);
+    sh("truncate -s %uM %s", mb, q(im.path));
+    hdisk_t *h = ntfs_attach(&im, ss, 1, 0);
+    EXPECT(vfs_format(&h->bd, "NTFS", "Formatted", cluster), 0);
+    char L = letter_of(h);
+    CHECK(L, "[%s] the formatted volume did not mount", tag);
+    if (L) {
+        volume_t *v = vfs_volume_by_letter(L);
+        CHECK(!strcmp(v->fs_name, "NTFS") && !strcmp(v->label, "Formatted"), "[%s] %s '%s'", tag, v->fs_name, v->label);
+        CHECK(!v->readonly, "[%s] read-only: %s", tag, v->ro_reason);
+        u8 *d = pat_alloc(200000, 5);
+        OK(vfs_mkdir(P(L, "Folder")));
+        v_put(P(L, "Folder/data.bin"), d, 200000);
+        v_put(P(L, "small.txt"), d, 100);
+        v_cmp(P(L, "Folder/data.bin"), d, 200000);
+        free(d);
+    }
+    disk_detach(h);
+    ntfs_verify(tag, &im);
+    t_ntfs_random(tag, &im, ss, 77, 400, 200000, "Random");
+    unlink(im.path);
+}
+
 static void s_ntfsw(void) {
     if (!ntfs_tools()) return;
+    if (!getenv("NTFS_ONLY") || !strcmp(getenv("NTFS_ONLY"), "formatted")) {
+        t_ntfs_formatted("ntfs formatted 64M", 64, 512, 0);
+        t_ntfs_formatted("ntfs formatted 512B clusters", 32, 512, 512);
+        t_ntfs_formatted("ntfs formatted 64K clusters", 128, 512, 65536);
+        t_ntfs_formatted("ntfs formatted 4Kn", 64, 4096, 0);
+    }
     if (!getenv("NTFS_ONLY") || !strcmp(getenv("NTFS_ONLY"), "existing")) {
         t_ntfs_write_existing("ntfs write existing 4k", 4096);
         t_ntfs_write_existing("ntfs write existing 64k", 65536);

@@ -773,7 +773,7 @@ static int data_store(ntfs_t *fs, nnode_t *n, nino_t *ino, u64 old_vcns, const a
         if (r == E_NOSPC || r == E_NOTSUP)
             kprintf("ntfs: %s: record %lu: the run list does not fit in the MFT record\n",
                     fs->bd->name, (unsigned long)n->rec);
-        return r == E_NOTSUP ? E_NOSPC : r;
+        return r;
     }
     n->ai = *na;
     return 0;
@@ -1440,7 +1440,6 @@ static int ntfs_unlink(volume_t *v, const char *path) {
     if (node_find(fs, NTFS_MREF(e->mref))) { r = E_BUSY; goto out; }
     if ((r = nt_ino_open(fs, e->mref, 1, &ino))) { if (r == E_NOENT) r = E_IO; goto out; }
     have_ino = 1;
-    if (ino.al_nonres) { r = E_NOTSUP; goto out; }
     if (ino_is_dir(&ino)) {
         r = dir_is_empty(fs, &ino);
         if (r < 0) goto out;
@@ -1574,7 +1573,6 @@ static int ntfs_rename(volume_t *v, const char *from, const char *to) {
     if ((sfn->file_attributes & NTFS_FA_DUP_FILE_NAME_INDEX) && is_ancestor(fs, srec, ddir)) { r = E_INVAL; goto out; }
     if ((r = nt_ino_open(fs, src->mref, 1, &ino))) { if (r == E_NOENT) r = E_IO; goto out; }
     have_ino = 1;
-    if (ino.al_nonres) { r = E_NOTSUP; goto out; }
     if ((r = names_of_link(&ino, sfn, names, &cnt))) goto out;
     if (!cnt) { nt_corrupt(fs, "directory entry without its $FILE_NAME", srec); r = E_IO; goto out; }
     /* the new name must fit in the base record once the old ones are gone */
@@ -1585,7 +1583,7 @@ static int ntfs_rename(volume_t *v, const char *from, const char *to) {
             freed += ALIGN_UP(0x18u + (u32)sizeof *fn + 2u * fn->name_length, 8u);
         }
         u32 need = ALIGN_UP(0x18u + (u32)sizeof(ntfs_file_name_t) + 2u * (u32)nu, 8u) + (ino.al ? 40u : 0u);
-        if (need > nt_rec_free_space(ino.base) + freed) { r = E_NOSPC; goto out; }
+        if (!ino.al && need > nt_rec_free_space(ino.base) + freed) { r = E_NOSPC; goto out; }
     }
     if ((r = nt_writable(fs))) goto out;
     if ((r = nt_ino_open(fs, src->dir, 1, &sd))) { if (r == E_NOENT) r = E_IO; goto out; }
