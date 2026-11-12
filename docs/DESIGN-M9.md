@@ -119,7 +119,8 @@ codes. Sockets are handles (`H_SOCKET`) in the process's handle table:
 | 114 | `poll(fds, nfds, timeout_ms)` | |
 | 115 | `sockstat(&st)` | socket use and limits, system-wide and of the caller |
 
-116-139 are free (name resolution, interfaces, `sendmsg`/`recvmsg` later).
+116-121 are the internet stack's (name lookup, interfaces, statistics: see
+[DESIGN-M6.md](DESIGN-M6.md)); 122-127 and 129-139 are free (`sendmsg`/`recvmsg` later).
 
 - **Flags:** `MSG_DONTWAIT`, `MSG_PEEK`, `MSG_WAITALL` (streams), `MSG_TRUNC`
   (datagrams: return the real length), `MSG_NOSIGNAL` (accepted; there are no

@@ -16,7 +16,7 @@ its own drivers for USB, SATA and FAT file systems.
 | Threads and programs | Kernel threads with a scheduler (copies, moves and deletes run in the background with a progress dialog and Cancel). Programs run in user mode in their own address space: static position-independent ELF64 `.EXE` files loaded from disk (`C:\PROGRAMS`), preempted every 10 ms, with threads (up to 32 per program; mutexes and condition variables on futexes), named shared memory, system calls for files, memory, processes, the console and windows (an early-2000s style window, drawing and controls API with menus, scroll bars, toolbars, status bars and direct access to the window's pixels), and BSD sockets: local stream and datagram sockets between programs, by name (back-pressure, non-blocking calls, timeouts, peers told when a program ends), and `poll` over sockets, files and the program's window events. Pages are no-execute unless they hold code; SMEP, SMAP and UMIP are on where the CPU has them. A program that crashes gets a "has encountered a problem and needs to close" dialog and takes nothing else down. Task Manager (Ctrl+Alt+Del) ends programs that hang; a program can end only programs it started, anything else needs your OK in a dialog of the system. Calculator, Sonar, Notepad, Paint and Explorer are user programs. |
 | Interrupts | Local APIC (xAPIC or x2APIC) and I/O APICs from the ACPI MADT, or the 8259 PICs. MSI-X and MSI for xHCI and AHCI. PCI INTx for UHCI, OHCI and EHCI: without an AML interpreter the routing is learned from which device raised an interrupt. The CPU halts when there is nothing to do: a one-shot local APIC (or PIT) timer wakes it for the next deadline. A device whose interrupt does not work is polled. |
 | USB | Host controllers: UHCI and OHCI (USB 1.1), EHCI (USB 2.0, with companion hand-off), and xHCI (USB 3.x, SuperSpeed). Class drivers: hubs (USB 2 and SuperSpeed), HID (report descriptor parsing, report protocol as on Windows, boot protocol as the fallback): keyboards including n-key rollover and wireless receivers with several devices on one interface, multimedia keys (volume, media, browser, mail, calculator, power and sleep), mice and tablets; and mass storage (Bulk-Only Transport plus SCSI). Hot-plug. |
-| Network | Drivers for virtio-net (virtio 1.0 and legacy), Intel e1000 (8254x), e1000e (82574L; 82571/2/3/83 and the on-board I217/I218/I219 to spec), igb (82576; I350/I210/I211 to spec), Realtek RTL8139 and, to spec, RTL8169/8111/8168. MAC address, link state and speed, receive and transmit rings, MSI-X/MSI/INTx or polled, statistics; adapters, link and counters in System Information. |
+| Network | Drivers for virtio-net (virtio 1.0 and legacy), Intel e1000 (8254x), e1000e (82574L; 82571/2/3/83 and the on-board I217/I218/I219 to spec), igb (82576; I350/I210/I211 to spec), Realtek RTL8139 and, to spec, RTL8169/8111/8168. MAC address, link state and speed, receive and transmit rings, MSI-X/MSI/INTx or polled, statistics; adapters, link and counters in System Information. The internet stack (IPv4): Ethernet, ARP, IP with fragmentation, reassembly and path MTU, ICMP, a routing table (connected subnets, a default gateway) and the loopback; TCP (RFC 9293 with window scaling, RFC 6298 timers, NewReno congestion control, delayed ACKs, Nagle, zero-window probes, keepalive, RFC 5961 defences, random ISNs and ports), UDP and ping sockets (`IPPROTO_ICMP`, no raw sockets needed) as BSD `AF_INET` sockets; a DHCP client (renewal, rebinding, link changes, DECLINE) or a static configuration from `SETTINGS.INI`; a caching DNS resolver (`resolve()`) with defences against forged answers. `PING` and `IPCONFIG`; 35-50 MB/s downloads in QEMU. See [docs/DESIGN-M6.md](docs/DESIGN-M6.md). |
 | Storage | AHCI SATA (LBA48, multiple controllers). NVMe SSDs (MSI-X, MSI, INTx or polled; every active namespace with 512- or 4096-byte blocks becomes a disk, `nvme0`, `nvme1`, ...; flushed when the drive has a volatile cache, shutdown notification on Turn Off/Restart). CD/DVD drives on SATA (ATAPI): read-only drive letters, discs detected when inserted, ejected or swapped, Eject in the drive's right-click menu. Block layer with MBR (including extended partitions), GPT and superfloppy detection. |
 | File systems | FAT12, FAT16 and FAT32, read and write: long file names, create, delete, rename and move, mkdir and rmdir, truncate, FSInfo. exFAT, read and write (USB sticks and SD cards over 32 GB): fragmented and contiguous files, ValidDataLength, the volume's up-case table for case-insensitive names, VolumeDirty handling. DOS drive letters; the boot drive is `C:`. Quick format (FAT12/16/32 and exFAT) from Explorer (right-click a drive) or the `FORMAT` command, with Windows' default cluster sizes. |
 | CD/DVD | ISO 9660 with Joliet (long Unicode names) and Rock Ridge names, multi-sector directories and multi-extent files, hardened against corrupt discs. Hybrid ISO images written to USB sticks or disks mount too. |
@@ -24,7 +24,7 @@ its own drivers for USB, SATA and FAT file systems.
 | Unicode | File names and text are UTF-8 throughout; FAT long names are stored as UTF-16 (including characters outside the BMP), with Unicode case-insensitive lookup. The fonts cover Latin, Greek, Cyrillic and common symbols; other characters are kept and drawn as a replacement box. |
 | GUI | Compositing window manager (move, resize, minimize, maximize), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Theme and wallpaper are kept across restarts (`C:\HALCYON\SETTINGS.INI`). |
 | Display | The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; the QEMU/Bochs/VirtualBox adapter switches at once, with Windows' "keep these settings?" 15-second revert. The frame buffer is write-combining (PAT). |
-| Web | A web browser (Web Browser, `BROWSER.EXE`): HTTP/1.1 and HTTPS, pages with headings, lists, tables, forms and PNG / GIF / BMP images, history, error pages, local files; `WGET.EXE` on the command line. HTTPS through BearSSL (TLS 1.2) with certificates checked against Mozilla's root list. Both are user programs on libweb, a library for URLs, HTTP, TLS and gzip. They need the internet stack of milestone 6 (in progress) to reach the network; local pages work now. See [docs/DESIGN-M6-WEB.md](docs/DESIGN-M6-WEB.md). |
+| Web | A web browser (Web Browser, `BROWSER.EXE`): HTTP/1.1 and HTTPS, pages with headings, lists, tables, forms and PNG / GIF / BMP images, history, error pages, local files; `WGET.EXE` on the command line. HTTPS through BearSSL (TLS 1.2) with certificates checked against Mozilla's root list. Both are user programs on libweb, a library for URLs, HTTP, TLS and gzip. They reach the network through the internet stack (see Network). See [docs/DESIGN-M6-WEB.md](docs/DESIGN-M6-WEB.md). |
 | Apps | Explorer (My Computer, file management; copies and deletes in a worker thread), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Sonar (a mine-hunting puzzle), Control Panel, Display Properties, Keyboard settings, About. |
 
 ## Building
@@ -56,7 +56,9 @@ EXTRA="-drive if=none,id=d0,format=raw,file=build/fat16.img -device ide-hd,drive
 ```
 
 A network adapter on QEMU's user-mode network (the device can also be `e1000`,
-`e1000e`, `igb` or `rtl8139`):
+`e1000e`, `igb` or `rtl8139`); Halcyon gets 10.0.2.15 by DHCP, the host is
+10.0.2.2 (add `,hostfwd=tcp::8080-:80` to the `-netdev` to reach a server in
+Halcyon from the host):
 
 ```bash
 EXTRA="-netdev user,id=n0 -device virtio-net-pci,netdev=n0" tools/run.sh xhci bios
@@ -121,7 +123,11 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   (512- and 4096-byte blocks, INTx, polled), a CD drive with a disc swap, and
   network adapters (virtio-net in its three PCI forms, e1000, e1000e, igb and
   rtl8139: an ARP exchange with QEMU's gateway and a few thousand more frames
-  through every ring, with MSI-X, INTx and polled), and
+  through every ring, with MSI-X, INTx and polled), the internet stack
+  (`NETTEST.EXE` against servers on the host: DHCP, ping, DNS, a 32 MiB
+  download and an 8 MiB upload with CRCs, 40 parallel connections, UDP, a
+  server in Halcyon reached through port forwarding; again with 3% of frames
+  lost), and
   user mode: `SELFTEST.EXE` runs after boot and checks the system calls, bad
   pointers, crashing and looping child programs, preemption and windows;
   `SOCKTEST.EXE` checks sockets and poll between copies of itself (large
@@ -129,6 +135,14 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   per-program and system-wide limits); and
   the display: a saved resolution chosen by both loaders, the firmware frame
   buffer alone, and a live mode switch
+- the network stack on the host (`tests/host/netsim.c`, run by `tests/host/run.sh`):
+  kernel/net/ loaded once per simulated computer on a simulated Ethernet that
+  loses, duplicates, reorders, delays and corrupts frames, against an
+  independent router with DHCP and DNS servers, in simulated time: about 300
+  checks of ARP, DHCP, DNS, UDP, fragments and TCP (handshakes and closes in
+  every order, RST cases, windows, retransmission timing, transfers under
+  loss), each ending with a memory check; and a libFuzzer target for the
+  receive path (`tests/host/fuzz_net.c`)
 - the EDID parser and the loaders' resolution choice (`tests/host/displaytest.c`)
 - the web library and the browser's parser and decoders (`tests/web/run.sh`),
   built for Linux with ASan/UBSan: URLs, the CA list's conversion, inflate
@@ -236,6 +250,16 @@ in the `poll` set, and call `win_get_event(&ev, 0)` when it is ready.
 `SOCKTEST.EXE` checks all of it (`socktest`; the QEMU `sock` variant runs it).
 See [docs/DESIGN-M9.md](docs/DESIGN-M9.md) for the rules and limits.
 
+`AF_INET` sockets reach the network: `SOCK_STREAM` is TCP, `SOCK_DGRAM` UDP,
+and `socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)` sends echo requests and
+receives the replies (`PING.EXE`). Addresses are `struct sockaddr_in`
+(`inet_sockaddr()`, `inet_aton()`, `inet_ntoa_r()`, `htons()`...);
+`resolve(host, addrs, max, timeout_ms)` looks names up and `inet_connect(host,
+port, timeout_ms)` combines both. `net_ifinfo`, `net_ifconfig`, `net_ctl`,
+`net_stats` and `net_conns` show and change the configuration
+(`IPCONFIG.EXE`). `NETTEST.EXE` checks it against servers on the host (the
+QEMU `net` variant). See [docs/DESIGN-M6.md](docs/DESIGN-M6.md).
+
 ### The web library and the browser
 
 `userland/lib/web/` is **libweb**, a library for HTTP and HTTPS (`web.h`):
@@ -267,9 +291,7 @@ a status bar, error pages, and pages parsed (`browser/html.c`), laid out
 (`browser/layout.c`) and drawn by the program, with its own PNG, GIF and
 BMP decoders (`browser/image.c`) and forms it draws and edits itself. It
 opens web addresses, `file:` URLs and plain paths (`C:\Documents\Web` has
-sample pages); the shell opens `.htm` / `.html` files with it. Network
-pages need the internet stack (milestone 6); until it is merged, they show
-the "not connected to a network" page. See
+sample pages); the shell opens `.htm` / `.html` files with it. See
 [docs/DESIGN-M6-WEB.md](docs/DESIGN-M6-WEB.md).
 
 ## Layout
@@ -282,12 +304,13 @@ kernel/drivers  PCI, PS/2, input, AHCI (disks and CD/DVD), NVMe, ACPI
 kernel/usb   USB core, hub/HID/MSC class drivers, UHCI/OHCI/EHCI/xHCI
 kernel/fs    block layer and partitions, VFS, FAT, exFAT, ISO 9660
 kernel/gui   graphics, window manager, widgets, menus, dialogs, desktop, splash
-kernel/net   sockets and poll (generic layer), local sockets (AF_LOCAL)
+kernel/net   sockets and poll (generic layer), local sockets (AF_LOCAL), network
+             devices and the IPv4 stack (ARP, IP, ICMP, UDP, TCP, DHCP, DNS); drivers/
 kernel/apps  applications built into the kernel
 userland/    user-mode runtime (crt0, C library subset, GUI calls) and programs;
              lib/web the web library, third_party BearSSL and the CA list
 tools/       image builder, font and icon generators, QEMU test harness
-tests/host   host-side storage, keyboard layout, USB HID and display tests, fuzzer
+tests/host   host-side storage, keyboard layout, USB HID, display and network tests, fuzzers
 tests/web    host tests of the web library and the browser's parser and decoders
 ```
 
@@ -310,8 +333,11 @@ tests/web    host tests of the web library and the browser's parser and decoders
   whatever the firmware chose, and there is one monitor. OVMF (QEMU's UEFI)
   reports no EDID, so the UEFI loader's choice was only tested with a saved
   setting; real UEFI firmware usually provides it.
-- No networking yet (sockets are local only; the internet stack of milestone 6
-  is in progress), no audio or isochronous USB.
+- The internet stack is IPv4 only (no IPv6, multicast or raw sockets). TCP has
+  no SACK or timestamps, so heavy loss costs throughput; DNS has no TCP
+  fallback and asks for A records only; DHCP and static configuration cover
+  one subnet and a default gateway (no static routes). Any program may change
+  the network configuration. No audio or isochronous USB.
 - The Web Browser is minimal: HTML without JavaScript and without style
   sheets (a few properties of the `style` attribute only), no italic font,
   no JPEG / WebP / SVG images (their alternative text shows), no `rowspan`,
