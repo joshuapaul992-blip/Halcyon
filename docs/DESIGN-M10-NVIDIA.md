@@ -874,8 +874,8 @@ DCB); the driver picks the **output resource** for a head
   routed to the output, a free one, one only the firmware used;
 - the pixel clock: at most what the generation's fastest output carries
   per head (DisplayPort 4 lanes at its top rate at 24 bpp, dual-link TMDS,
-  the DAC: 400 MHz on Tesla, 720 MHz Fermi GF119 to Maxwell, 1080 MHz on
-  Pascal; modes above it are not offered), and the heads together within
+  the DAC: 400 MHz on Tesla and GF100-GF116, 720 MHz from GF119 to Maxwell,
+  1080 MHz on Pascal; modes above it are not offered), and the heads together within
   heads x that (nouveau has no tighter limit, and neither do we);
 - each head has its video PLL (VPLL0 + head) and each DisplayPort output its
   own link training (its SOR's DP state).
