@@ -12,11 +12,12 @@
  * after they can no longer be playing.
  *
  * Schemes choose the default files: "Halcyon" (the files named after the
- * events) or "Halcyon Dusk" (a longer startup and shutdown sound in A-flat
- * major / F minor; the other events as in "Halcyon").
+ * events), "Halcyon Dusk" (a longer startup and shutdown sound in A-flat
+ * major / F minor) or "Halcyon Tide" (B-flat major / G minor, quick mallet
+ * arpeggios); the other events are as in "Halcyon".
  *
- * Settings: sound.sounds (0 = no system sounds), sound.scheme (dusk; absent
- * = Halcyon), sound.event.<key> (0 = this one off), sound.file.<key>
+ * Settings: sound.sounds (0 = no system sounds), sound.scheme (dusk or tide;
+ * absent = Halcyon), sound.event.<key> (0 = this one off), sound.file.<key>
  * (another WAV file), sound.tray (the volume icon), and the base layer's
  * sound.volume / sound.mute. */
 #include "sound/snddev.h"
@@ -51,6 +52,7 @@ static const struct { const char *key, *label, *file; } evinfo[SNDEV_COUNT] = {
 static const struct { const char *key, *name, *file[SNDEV_COUNT]; } schemes[] = {
     { "", "Halcyon", { NULL } },
     { "dusk", "Halcyon Dusk", { [SNDEV_STARTUP] = "DUSKSTRT.WAV", [SNDEV_SHUTDOWN] = "DUSKSHUT.WAV" } },
+    { "tide", "Halcyon Tide", { [SNDEV_STARTUP] = "TIDESTRT.WAV", [SNDEV_SHUTDOWN] = "TIDESHUT.WAV" } },
 };
 #define SCHEME_COUNT (int)(sizeof schemes / sizeof schemes[0])
 static int scheme;

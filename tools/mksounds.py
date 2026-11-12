@@ -16,11 +16,14 @@ for shutdown, and
 short motifs for the message box icons, balloons and USB devices. The
 "Halcyon Dusk" scheme adds a longer startup (A-flat major: IV, V, then a
 wide I-add9 with a noise swell and echoing shimmer) and shutdown (F minor:
-falling bells, iv, V7, i) as DUSKSTRT.WAV and DUSKSHUT.WAV. They do
+falling bells, iv, V7, i) as DUSKSTRT.WAV and DUSKSHUT.WAV; "Halcyon Tide"
+a startup in B-flat major (vi, IV, V, I in quick mallet arpeggios) and a
+shutdown in G minor (falling mallets, iv, V7, i) as TIDESTRT.WAV and
+TIDESHUT.WAV. They do
 not copy or imitate any other system's sounds.
 
 All files are 22050 Hz (startup and shutdown stereo, the rest mono), so the
-set, Dusk included, stays near 2 MB on the boot disk. C:\\HALCYON\\MEDIA\\ gets them
+set, Dusk and Tide included, stays near 3 MB on the boot disk. C:\\HALCYON\\MEDIA\\ gets them
 (tools/mkimage.sh); kernel/sound/sndevent.c names them. A 13-second demo
 piece for Media Player, "Halcyon Dawn", goes to OUTDIR/music as 4-bit IMA
 ADPCM (encoded here) and from there to C:\\Documents\\Music.
@@ -364,6 +367,87 @@ def s_dusk_shutdown():
     return t
 
 
+def mallet(name, dur=0.9):
+    """a soft wooden mallet (marimba-like): FM at ratio 4 with a quick index decay"""
+    b = fm_bell(note(name), dur, ratio=4.0, index=1.3, decay=0.2, idecay=0.03, attack=0.002)
+    lowpass(b, 4500)
+    return b
+
+
+def tide_arp(t, at, notes, steps, step, gain=0.16, pan0=-0.6):
+    """mallet notes in a rising-and-falling pattern, panned across the field"""
+    order = list(range(len(notes))) + list(range(len(notes) - 2, 0, -1))
+    for k in range(steps):
+        i = order[k % len(order)]
+        t.add(at + k * step, mallet(notes[i]), gain * (1.0 if k % 2 == 0 else 0.75),
+              pan0 + (k % 6) * (-2 * pan0) / 5)
+
+
+def s_tide_startup():
+    """Halcyon Tide, B-flat major (7 s): vi (G minor 7), IV (E-flat maj7),
+    V (F sus4 -> F) in quick mallet arpeggios over a warm pad and a gliding
+    bass, landing on B-flat add9 with sub bass, a bell chord and a rising glint"""
+    t = Track(7.0, stereo=True)
+    step = 0.1125                                 # sixteenths at 133 bpm
+    chords = [(0.0, "G2", ("G2", "D3", "A#3", "F4"), ("G4", "A#4", "D5", "F5")),
+              (0.9, "D#2", ("D#3", "A#3", "D4", "G4"), ("D#5", "G5", "A#5", "D6")),
+              (1.8, "F2", ("F3", "C4", "A#4"), ("F5", "A#5", "C6", "F6"))]
+    for at, bass, padn, arp in chords:
+        t.add(at, pad([note(n) for n in padn], 1.05, attack=0.25, release=0.3, harmonics=5, detune=0.005), 0.42)
+        t.add(at, blip(note(bass), note(bass), 1.0, harm=0.4), 0.3)
+        tide_arp(t, at, arp, 8, step)
+    t.add(2.3, pad([note(n) for n in ("F3", "C4", "A4")], 0.55, attack=0.08, release=0.2, harmonics=5, detune=0.005), 0.42)
+    t.add(2.45, noise_sweep(0.35, 1500, 8000, rise=True, seed=13), 0.04, 0.0)
+    # I: B-flat add9
+    t.add(2.8, sub(note("A#1"), 3.6, attack=0.01, decay=1.3, drop=0.2), 0.55)
+    t.add(2.8, pad([note(n) for n in ("A#2", "F3", "A#3", "D4", "C5", "F5")], 4.2, attack=0.03, release=2.8,
+                   harmonics=6, detune=0.006, bright=1.4), 0.5)
+    for name, pan in (("D5", -0.5), ("F5", 0.5), ("A#5", -0.2), ("D6", 0.2)):
+        b = fm_bell(note(name), 3.0, ratio=2.0, index=1.2, decay=1.0, idecay=0.4)
+        lowpass(b, 6500)
+        t.add(2.8, b, 0.2, pan)
+    tide_arp(t, 2.8, ("A#5", "C6", "D6", "F6"), 6, step, gain=0.1, pan0=0.6)
+    g = blip(note("A#5"), note("A#6"), 0.6, harm=0.1)
+    lowpass(g, 7000)
+    t.add(3.55, g, 0.1, 0.0)
+    pingpong(t, 2 * step, feedback=0.35, wet=0.3)
+    reverb(t, wet=0.38, size=1.15, feedback=0.8)
+    return t
+
+
+def s_tide_shutdown():
+    """Halcyon Tide, G minor (5.5 s): mallets falling through G minor, then
+    iv (C minor 7), V7 (D7) and a low G-minor chord with a falling glint"""
+    t = Track(5.5, stereo=True)
+    step = 0.1125
+    t.add(0.0, pad([note(n) for n in ("G3", "D4", "A#4")], 1.25, attack=0.1, release=0.35, harmonics=5, detune=0.005), 0.42)
+    t.add(0.0, blip(note("G2"), note("G2"), 1.1, harm=0.4), 0.3)
+    for k, name in enumerate(("D6", "A#5", "G5", "D5", "A#5", "G5", "D5", "A#4")):
+        t.add(k * step, mallet(name), 0.17 if k % 2 == 0 else 0.13, 0.6 - k * 0.17)
+    t.add(1.1, pad([note(n) for n in ("C3", "G3", "D#4", "A#4")], 1.0, attack=0.1, release=0.3, harmonics=5, detune=0.005), 0.42)
+    t.add(1.1, blip(note("C2"), note("C2"), 0.95, harm=0.4), 0.3)
+    for k, name in enumerate(("C5", "D#5", "G5", "D#5", "C5", "G4")):
+        t.add(1.1 + k * step, mallet(name), 0.14, -0.5 + k * 0.2)
+    t.add(2.0, pad([note(n) for n in ("D3", "A3", "F#4", "C5")], 0.9, attack=0.08, release=0.3, harmonics=5, detune=0.005), 0.42)
+    t.add(2.0, blip(note("D2"), note("D2"), 0.85, harm=0.4), 0.3)
+    for k, name in enumerate(("F#5", "D5", "A4", "C5", "A4", "F#4")):
+        t.add(2.0 + k * step, mallet(name), 0.14, 0.5 - k * 0.2)
+    # i: G minor
+    t.add(2.8, sub(note("G1"), 2.7, attack=0.01, decay=1.1, drop=0.2), 0.55)
+    t.add(2.8, pad([note(n) for n in ("G2", "D3", "G3", "A#3", "D4")], 2.7, attack=0.03, release=2.2,
+                   harmonics=6, detune=0.006, bright=1.4), 0.5)
+    for name, pan, gn in (("G4", -0.3, 0.22), ("D5", 0.3, 0.16), ("A#4", 0.0, 0.14)):
+        b = fm_bell(note(name), 2.4, ratio=2.0, index=1.0, decay=0.9, idecay=0.4)
+        lowpass(b, 5000)
+        t.add(2.8, b, gn, pan)
+    g = blip(note("G5"), note("G4"), 0.7, harm=0.1)
+    lowpass(g, 6000)
+    t.add(2.85, g, 0.08, 0.0)
+    pingpong(t, 2 * step, feedback=0.3, wet=0.28)
+    reverb(t, wet=0.36, size=1.1, feedback=0.79)
+    return t
+
+
 def mono(dur, voices, wet=0.18):
     t = Track(dur)
     for at, samples, gain in voices:
@@ -517,14 +601,16 @@ def write_ima_wav(path, track, peak=0.7, block=1024):
 SOUNDS = [("STARTUP.WAV", s_startup), ("SHUTDOWN.WAV", s_shutdown), ("ERROR.WAV", s_error),
           ("WARNING.WAV", s_warning), ("INFO.WAV", s_info), ("QUESTION.WAV", s_question),
           ("NOTIFY.WAV", s_notify), ("DEVADD.WAV", s_devadd), ("DEVREM.WAV", s_devremove),
-          ("DEFAULT.WAV", s_default), ("DUSKSTRT.WAV", s_dusk_startup), ("DUSKSHUT.WAV", s_dusk_shutdown)]
+          ("DEFAULT.WAV", s_default), ("DUSKSTRT.WAV", s_dusk_startup), ("DUSKSHUT.WAV", s_dusk_shutdown),
+          ("TIDESTRT.WAV", s_tide_startup), ("TIDESHUT.WAV", s_tide_shutdown)]
 
 
 def main():
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
     for name, fn in SOUNDS:
-        write_wav(os.path.join(out, name), fn(), peak=0.72 if name in ("STARTUP.WAV", "SHUTDOWN.WAV", "DUSKSTRT.WAV", "DUSKSHUT.WAV") else 0.6)
+        write_wav(os.path.join(out, name), fn(), peak=0.72 if name in ("STARTUP.WAV", "SHUTDOWN.WAV", "DUSKSTRT.WAV", "DUSKSHUT.WAV",
+                                                              "TIDESTRT.WAV", "TIDESHUT.WAV") else 0.6)
     # a demo for Media Player (C:\Documents\Music), as IMA ADPCM
     os.makedirs(os.path.join(out, "music"), exist_ok=True)
     write_ima_wav(os.path.join(out, "music", "Halcyon Dawn.wav"), s_demo())

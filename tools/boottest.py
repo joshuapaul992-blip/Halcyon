@@ -126,6 +126,7 @@ or attach a sound card, its output recorded by QEMU's wav backend (48 kHz):
   dusk    with a sound card variant: SETTINGS.INI selects the Halcyon Dusk
           sound scheme, and the recording must start with DUSKSTRT.WAV
           instead of STARTUP.WAV.
+  tide    the same with the Halcyon Tide scheme (TIDESTRT.WAV).
 NETDUMP=file.pcap records the net variants' frames (128 bytes each) for debugging.
 Exit status is the number of failed configurations.
 """
@@ -144,7 +145,7 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user", "xhci:bios:sock", "xhci:bios:web",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
-          "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:bios:ac97+dusk", "xhci:uefi:virtiosnd", "xhci:bios:audio",
+          "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:bios:ac97+dusk", "xhci:uefi:hda+tide", "xhci:uefi:virtiosnd", "xhci:bios:audio",
           "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0}
@@ -171,6 +172,7 @@ for _n in SOUNDS:
     VARIANTS[_n] = 0
 VARIANTS["audio"] = 0
 VARIANTS["dusk"] = 0                     # with a sound card: the Halcyon Dusk scheme (DUSKSTRT.WAV)
+VARIANTS["tide"] = 0                     # with a sound card: the Halcyon Tide scheme (TIDESTRT.WAV)
 STARTUP_REF = ["STARTUP.WAV"]            # the startup sound the recording must start with (run() sets it)
 SOUND_TEST_MS = 2000
 BEEP_AMP = 12000                         # snd_beep's sine (sound/beep.c)
@@ -714,9 +716,10 @@ def run(cfg):
     prog = next((PROGRAMS[v] for v in opts if v in PROGRAMS), None)
     prog_args = ""
     ini_lines = []
-    STARTUP_REF[0] = "DUSKSTRT.WAV" if "dusk" in opts else "STARTUP.WAV"
-    if "dusk" in opts:
-        ini_lines.append("sound.scheme=dusk")
+    STARTUP_REF[0] = "DUSKSTRT.WAV" if "dusk" in opts else "TIDESTRT.WAV" if "tide" in opts else "STARTUP.WAV"
+    for sch in ("dusk", "tide"):
+        if sch in opts:
+            ini_lines.append("sound.scheme=" + sch)
     net = "net" in opts
     if net:
         ns_mod, ports = net_servers()
