@@ -48,7 +48,10 @@ enum {
      *           128 SYS_GETRANDOM, 129-139 free
      *   160     SYS_WIN_CANVAS: the window's pixels mapped into the program
      *   164     SYS_VOLUME_SET_WRITE: drive properties (core/syscall.c)
-     *   168-169 Explorer: built-in shell tools, file details (core/syscall.c) */
+     *   168-169 Explorer: built-in shell tools, file details (core/syscall.c)
+     *   170-171 settings of programs in SETTINGS.INI (core/syscall.c)
+     *   180-182 drag and drop (gui/dnd.c, through gui/usergui.c)
+     *   183-189 the Recycle Bin and Explorer's settings (apps/shellsys.c) */
     SYS_WIN_CANVAS = 160,
     SYS_DATETIME = 161, SYS_VOLUME_INFO, SYS_VFS_GENERATION,
     SYS_VOLUME_SET_WRITE = 164, /* (drive, allow): allow Halcyon to write to an NTFS volume on an
@@ -56,8 +59,33 @@ enum {
                                    and the volume is mounted again (E_BUSY while files are open on it) */
     SYS_GETRANDOM = 128,        /* (buf, len <= 65536): cryptographically strong bytes */
     SYS_SHELL_APP = 168, SYS_STAT_EX,
+    SYS_SETTING_GET = 170,      /* (key, buf, n): the value's length (NUL-terminated in buf), E_NOENT */
+    SYS_SETTING_SET = 171,      /* (key, value or NULL to remove): set and save SETTINGS.INI */
     SYS_SOUND_FIRST = 140, SYS_SOUND_LAST = 151,
-    SYS_COUNT = 170
+    /* drag and drop between windows of any program and the desktop (DESIGN-M8-EXPLORER.md) */
+    SYS_DND_BEGIN = 180,        /* (win, paths, len, effects | icon << 8, count): start a drag of paths
+                                   (NUL-separated, len bytes) with the mouse button held in win; the
+                                   drag's serial number (> 0), E_AGAIN if no button is held any more */
+    SYS_DND_ACCEPT,             /* (win, serial, effect, possible): a target's answer to EVT_DRAG
+                                   DND_ENTER / DND_OVER: the effect a drop here would have now, and
+                                   every effect it could have (DND_COPY | DND_MOVE; the right-drag menu) */
+    SYS_DND_DATA,               /* (serial, buf, size): the paths of a drag (or the last drop): bytes
+                                   (with the NULs; more than size: buf holds the first size), E_NOENT */
+    /* the Recycle Bin (apps/recycle.c) */
+    SYS_RECYCLE_DELETE = 183,   /* (path): move to its drive's bin: the entry's id, E_NOTSUP (no bin on
+                                   that drive: delete permanently), E_ROFS, E_NOSPC (too big for it) */
+    SYS_RECYCLE_LIST,           /* (drive or 0 = every drive, hal_rbentry_t *buf, max): entries (all of
+                                   them if max is 0), oldest first per drive */
+    SYS_RECYCLE_RESTORE,        /* (drive, id, mode RBR_*, out path buf, size) */
+    SYS_RECYCLE_PURGE,          /* (drive, id): delete one entry for good; id 0 = empty that drive's bin,
+                                   drive 0 = every bin */
+    SYS_RECYCLE_INFO,           /* (drive, hal_rbinfo_t *) */
+    SYS_RECYCLE_SET,            /* (drive, percent, 0): the bin's size limit, or (0, 0, RBF_* options):
+                                   saved in SETTINGS.INI */
+    SYS_SHELL_SETTING = 189,    /* (key, value or NULL, buf, size): read (value NULL: the length, E_NOENT)
+                                   or set (value; "" removes it) one of Explorer's settings: keys
+                                   "explorer.*", kept in SETTINGS.INI */
+    SYS_COUNT = 190
 };
 
 /* SYS_SHM_OPEN flags */
@@ -149,7 +177,8 @@ enum { EVT_NONE = 0, EVT_PAINT, EVT_CLOSE, EVT_KEY, EVT_MOUSE_DOWN, EVT_MOUSE_UP
        EVT_WHEEL, EVT_COMMAND, EVT_TIMER, EVT_RESIZE, EVT_FOCUS,
        EVT_MOUSE_LEAVE,              /* the pointer left the window (clear hover highlights) */
        EVT_MENU,                     /* a menu item was chosen: id = its id */
-       EVT_SCROLL };                 /* a scroll bar moved: id = control, x = new position, button = SCROLL_* part */
+       EVT_SCROLL,                   /* a scroll bar moved: id = control, x = new position, button = SCROLL_* part */
+       EVT_DRAG };                   /* drag and drop: button = DND_* (below) */
 typedef struct hal_event {
     int type;
     int win;                     /* window handle */
@@ -163,9 +192,45 @@ typedef struct hal_event {
                                     layout, for Ctrl shortcuts (US letters on Russian and Greek), or 0 */
 } hal_event_t;
 
+/* EVT_DRAG (button field): DND_ENTER, DND_OVER (x, y: the pointer, client coordinates; answer with
+ * SYS_DND_ACCEPT, else nothing can be dropped), DND_LEAVE, DND_DROP (pressed = the effect chosen:
+ * do it, the paths come from SYS_DND_DATA), DND_END (to the source window: pressed = the effect of
+ * the drop, 0 if canceled). id = the drag's serial number, dz = how many paths, vk = the effects the
+ * source allows, mods = the modifier keys, buttons = the button that drags (MOUSE_RIGHT: the effect
+ * comes from a "Copy Here / Move Here" menu at the drop) */
+enum { DND_ENTER = 1, DND_OVER, DND_LEAVE, DND_DROP, DND_END };
+#define DND_NONE 0
+#define DND_COPY 1
+#define DND_MOVE 2
+
+/* SYS_RECYCLE_LIST entry */
+typedef struct hal_rbentry {
+    unsigned id;                          /* per drive */
+    char drive;
+    unsigned char is_dir, pad[2];
+    unsigned long long size;              /* bytes (a folder: all of it) */
+    unsigned short year; unsigned char month, day, hour, minute, second, pad2;   /* deleted */
+    char orig[520];                       /* where it was: "C:/Documents/a.txt" */
+} hal_rbentry_t;
+/* SYS_RECYCLE_RESTORE modes: when something is at the original place now */
+enum { RBR_FAIL = 0, RBR_REPLACE, RBR_RENAME };
+/* SYS_RECYCLE_INFO */
+typedef struct hal_rbinfo {
+    char drive, pad[3];
+    int supported;                        /* 0, E_ROFS (nothing can be deleted), E_NOTSUP (removable:
+                                             deletes are permanent), E_NODEV */
+    int count, percent;                   /* entries; the share of the drive the bin may use */
+    unsigned long long bytes, limit, total;   /* in the bin; the most it may hold; the drive's size */
+    unsigned flags;                       /* RBF_* (the same for every drive) */
+    unsigned generation;                  /* changes with every change of any bin */
+} hal_rbinfo_t;
+#define RBF_CONFIRM 0x01                  /* ask before moving things to the bin */
+#define RBF_NUKE    0x02                  /* no bin: delete at once */
+
 /* EVT_COMMAND notifications (button field) */
 #define CMD_CLICK    0           /* button / tool button clicked, check box or list selection changed */
 #define CMD_ACTIVATE 1           /* CTL_NOTIFY: Enter in a text box, double click or Enter in a list box */
+#define CMD_CHANGE   2           /* CTL_CHANGES: the text of a text box changed (typing, cut, paste) */
 
 /* EVT_SCROLL parts (button field) */
 enum { SCROLL_LINE_UP = 1, SCROLL_LINE_DOWN, SCROLL_PAGE_UP, SCROLL_PAGE_DOWN, SCROLL_THUMB_TRACK,
@@ -194,6 +259,7 @@ enum { CTL_BUTTON = 1, CTL_LABEL, CTL_TEXTBOX, CTL_CHECKBOX, CTL_LISTBOX, CTL_GR
 #define CTL_READONLY 0x40
 #define CTL_WRAP     0x80
 #define CTL_NOTIFY   0x100       /* text box / list box: send EVT_COMMAND with CMD_ACTIVATE */
+#define CTL_CHANGES  0x200       /* text box: send EVT_COMMAND with CMD_CHANGE on every change by the user */
 
 /* menus (SYS_MENU_SET, SYS_MENU_POPUP): a flat array. For a menu bar each
  * MENU_TITLE entry starts a menu ("&File") and the entries after it are its
@@ -257,7 +323,9 @@ enum { HICON_COMPUTER = 0, HICON_HDD, HICON_USBDRIVE, HICON_FLOPPY, HICON_CDROM,
        HICON_QUESTION, HICON_ERROR, HICON_WARNING, HICON_SHUTDOWN, HICON_RESTART, HICON_LOGO, HICON_USER,
        HICON_USB, HICON_DISPLAY, HICON_KEYBOARD, HICON_MOUSE, HICON_MEMORY, HICON_HUB, HICON_HELP, HICON_GAME,
        HICON_RECYCLE, HICON_WEB, HICON_BACK, HICON_FORWARD, HICON_RELOAD, HICON_STOP, HICON_HOME,
-       HICON_NETWORK, HICON_NETWORK_OFF, HICON_SPEAKER, HICON_SPEAKER_MUTED, HICON_FILE_AUDIO, HICON_MEDIA, HICON_SETUP,
+       HICON_NETWORK, HICON_NETWORK_OFF, HICON_SPEAKER, HICON_SPEAKER_MUTED, HICON_FILE_AUDIO, HICON_MEDIA,
+       HICON_RECYCLE_FULL,          /* HICON_RECYCLE is the empty bin */
+       HICON_SETUP,                 /* Install Halcyon */
        HICON_COUNT };
 
 /* message boxes */

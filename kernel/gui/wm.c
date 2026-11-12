@@ -1,5 +1,6 @@
 /* Halcyon OS - window manager: compositor, input routing, main loop */
 #include "wm.h"
+#include "dnd.h"
 #include "drivers/display.h"
 #include "core/irq.h"
 #include "core/thread.h"
@@ -92,6 +93,7 @@ static int ndirty;
 
 int wm_mouse_x(void) { return mx; }
 int wm_mouse_y(void) { return my; }
+int wm_mouse_buttons(void) { return mbuttons; }
 
 void wm_invalidate_rect(rect_t r) {
     r = rect_intersect(r, mkrect(0, 0, screen_w(), screen_h()));
@@ -251,6 +253,7 @@ void wm_destroy(window_t *w) {
     if (drag_win == w) { drag_win = NULL; drag_mode = DRAG_NONE; }
     if (title_btn_win == w) title_btn_win = NULL;
     if (prev_active == w) prev_active = NULL;
+    dnd_window_gone(w);
     menu_close_owned(w);
     if (w->on_destroy) w->on_destroy(w);
     free_widgets(w);
@@ -527,6 +530,14 @@ static window_t *window_at(int x, int y) {
         if (w->state != WS_MINIMIZED && rect_contains(w->frame, x, y)) hit = w;
     return hit;
 }
+window_t *wm_window_at(int x, int y) { return window_at(x, y); }
+window_t *wm_capture(void) { return capture; }
+void wm_capture_release(void) {
+    capture = NULL;
+    capture_taskbar = capture_desktop = 0;
+    drag_mode = DRAG_NONE;
+    drag_win = NULL;
+}
 static int is_overlay(window_t *w) { return (w->flags & (WF_TOPMOST | WF_POPUP)) != 0; }
 
 enum { HT_NONE, HT_CLIENT, HT_TITLE, HT_BUTTON, HT_RESIZE_R, HT_RESIZE_B, HT_RESIZE_RB };
@@ -555,6 +566,7 @@ static int hit_test(window_t *w, int x, int y, int *btn) {
 
 static int cursor_kind(void) {
     if (busy) return CURSOR_BUSY;
+    if (dnd_active()) return CURSOR_ARROW;
     if (drag_mode == DRAG_RESIZE) return drag_edge == HT_RESIZE_R ? CURSOR_RESIZE_H : drag_edge == HT_RESIZE_B ? CURSOR_RESIZE_V : CURSOR_RESIZE_NWSE;
     window_t *w = capture ? capture : window_at(mx, my);
     if (!w) return CURSOR_ARROW;
@@ -793,6 +805,7 @@ static void cycle_windows(void) {
 }
 
 static void key_event(input_event_t *k) {
+    if (dnd_key(k)) return;                                 /* a drag: Esc, Ctrl and Shift are its */
     if (k->pressed && k->key != KEY_LALT) alt_tap = 0;      /* Alt+Tab, Alt+F4, Alt+letter... */
     if (k->pressed) {
         if (k->key == KEY_LGUI || k->key == KEY_RGUI || (k->key == KEY_ESC && (k->mods & MOD_CTRL))) { start_menu_toggle(); return; }
@@ -813,12 +826,20 @@ static void key_event(input_event_t *k) {
     }
     window_t *pop = top_popup();
     window_t *w = pop ? pop : wm_active();
+    int f1 = k->pressed && k->key == KEY_F1 && !(k->mods & (MOD_CTRL | MOD_ALT | MOD_SHIFT));
     if (!w) {
+        if (f1) { shell_help(NULL); return; }
         gui_event_t e = { .type = GE_KEY, .key = *k };
         desktop_event(&e);
         return;
     }
     if (w->modal && wm_alive(w->modal)) w = w->modal;
+    /* F1: the help page of a built-in window (or of the window a dialog belongs to) */
+    if (f1 && !pop) {
+        window_t *h = w;
+        while (h && !h->help && h->owner && wm_alive(h->owner)) h = h->owner;
+        if (h && h->help) { shell_help(h->help); return; }
+    }
     gui_event_t e = { .type = GE_KEY, .key = *k };
     deliver(w, &e);
 }
@@ -855,6 +876,14 @@ static void handle_input(void) {
         }
         mx = CLAMP(mx, 0, screen_w() - 1);
         my = CLAMP(my, 0, screen_h() - 1);
+        if (dnd_active()) {             /* a drag: the pointer and the buttons are its */
+            int ob = mbuttons;
+            mbuttons = ev.buttons;
+            wm_invalidate_rect(cursor_rect(drawn_cursor < 0 ? 0 : drawn_cursor, drawn_cx, drawn_cy));
+            dnd_pointer(mx, my, ob, mbuttons);
+            wm_invalidate_rect(cursor_rect(cursor_kind(), mx, my));
+            continue;
+        }
         if (mx != ox || my != oy) {
             wm_invalidate_rect(cursor_rect(drawn_cursor < 0 ? 0 : drawn_cursor, drawn_cx, drawn_cy));
             mouse_move();
@@ -895,6 +924,7 @@ static void compose(rect_t r) {
     }
     if (!taskbar_drawn) taskbar_paint(&g, r);
     if (gui_overlay_paint) gui_overlay_paint(&g, r);     /* the volume indicator, tray tooltips */
+    dnd_paint(&g, r);                                    /* a drag's image */
     draw_cursor(&g);
 }
 
@@ -992,6 +1022,7 @@ void gui_step(void) {
             }
         }
         shell_tick();
+        dnd_tick();
     }
     if (render()) busy = 1;
     u64 deadline = idle_take_deadline();
@@ -1049,6 +1080,7 @@ static int screen_changed(void) {
 }
 
 void usergui_init(void);
+void recycle_test_hook(void);
 void gui_main(void) {
     gui_thread = thread_current();
     usergui_init();
@@ -1078,6 +1110,7 @@ void gui_main(void) {
         shell_run(autorun, args);
     }
     format_test_hook();
+    recycle_test_hook();                    /* apps/recycletest.c: fw_cfg opt/halcyon/recycletest */
     installer_boot_hook();
     for (;;) gui_step();
 }

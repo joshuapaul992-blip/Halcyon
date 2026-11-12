@@ -1,0 +1,41 @@
+<html><head><title>Drives, USB sticks and CDs</title>
+<meta name="keywords" content="drives; drive letters; USB sticks; removing USB sticks#usb; safely remove#usb; CDs#cd; DVDs#cd; ejecting a CD#cd; drive properties#props; free space#props; read-only drives#props; SD cards; exFAT; FAT32; file systems#fs">
+</head><body>
+<h2 style="color:#1f4e9a">Drives, USB sticks and CDs</h2>
+<p>Open <b>My Computer</b> to see every drive Halcyon can use. Each drive has a
+letter, just as on Windows: <b>C:</b> is the drive Halcyon started from; hard
+disks, USB sticks, memory cards and CD drives get the next free letters.</p>
+
+<h3 id="usb">USB sticks and memory cards</h3>
+<p>Plug in a USB stick and it appears in My Computer after a moment, with a
+balloon in the corner of the screen. Before you pull it out again, click the
+USB icon in the notification area and choose <b>Safely remove USB
+storage</b>: Halcyon finishes writing everything to the stick and then tells
+you it is safe to remove it. Pulling a stick out while files are still being
+written can damage them.</p>
+
+<h3 id="cd">CDs and DVDs</h3>
+<p>CD and DVD drives show the disc's name when a disc is in. Discs are read
+only. To take a disc out, right-click the drive in My Computer and choose
+<b>Eject</b>. Halcyon notices when you put in another disc.</p>
+
+<h3 id="props">Drive properties</h3>
+<p>Right-click a drive and choose <b>Properties</b> to see its label, its file
+system, how big it is and how much space is free. A padlock on a drive's icon
+means it is <b>read-only</b>: you can open files on it but not change them. The
+Properties dialog explains why, for example a write-protected memory card, a CD,
+or <a href="ntfs.htm">a Windows drive</a> that Windows did not shut down completely.</p>
+
+<h3 id="fs">File systems</h3>
+<p>Halcyon reads and writes the file systems most disks use:</p>
+<ul>
+<li><b>FAT12, FAT16 and FAT32</b>: floppies, older and smaller USB sticks and memory cards.</li>
+<li><b>exFAT</b>: most USB sticks and SD cards larger than 32 GB.</li>
+<li><b>NTFS</b>: Windows drives and many external disks. See <a href="ntfs.htm">NTFS drives and Windows</a>.</li>
+<li><b>ISO 9660</b> with long names: CDs and DVDs (read only).</li>
+</ul>
+<p>To start afresh with an empty drive, see <a href="format.htm">Formatting a disk</a>.</p>
+
+<p><b>Related topics:</b> <a href="files.htm">Files and folders in Explorer</a> &middot;
+<a href="recycle.htm#forgood">Deleting files on removable drives</a></p>
+</body></html>

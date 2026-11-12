@@ -86,6 +86,7 @@ static void about_destroy(window_t *w) { if (about_win == w) about_win = NULL; }
 void app_about(void) {
     if (about_win && wm_alive(about_win)) { wm_show(about_win); return; }
     window_t *w = wm_create("About Halcyon", ICON_HELP, 0, 0, AB_W, AB_H, WF_DIALOG | WF_CENTER);
+    if (w) w->help = "welcome";              /* F1 */
     w->on_paint = about_paint;
     w->on_destroy = about_destroy;
     widget_t *ok = widget_add(w, W_BUTTON, mkrect(AB_W - 89, AB_H - 37, 75, 23), "OK", ID_OK);

@@ -444,14 +444,32 @@ def ic_drive_sys():
     return img
 
 
-def ic_recycle():
+def ic_recycle(full=False):
+    """a glass wastebasket with a curved rim; full: crumpled paper in it"""
     img = new()
-    m = fill(img, poly([(7, 8), (25, 8), (23, 30), (9, 30)]), "#DCE8F4", "#93A8C4", outline="#4E6290")
-    gloss(img, m, 0.5, 100)
-    fill(img, rrect((5, 5, 27, 9), 1), "#EEF2F8", "#A8B6CC", outline="#4E6290")
-    for x in (12, 16, 20):
-        line(img, [(x, 11), (x - 0.5 + (x - 16) * 0.05, 27)], "#6A7E9E", 0.8)
-    return finish(img, m)
+    if full:
+        # paper behind the rim, well above it: a page and crumpled sheets
+        fill(img, poly([(9.5, 0.5), (20, 0), (21, 9), (10.5, 10)]), "#FFFFFF", "#E2E8F2", outline="#5E6A80")
+        line(img, [(12, 3), (18.5, 2.6)], "#8A96AA", 0.7)
+        line(img, [(12.2, 5), (18.7, 4.6)], "#8A96AA", 0.7)
+        fill(img, ellipse((4.5, 2.5, 15, 11.5)), "#FFF6CC", "#E0C870", outline="#8A7020")
+        line(img, [(7, 6), (10, 8.5), (12.5, 5.5)], "#A8903A", 0.8)
+        fill(img, ellipse((16.5, 2, 27.5, 11)), "#FFFFFF", "#C8D4E6", outline="#5E6A80")
+        line(img, [(18.5, 6.5), (21.5, 4.5), (25, 7)], "#8A96AA", 0.8)
+    # body: slightly tapered, bluish glass
+    body = fill(img, poly([(6, 9), (26, 9), (23.6, 29.4), (8.4, 29.4)]), "#E8F2FC", "#8FA9CC", outline="#41557E")
+    gloss(img, body, 0.55, 90)
+    # ribs
+    for x0, x1 in ((11, 11.8), (16, 16), (21, 20.2)):
+        line(img, [(x0, 12.5), (x1, 27)], "#5E7398", 0.9)
+        line(img, [(x0 + 0.9, 12.5), (x1 + 0.9, 27)], "#F4F8FF", 0.5)
+    # rim and base
+    fill(img, rrect((4.5, 7, 27.5, 11), 2), "#F6FAFF", "#A4B8D6", outline="#41557E")
+    fill(img, rrect((8.2, 28.2, 23.8, 30.2), 1), "#9AB0D0", "#5C7096", outline="#41557E")
+    if full:
+        # a sheet hanging over the rim
+        fill(img, poly([(20.5, 6), (26.5, 5.5), (25.5, 14), (22.5, 12.5)]), "#FFFFFF", "#E0E6F0", outline="#5E6A80")
+    return finish(img)
 
 
 def ic_web():
@@ -623,6 +641,7 @@ ICONS = [
     ("speaker_muted", lambda: ic_speaker(True)),
     ("file_audio", lambda: ic_page("audio")),
     ("media", ic_media),
+    ("recycle_full", lambda: ic_recycle(True)),
     ("setup", ic_setup),
 ]
 

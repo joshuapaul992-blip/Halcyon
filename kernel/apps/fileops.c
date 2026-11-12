@@ -4,6 +4,9 @@
 #include "core/mm.h"
 #include "core/kernel.h"
 #include "icons.h"
+#include "recycle.h"
+#include "core/settings.h"
+#include "gui/wm.h"
 
 int fileops_delete_tree(const char *path) {
     vfs_dirent_t st;
@@ -249,13 +252,42 @@ static int fop_delete(fileop_t *op, const char *path) {
     return r;
 }
 
+/* emptying the Recycle Bins: one tick per entry */
+static int empty_tick(void *ctx, const char *name, u64 bytes) {
+    fileop_t *op = ctx;
+    if (op->cancel) return 1;
+    strlcpy(op->current, name, sizeof op->current);
+    op->done_items++;
+    op->done_bytes += bytes;
+    return 0;
+}
+
+static int fop_empty(fileop_t *op, int count_only) {
+    int r = 0;
+    for (int i = 0; i < vfs_volume_count() && !op->cancel; i++) {
+        char l = vfs_volume(i)->letter;
+        if ((op->src[0] && toupper(op->src[0]) != l) || rb_supported(l)) continue;
+        if (count_only) {
+            int n;
+            u64 b;
+            if (!rb_usage(l, &n, &b)) { op->total_items += (u32)n; op->total_bytes += b; }
+            continue;
+        }
+        int e = rb_empty(l, empty_tick, op);
+        if (e && !r) r = e;
+    }
+    return op->cancel ? E_CANCELED : r;
+}
+
 void fileop_execute(fileop_t *op) {
     op->start_ms = time_ms();
     op->counting = 1;
-    fop_count(op, op->src);
+    if (op->kind == FOP_EMPTY) fop_empty(op, 1);
+    else fop_count(op, op->src);
     op->counting = 0;
     int r;
     if (op->cancel) r = E_CANCELED;
+    else if (op->kind == FOP_EMPTY) r = fop_empty(op, 0);
     else if (op->kind == FOP_DELETE) r = fop_delete(op, op->src);
     else if (op->kind == FOP_MOVE && toupper(op->src[0]) == toupper(op->dst[0])) r = vfs_rename(op->src, op->dst);
     else {
@@ -270,4 +302,121 @@ void fileop_execute(fileop_t *op) {
     vfs_sync_all();
     op->result = r;
     op->done = 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* lists of items (drops on the desktop, the built-in Explorer)         */
+
+static void report(window_t *owner, const char *what, const char *name, int err) {
+    char msg[VFS_MAX_NAME + 160];
+    snprintf(msg, sizeof msg, "Cannot %s '%s'.\n\n%s", what, name, strerror(err));
+    msgbox(owner, "Error", msg, ICON_ERROR, MB_OK);
+}
+
+int fileop_transfer(window_t *owner, int kind, const char *paths, int count, const char *dst) {
+    int result = 0;
+    const char *p = paths;
+    char *src = kmalloc(VFS_MAX_PATH), *to = kmalloc(VFS_MAX_PATH), *srcdir = kmalloc(VFS_MAX_PATH);
+    if (!src || !to || !srcdir) { kfree(src); kfree(to); kfree(srcdir); return E_NOMEM; }
+    for (int i = 0; i < count && *p; i++, p += strlen(p) + 1) {
+        if (vfs_normalize(p, src, VFS_MAX_PATH)) continue;
+        vfs_dirname(src, srcdir, VFS_MAX_PATH);
+        const char *base = vfs_basename(src);
+        int same = !strcasecmp(srcdir, dst);
+        if (same && kind == FOP_MOVE) continue;                 /* already there */
+        size_t sl = strlen(src);
+        if (!strncasecmp(src, dst, sl) && (dst[sl] == '/' || !dst[sl])) {
+            char msg[VFS_MAX_NAME + 120];
+            snprintf(msg, sizeof msg, "Cannot %s '%s': the destination folder is inside it.", kind == FOP_MOVE ? "move" : "copy", base);
+            msgbox(owner, "Error", msg, ICON_ERROR, MB_OK);
+            continue;
+        }
+        if (same) {
+            char cand[VFS_MAX_NAME + 16];
+            snprintf(cand, sizeof cand, "Copy of %s", base);
+            fileops_unique_name(dst, cand, to, VFS_MAX_PATH);
+        } else {
+            vfs_dirent_t st;
+            vfs_join(dst, base, to, VFS_MAX_PATH);
+            if (vfs_stat(to, &st) == 0) {
+                char msg[VFS_MAX_NAME + 200];
+                snprintf(msg, sizeof msg, "This folder already contains %s named '%s'.\n\nWould you like to replace it?",
+                         st.is_dir ? "a folder" : "a file", base);
+                int a = msgbox(owner, "Confirm Replace", msg, ICON_QUESTION, MB_YESNOCANCEL);
+                if (a == ID_CANCEL) { result = E_CANCELED; break; }
+                if (a != ID_YES) continue;
+                int r = fileops_delete_tree(to);
+                if (r < 0) { report(owner, "replace", base, r); result = r; continue; }
+            }
+        }
+        fileop_t *op = kzalloc(sizeof *op);
+        if (!op) { result = E_NOMEM; break; }
+        op->kind = kind;
+        strlcpy(op->src, src, sizeof op->src);
+        strlcpy(op->dst, to, sizeof op->dst);
+        int r = fileop_run(owner, op);
+        kfree(op);
+        if (r == E_CANCELED) { result = r; break; }
+        if (r < 0) { report(owner, kind == FOP_MOVE ? "move" : "copy", base, r); result = r; }
+    }
+    kfree(src); kfree(to); kfree(srcdir);
+    return result;
+}
+
+static int delete_now(window_t *owner, const char *path) {
+    fileop_t *op = kzalloc(sizeof *op);
+    if (!op) return E_NOMEM;
+    op->kind = FOP_DELETE;
+    strlcpy(op->src, path, sizeof op->src);
+    int r = fileop_run(owner, op);
+    kfree(op);
+    return r;
+}
+
+int fileop_recycle(window_t *owner, const char *paths, int count, int ask) {
+    int nuke = settings_get_int("recycle.nuke", 0), perm = 0, ro = 0;
+    char first[VFS_MAX_PATH] = "";
+    const char *p = paths;
+    for (int i = 0; i < count && *p; i++, p += strlen(p) + 1) {
+        int s = rb_supported(p[0]);
+        if (!i) strlcpy(first, p, sizeof first);
+        if (s == E_ROFS || s == E_NODEV) ro++;
+        else if (s || nuke) perm++;
+    }
+    if (ro) {
+        msgbox(owner, "Delete", count == 1 ? "This item is on a read-only drive and cannot be deleted."
+                                           : "Some of these items are on a read-only drive and cannot be deleted.",
+               ICON_WARNING, MB_OK);
+        if (ro == count) return E_ROFS;
+    }
+    if (ask || perm) {
+        char msg[VFS_MAX_NAME + 160];
+        if (count == 1) snprintf(msg, sizeof msg, perm ? "Are you sure you want to permanently delete '%s'?"
+                                                       : "Are you sure you want to send '%s' to the Recycle Bin?", vfs_basename(first));
+        else snprintf(msg, sizeof msg, perm ? "Are you sure you want to permanently delete these %d items?"
+                                            : "Are you sure you want to send these %d items to the Recycle Bin?", count);
+        if (msgbox(owner, perm ? "Confirm Delete" : "Confirm Send to Recycle Bin", msg, ICON_WARNING, MB_YESNO) != ID_YES)
+            return E_CANCELED;
+    }
+    int result = 0;
+    p = paths;
+    for (int i = 0; i < count && *p; i++, p += strlen(p) + 1) {
+        int s = rb_supported(p[0]), r;
+        if (s == E_ROFS || s == E_NODEV) continue;
+        if (!s && !nuke) {
+            r = rb_delete(p, 0);
+            if (r == E_NOSPC) {
+                char msg[VFS_MAX_NAME + 160];
+                snprintf(msg, sizeof msg, "'%s' is too big for the Recycle Bin.\n\nDo you want to delete it permanently?", vfs_basename(p));
+                if (msgbox(owner, "Delete", msg, ICON_WARNING, MB_YESNO) != ID_YES) continue;
+                r = delete_now(owner, p);
+            }
+        } else {
+            r = delete_now(owner, p);
+        }
+        if (r == E_CANCELED) return r;
+        if (r < 0) { report(owner, "delete", vfs_basename(p), r); result = r; }
+    }
+    vfs_sync_all();
+    return result;
 }

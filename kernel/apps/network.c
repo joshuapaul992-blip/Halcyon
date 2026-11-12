@@ -316,6 +316,7 @@ void app_network(void) {
     netwin_t *c = kzalloc(sizeof *c);
     if (!c) return;
     window_t *w = wm_create("Network Connections", ICON_NETWORK, -1, -1, NW_W, NW_H, WF_NO_MAXIMIZE);
+    if (w) w->help = "network";              /* F1 */
     if (!w) { kfree(c); return; }
     nw_win = w;
     w->data = c;

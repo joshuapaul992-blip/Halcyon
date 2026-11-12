@@ -65,7 +65,7 @@ static const unsigned default_palette[28] = {
 };
 
 /* menu items and controls */
-enum { PM_NEW = 1, PM_OPEN, PM_SAVE, PM_SAVEAS, PM_EXIT, PM_UNDO, PM_CLEAR, PM_SWAP, PM_ABOUT };
+enum { PM_NEW = 1, PM_OPEN, PM_SAVE, PM_SAVEAS, PM_EXIT, PM_UNDO, PM_CLEAR, PM_SWAP, PM_ABOUT, PM_HELP };
 enum { C_VSCROLL = 100, C_HSCROLL, C_STATUS };
 
 static const hal_menu_item_t menubar[] = {
@@ -82,6 +82,8 @@ static const hal_menu_item_t menubar[] = {
     { "&Swap colours", 0, PM_SWAP, 0, 0, 0 },
     { "&Clear image", 0, PM_CLEAR, 0, 0, 0 },
     { "&Help", 0, 0, MENU_TITLE, 0, 0 },
+    { "&Help Topics", "F1", PM_HELP, 0, HICON_HELP, 0 },
+    { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
     { "&About Paint", 0, PM_ABOUT, 0, HICON_PAINT, 0 },
 };
 
@@ -1127,6 +1129,7 @@ static void menu_command(int id) {
         box(&img, 0, 0, img.w - 1, img.h - 1, bg);
         dirty = 1;
         break;
+    case PM_HELP: help_open("paint"); break;
     case PM_ABOUT: {
         hal_sysinfo_t si;
         char text[400];
@@ -1224,6 +1227,7 @@ static void handle(const hal_event_t *e) {
         break;
     case EVT_KEY:
         if (!e->pressed) break;
+        if (e->id == KEY_F1 && !(e->mods & (MOD_CTRL | MOD_ALT))) { help_open("paint"); break; }
         if (e->id == KEY_ESC) { cancel_draw(); break; }
         if (!(e->mods & MOD_CTRL) || drawing) break;
         if (key_shortcut(e, 'N')) cmd_new();
@@ -1234,6 +1238,11 @@ static void handle(const hal_event_t *e) {
     case EVT_FOCUS:
         if (!e->pressed && drawing) end_draw(lx, ly);
         break;
+    case EVT_DRAG: {                            /* a .bmp file dropped on the window opens */
+        char p[PATH_MAX];
+        if (!drawing && dnd_open_target(e, "bmp", p, sizeof p) && confirm_discard()) { load(p); need |= N_ALL; }
+        break;
+    }
     }
 }
 

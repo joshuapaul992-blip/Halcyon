@@ -44,6 +44,7 @@ typedef struct gui_event {
 /* ---------------- widgets ---------------- */
 typedef struct window window_t;
 typedef struct widget widget_t;
+struct dnd_event;
 
 enum { W_BUTTON = 1, W_LABEL, W_TEXTBOX, W_CHECKBOX, W_LISTBOX, W_GROUP, W_PROGRESS, W_ICON, W_COMBO,
        W_VSCROLL, W_HSCROLL, W_TOOLBUTTON, W_STATUSBAR };
@@ -116,6 +117,7 @@ struct window {
     void (*on_tick)(window_t *w);        /* ~10 Hz when set */
     void (*on_resize)(window_t *w);
     void (*on_menu)(window_t *w, int id);/* menu bar / popup menu commands */
+    int  (*on_dnd)(window_t *w, struct dnd_event *e);   /* a drag-and-drop target / source (gui/dnd.h) */
     void *data;
 
     widget_t *widgets, *focus;
@@ -125,6 +127,7 @@ struct window {
     int min_w, min_h;
     int result;               /* dialog result */
     int closed;               /* set when destroyed (for nested loops) */
+    const char *help;         /* F1 opens this Help and Support page (shell_help), or NULL */
     window_t *next;           /* z-order, bottom to top */
 };
 
@@ -149,6 +152,10 @@ int  wm_mouse_x(void);
 int  wm_mouse_y(void);
 void wm_set_busy(int busy);            /* hourglass cursor */
 void wm_cursor_changed(void);          /* a window's cursor shape changed: redraw the pointer */
+window_t *wm_window_at(int x, int y);  /* the window at a screen position (drag and drop) */
+int  wm_mouse_buttons(void);           /* MOUSE_* held */
+void wm_capture_release(void);         /* a drag starts: no window has the mouse any more */
+window_t *wm_capture(void);            /* the window a held button was pressed in, or NULL */
 
 /* main loop */
 void gui_main(void);
@@ -267,5 +274,6 @@ void installer_boot_hook(void);                    /* apps/installer.c: welcome 
 struct proc;
 int  gui_ask_permission(struct proc *asker, const char *title, const char *text);   /* permit.c */
 int  shell_run(const char *path, const char *args);   /* start a user program; pid or error (reported) */
+void shell_help(const char *page);     /* Help and Support (HELP.EXE) on a page ("notepad"), NULL: the home page */
 
 #endif

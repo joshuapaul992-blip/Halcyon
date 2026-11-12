@@ -17,6 +17,7 @@
 #   make -C tests/host hid       only the HID tests (HIDARGS=-v lists every report)
 #   make -C tests/host hda       only the HD Audio codec tests (HDAARGS=-v dumps the codecs)
 #   make -C tests/host ntfsfmt   only the NTFS formatter tests (NTFSARGS="-v quick")
+#   make -C tests/host notepad   only Notepad's text model and undo (NPARGS=-v)
 #                                includes the "hostile" scenario: corrupted
 #                                partition tables / FAT / exFAT volumes and the
 #                                minimized fuzzer crash inputs (fuzz_regress/)
@@ -50,7 +51,7 @@ OUT     ?= $(ROOT)/build/hosttest
 NTFS_SRCS := $(addprefix $(ROOT)/kernel/fs/,ntfs.c ntfs_mft.c ntfs_index.c ntfs_alloc.c ntfs_lznt1.c)
 KSRCS   := $(ROOT)/kernel/fs/block.c $(ROOT)/kernel/fs/vfs.c $(ROOT)/kernel/fs/fat.c $(ROOT)/kernel/fs/exfat.c $(ROOT)/kernel/fs/iso9660.c \
            $(NTFS_SRCS) $(ROOT)/kernel/core/unicode.c shim.c
-SRCS    := $(KSRCS) $(ROOT)/kernel/fs/ntfs_mkfs.c $(ROOT)/kernel/fs/ntfs_upcase.c fstest.c fuzz_fs.c
+SRCS    := $(KSRCS) $(ROOT)/kernel/fs/ntfs_mkfs.c $(ROOT)/kernel/fs/ntfs_upcase.c $(ROOT)/kernel/apps/recycle.c fstest.c fuzz_fs.c
 HDRS    := $(wildcard $(ROOT)/kernel/fs/*.h) $(wildcard $(ROOT)/kernel/core/*.h) fuzz_fs.h
 WARN    := -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers \
            -Wno-address-of-packed-member -Wno-unused-result -fno-strict-aliasing
@@ -68,7 +69,7 @@ SEEDS   := $(OUT)/fuzz_seeds
 KBD_SRCS := kbdtest.c $(ROOT)/kernel/drivers/keymap.c $(ROOT)/kernel/drivers/keylayouts.c $(ROOT)/kernel/core/unicode.c
 
 all: $(OUT)/fstest $(OUT)/fuzz_replay $(OUT)/kbdtest $(OUT)/hidtest $(OUT)/displaytest $(OUT)/netsim $(OUT)/netstack.so \
-     $(OUT)/hdatest $(OUT)/ntfsfmt
+     $(OUT)/hdatest $(OUT)/ntfsfmt $(OUT)/notepadtest
 
 NETSRCS := $(addprefix $(ROOT)/kernel/net/,socket.c local.c inet.c eth.c ip.c udp.c tcp.c dhcp.c dns.c)
 NETHDRS := $(wildcard $(ROOT)/kernel/net/*.h) $(wildcard $(ROOT)/kernel/core/*.h) netsim.h
@@ -117,7 +118,7 @@ $(OUT)/kbdtest: $(KBD_SRCS) $(ROOT)/kernel/drivers/keymap.h $(ROOT)/kernel/drive
 kbd: $(OUT)/kbdtest
 	$(OUT)/kbdtest
 
-$(OUT)/fstest: $(SRCS) isotest.c ntfstest.c $(HDRS) Makefile
+$(OUT)/fstest: $(SRCS) isotest.c ntfstest.c recycletest.c $(ROOT)/kernel/apps/recycle.h $(HDRS) Makefile
 	@mkdir -p $(OUT)
 	gcc $(CFLAGS) $(SRCS) -o $@
 
@@ -142,6 +143,17 @@ $(OUT)/parttest: $(ROOT)/kernel/fs/parttab.c $(ROOT)/kernel/fs/parttab.h parttes
 parttab: $(OUT)/parttest
 	@rm -rf $(OUT)/partwork && mkdir -p $(OUT)/partwork
 	$(OUT)/parttest $(OUT)/partwork $(PARTARGS)
+
+# Notepad's text model and undo engine (userland/programs/notepad/doc.c,
+# undo.c), compiled for the host (-DNP_HOST) with the user library's UTF-8
+NPDIR := $(ROOT)/userland/programs/notepad
+NPSRCS := notepadtest.c $(NPDIR)/doc.c $(NPDIR)/undo.c $(ROOT)/userland/lib/utf8.c
+$(OUT)/notepadtest: $(NPSRCS) $(NPDIR)/doc.h $(NPDIR)/undo.h Makefile
+	@mkdir -p $(OUT)
+	gcc -std=gnu11 -O1 -g $(WARN) $(SAN) -DNP_HOST -I$(NPDIR) $(NPSRCS) -o $@
+
+notepad: $(OUT)/notepadtest
+	$(OUT)/notepadtest $(NPARGS)
 
 HIDSRCS := $(ROOT)/kernel/usb/hidparse.c hidtest.c
 HIDHDRS := $(ROOT)/kernel/usb/hidparse.h $(ROOT)/kernel/drivers/input.h $(wildcard $(ROOT)/kernel/core/*.h)
@@ -203,4 +215,4 @@ fuzz-run: $(OUT)/fuzz_fs seeds
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all kbd hid hda ntfsfmt test seeds fuzz fuzz-run fuzz-regress net fuzz-net-run fuzz-net-regress clean
+.PHONY: all kbd hid hda ntfsfmt notepad test seeds fuzz fuzz-run fuzz-regress net fuzz-net-run fuzz-net-regress clean

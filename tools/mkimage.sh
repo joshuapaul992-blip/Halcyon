@@ -47,6 +47,13 @@ if ls $BUILD/media/*.WAV >/dev/null 2>&1; then
         mcopy -i "$PART" "$f" "::/HALCYON/MEDIA/$(basename "$f")"
     done
 fi
+# help pages (tools/mkhelp.py)
+if ls $BUILD/help/*.htm >/dev/null 2>&1; then
+    mmd -i "$PART" ::/HALCYON/HELP
+    for f in $BUILD/help/*.htm $BUILD/help/*.TXT; do
+        mcopy -i "$PART" "$f" "::/HALCYON/HELP/$(basename "$f")"
+    done
+fi
 # user files
 if [ -d rootfs ]; then
     for f in rootfs/*; do

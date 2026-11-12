@@ -26,6 +26,11 @@ interrupts on, get a working interrupt:
   user    run C:\\PROGRAMS\\SELFTEST.EXE after boot (QEMU fw_cfg autorun): user-mode
           system calls, crashing / looping child programs, windows; it must
           report "selftest: all N checks passed"
+  help    run C:\\PROGRAMS\\HELP.EXE --test notepad after boot (Help and Support):
+          the contents and index load, every page in the contents renders and
+          its links lead to pages and anchors, Back / Forward, an anchor, the
+          index filter and the search ranking work; it must report
+          "helptest: all N checks passed"
   sock    run C:\\PROGRAMS\\SOCKTEST.EXE after boot: local stream and datagram
           sockets between programs, poll, limits, peers that crash or are
           ended; it must report "socktest: all N checks passed"
@@ -66,6 +71,16 @@ interrupts on, get a working interrupt:
           desktop is up; afterwards the partition table must say 0x07 and the
           partition must pass ntfsfix -n, ntfsinfo -m (label, cluster size)
           and tests/host/ntfs_tool.py check on the host (ntfs-3g tools)
+  recycle the Recycle Bin and drag and drop (QEMU fw_cfg recycletest, a kernel
+          thread: kernel/apps/recycletest.c): on the FAT32 test disk a file
+          goes to the bin and stays, another goes to the bin, its folder is
+          deleted for good and it is restored; on the exFAT disk two files
+          go to the bin, which is emptied; and C:\\Documents\\Getting
+          Started.txt is dragged onto EXPLORER.EXE showing the FAT32 disk's
+          RBTEST folder, which must answer "copy" (another drive) and copy
+          it. Afterwards, on the host: the bin's INDEX.TXT and D1.txt (mtools),
+          the restored and copied files, no bin left on the exFAT disk
+          (exfat_tool.py), and fsck.fat / fsck.exfat / exfat_tool.py check
   cd      also an AHCI CD-ROM drive with an ISO 9660 + Joliet test disc
           (built with xorriso): the disc must mount, and after the desktop is
           up the disc is ejected and another one inserted through the QEMU
@@ -124,9 +139,13 @@ or attach a sound card, its output recorded by QEMU's wav backend (48 kHz):
           recording must hold the startup sound and then SNDTEST's signal, a
           660 Hz sine written as 8-bit mono at 32 kHz for 1 s, at the right
           pitch and length without dropouts.
+  dusk    with a sound card variant: SETTINGS.INI selects the Halcyon Dusk
+          sound scheme, and the recording must start with DUSKSTRT.WAV
+          instead of STARTUP.WAV.
+  tide    the same with the Halcyon Tide scheme (TIDESTRT.WAV).
 or install Halcyon on a second disk with the installer and start that disk
 alone ("install" as a CONFIG runs the whole set; see INSTALL_DOC below for
-each variant): install, installnvme, installntfs, installgpt
+each variant): install, installnvme, installnvme4k, installntfs, installgpt
 NETDUMP=file.pcap records the net variants' frames (128 bytes each) for debugging.
 Exit status is the number of failed configurations.
 """
@@ -142,13 +161,15 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "uhci:uefi", "ehci:uefi", "ich9:uefi", "xhci:uefi",
           "xhci:bios:nomsi", "uhci:bios:pic", "xhci:uefi:pic", "ehci:bios:noirq",
           "xhci:bios:nvme", "xhci:uefi:nvme4k", "xhci:bios:nvme+nomsi", "xhci:uefi:nvme+noirq",
-          "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user", "xhci:bios:sock", "xhci:bios:web",
+          "xhci:bios:cd", "xhci:bios:user", "xhci:bios:help", "uhci:uefi:user", "xhci:bios:sock", "xhci:bios:web",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
-          "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:uefi:virtiosnd", "xhci:bios:audio",
-          "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:uefi:install", "xhci:bios:install"]
-VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
-            "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0}
+          "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97", "xhci:bios:ac97+dusk", "xhci:uefi:hda+tide", "xhci:uefi:virtiosnd", "xhci:bios:audio",
+          "xhci:uefi:hda", "xhci:bios:ntfs", "xhci:bios:ntfsrw", "xhci:bios:recycle",
+          "xhci:uefi:install", "xhci:bios:install"]
+VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "help": 0, "sock": 0, "web": 0,
+            "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0,
+            "recycle": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -171,6 +192,9 @@ SOUNDS = {"ac97": ("-device AC97,audiodev=snd0", "ac97"),
 for _n in SOUNDS:
     VARIANTS[_n] = 0
 VARIANTS["audio"] = 0
+VARIANTS["dusk"] = 0                     # with a sound card: the Halcyon Dusk scheme (DUSKSTRT.WAV)
+VARIANTS["tide"] = 0                     # with a sound card: the Halcyon Tide scheme (TIDESTRT.WAV)
+STARTUP_REF = ["STARTUP.WAV"]            # the startup sound the recording must start with (run() sets it)
 SOUND_TEST_MS = 2000
 BEEP_AMP = 12000                         # snd_beep's sine (sound/beep.c)
 SNDTEST_HZ, SNDTEST_MS = 660, 1000       # SNDTEST.EXE's signal
@@ -190,7 +214,7 @@ CHECKS = [
 ]
 BAD = ["CPU EXCEPTION", "KERNEL PANIC", "nested fault"]
 # variants that run a test program after boot: (program, its report prefix)
-PROGRAMS = {"user": ("SELFTEST.EXE", "selftest"), "sock": ("SOCKTEST.EXE", "socktest"), "web": ("WEBTEST.EXE", "webtest"),
+PROGRAMS = {"user": ("SELFTEST.EXE", "selftest"), "help": ("HELP.EXE", "helptest"), "sock": ("SOCKTEST.EXE", "socktest"), "web": ("WEBTEST.EXE", "webtest"),
             "net": ("NETTEST.EXE", "nettest"), "audio": ("SNDTEST.EXE", "sndtest"), "ntfsrw": ("NTFSTEST.EXE", "ntfstest")}
 PROGRAM_TIMEOUT = {"net": 300}
 NET_LOSS_PCT = 3
@@ -415,7 +439,7 @@ def startup_failures(wav, segs, signal_amp):
     in a stream at 100 %: the master volume, and QEMU's AC'97 codec, which
     takes off another 2.5 dB, apply to both). Returns (failures, the
     segments after it)."""
-    ref_path = os.path.join(BUILD, "media", "STARTUP.WAV")
+    ref_path = os.path.join(BUILD, "media", STARTUP_REF[0])
     if not segs:
         return ["no startup sound (silence)"], segs
     ref = wav_envelope(ref_path)
@@ -1011,6 +1035,56 @@ def run_install(cfg, hc, fw, opts):
     return not fails
 
 
+RB_DELETED = b"This file waits in the Recycle Bin.\r\n"
+RB_RESTORED = b"This file came back from the Recycle Bin.\r\n"
+
+
+def recycle_failures(text, sata, sata_x):
+    """the Recycle Bin test's disks, checked on the host"""
+    m = re.search(r"recycle test: done \((\d+) checks, (\d+) failed\)", text)
+    if not m:
+        return ["recycle test did not finish"]
+    fails = [l[l.index("recycle test:"):].strip() for l in text.splitlines() if "recycle test:" in l and "FAILED" in l][:4]
+    fat = sata + "@@1M"                 # (fat32gpt.img: the partition at LBA 2048)
+
+    def mtype(path):
+        r = subprocess.run(["mtype", "-i", fat, "::" + path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           env=dict(os.environ, MTOOLS_SKIP_CHECK="1"))
+        return r.stdout if r.returncode == 0 else None
+    index = mtype("/RECYCLED/INDEX.TXT") or b""
+    lines = index.split(b"\r\n")
+    if lines[0] != b"HALCYON RECYCLE BIN 1" or b"END 1" not in lines or \
+            not any(re.match(rb"1\t\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\t%d\tF\t[D-Z]:/RBTEST/deleted\.txt$" % len(RB_DELETED), l)
+                    for l in lines):
+        fails.append("the bin's index on the FAT32 disk: %r" % index[:160])
+    if mtype("/RECYCLED/D1.txt") != RB_DELETED:
+        fails.append("RECYCLED\\D1.txt")
+    if mtype("/RBTEST/deleted.txt") is not None:
+        fails.append("deleted.txt still in its folder")
+    if mtype("/RBTEST/Sub/restored.txt") != RB_RESTORED:
+        fails.append("RBTEST\\Sub\\restored.txt not restored")
+    want = open("rootfs/Documents/Getting Started.txt", "rb").read()
+    if mtype("/RBTEST/Getting Started.txt") != want:
+        fails.append("the dropped copy of Getting Started.txt")
+    part = os.path.join(BUILD, "ci_rb_part.img")
+    subprocess.run(["dd", "if=" + sata, "of=" + part, "bs=512", "skip=2048", "status=none"], check=True)
+    r = subprocess.run(["fsck.fat", "-n", part], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if r.returncode:
+        fails.append("fsck.fat: " + r.stdout.strip().splitlines()[-1])
+    xt = [sys.executable, "tests/host/exfat_tool.py", sata_x + "@@1048576"]
+    r = subprocess.run(xt + ["ls"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if r.returncode or "RECYCLED" in r.stdout.upper() or "D RBX" not in r.stdout or "RBX/" in r.stdout:
+        fails.append("the exFAT disk after emptying its bin: " + " ".join(r.stdout.split()[:12]))
+    r = subprocess.run(xt + ["check"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if r.returncode:
+        fails.append("exfat_tool.py check: " + r.stdout.strip().splitlines()[0])
+    subprocess.run(["dd", "if=" + sata_x, "of=" + part, "bs=512", "skip=2048", "status=none"], check=True)
+    if subprocess.run(["fsck.exfat", "-n", part], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        fails.append("fsck.exfat")
+    os.remove(part)
+    return fails
+
+
 def run(cfg):
     parts = cfg.split(":")
     hc, fw = parts[0], parts[1]
@@ -1065,6 +1139,8 @@ def run(cfg):
             return True
         extra += (" -drive if=none,id=d4,format=raw,file=%s -device ide-hd,drive=d4,bus=ide.3,model=NTFSRW"
                   % ntfsrw_disk)
+    if "recycle" in opts:
+        extra += " -fw_cfg name=opt/halcyon/recycletest,string=1"
     if flags:
         extra += " -fw_cfg name=opt/halcyon/bootflags,string=%#x" % flags
     nic = next((v for v in opts if v in NICS), None)
@@ -1090,8 +1166,12 @@ def run(cfg):
         elif "audio" not in opts:       # (SNDTEST plays its own signal instead of the kernel's test)
             extra += " -fw_cfg name=opt/halcyon/soundtest,string=%d" % SOUND_TEST_MS
     prog = next((PROGRAMS[v] for v in opts if v in PROGRAMS), None)
-    prog_args = ""
+    prog_args = " --test notepad" if "help" in opts else ""
     ini_lines = []
+    STARTUP_REF[0] = "DUSKSTRT.WAV" if "dusk" in opts else "TIDESTRT.WAV" if "tide" in opts else "STARTUP.WAV"
+    for sch in ("dusk", "tide"):
+        if sch in opts:
+            ini_lines.append("sound.scheme=" + sch)
     net = "net" in opts
     if net:
         ns_mod, ports = net_servers()
@@ -1189,6 +1269,11 @@ def run(cfg):
         while time.time() - t1 < 30 and p.poll() is None and "format test: " not in text:
             time.sleep(0.5)
             text = open(log, errors="replace").read()
+    if "recycle" in opts:
+        t1 = time.time()
+        while time.time() - t1 < 60 and p.poll() is None and "recycle test: done" not in text:
+            time.sleep(0.5)
+            text = open(log, errors="replace").read()
     idle = None
     if p.poll() is None and "gui: desktop ready" in text and not prog:
         time.sleep(2)
@@ -1230,6 +1315,8 @@ def run(cfg):
         failures += ntfs_failures(text, ntfs_disk)
     if ntfsrw_disk:
         failures += ntfsrw_failures(text, ntfsrw_disk)
+    if "recycle" in opts and not nvme:
+        failures += recycle_failures(text, sata, sata_x)
     if nic:
         failures += net_failures(text, nic, opts)
     if beep:

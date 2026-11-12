@@ -490,6 +490,7 @@ void app_installer_disk(const char *preselect) {
     w->on_tick = wiz_tick;
     w->on_close = wiz_close;
     w->on_destroy = wiz_destroy;
+    w->help = "install";                /* F1 */
     int body = CH - FOOT;
     widget_add(w, W_LABEL, mkrect(BANNER_W + 18, 18, CW - BANNER_W - 36, 44), "", ID_TITLE)->style |= WS_HIDDEN;
     widget_add(w, W_LABEL, mkrect(BANNER_W + 18, 84, CW - BANNER_W - 36, body - 96), "", ID_TEXT)->style |= WS_WRAP;
@@ -558,6 +559,7 @@ void install_welcome(void) {
     if (!w) return;
     w->on_paint = welcome_paint;
     w->on_close = welcome_close;
+    w->help = "install";
     widget_add(w, W_LABEL, mkrect(20, 78, 380, 92),
                "Halcyon is running from a USB stick. You can keep using it this way, or install it on this "
                "computer's hard disk so that it starts without the stick.\n\nIt can go next to Windows: the "

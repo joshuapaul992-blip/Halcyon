@@ -514,6 +514,7 @@ void app_calc(void) {
     c->hover = c->pressed = c->flash = -1;
     clear_all(c);
     window_t *w = wm_create("Calculator", ICON_CALC, -1, -1, cw, ch, WF_NO_MAXIMIZE);
+    if (w) w->help = "calc";              /* F1 */
     w->data = c;
     w->on_paint = calc_paint;
     w->on_event = calc_event;

@@ -15,6 +15,9 @@
 #include "usb/usb.h"
 #include "drivers/keymap.h"
 #include "version.h"
+#include "dnd.h"
+#include "apps/recycle.h"
+#include "apps/fileops.h"
 
 static surface_t *wallpaper;
 static int wp_style;
@@ -221,6 +224,13 @@ static void l_control(void) { app_control(); }
 static void l_mines(void) { run_or("C:/PROGRAMS/SONAR.EXE", app_mines); }
 static void l_about(void) { app_about(); }
 static void l_taskmgr(void) { shell_run("C:/PROGRAMS/TASKMGR.EXE", NULL); }
+static void l_recycle(void) { shell_explorer("Recycle Bin"); }
+/* Help and Support (HELP.EXE): a page of C:\HALCYON\HELP, or the home page */
+void shell_help(const char *page) {
+    if (proc_spawn("C:/PROGRAMS/HELP.EXE", page, NULL, NULL) < 0)
+        msgbox(NULL, "Help and Support", "Help and Support (C:\\PROGRAMS\\HELP.EXE) cannot be started.", ICON_ERROR, MB_OK);
+}
+static void l_help(void) { shell_help(NULL); }
 
 static const dicon_t dicons[] = {
     { "My Computer", ICON_COMPUTER, l_computer },
@@ -230,9 +240,15 @@ static const dicon_t dicons[] = {
     { "Paint", ICON_PAINT, l_paint },
     { "Web Browser", ICON_WEB, l_browser },
     { "System Information", ICON_SYSINFO, l_sysinfo },
+    { "Recycle Bin", ICON_RECYCLE, l_recycle },
 };
 #define NDICONS ((int)ARRAY_SIZE(dicons))
 static int dsel = -1;
+static int drop_hover = -1;             /* the icon a drag is over */
+static int bin_full;                    /* some Recycle Bin holds something */
+static int dicon_image(int i) {
+    return dicons[i].launch == l_recycle && bin_full ? ICON_RECYCLE_FULL : dicons[i].icon;
+}
 
 static rect_t dicon_rect(int i) {
     int rows = MAX(1, (screen_h() - TASKBAR_H - 10) / 84);
@@ -245,10 +261,10 @@ void desktop_paint(gc_t *g, rect_t clip) {
     for (int i = 0; i < NDICONS; i++) {
         rect_t r = dicon_rect(i);
         if (rect_empty(rect_intersect(r, clip))) continue;
-        int sel = i == dsel;
+        int sel = i == dsel || i == drop_hover;
         int ix = r.x + (r.w - 32) / 2, iy = r.y + 4;
-        if (sel) gfx_icon_tinted(g, ix, iy, &icons32[dicons[i].icon], g_theme->select, 110);
-        else gfx_icon(g, ix, iy, &icons32[dicons[i].icon]);
+        if (sel) gfx_icon_tinted(g, ix, iy, &icons32[dicon_image(i)], g_theme->select, 110);
+        else gfx_icon(g, ix, iy, &icons32[dicon_image(i)]);
         /* label: up to two lines, centred, with shadow */
         const char *lbl = dicons[i].label;
         int tw = gfx_text_width(&font_ui, lbl);
@@ -298,10 +314,113 @@ static menu_item_t desk_menu_items[] = {
 static menu_t desk_menu = { "Desktop", desk_menu_items, 5 };
 
 static window_t *desk_dummy;   /* owner for desktop context menus */
+static void empty_bins(void);
 static void desk_menu_cmd(window_t *w, int id) {
     if (id == 1) gui_full_redraw();
     else if (id == 2) app_terminal();
     else if (id == 3) app_display();
+    else if (id == 10 && dsel >= 0) dicons[dsel].launch();
+    else if (id == 11) empty_bins();
+    else if (id == 12) { if (!run_prog("C:/PROGRAMS/EXPLORER.EXE", "-rbprops")) l_recycle(); }
+}
+
+/* icons' own menus: Open; the Recycle Bin's adds Empty Recycle Bin and Properties */
+static menu_item_t icon_menu_items[] = {
+    { "&Open", NULL, 10, MI_BOLD, 0 },
+    { "", NULL, 0, MI_SEPARATOR, 0 },
+    { "&Empty Recycle Bin", NULL, 11, 0, ICON_RECYCLE },
+    { "", NULL, 0, MI_SEPARATOR, 0 },
+    { "P&roperties", NULL, 12, 0, 0 },
+};
+static menu_t icon_menu = { "", icon_menu_items, 5 };
+
+/* empty every Recycle Bin, after a question, behind a progress window */
+static void empty_bins(void) {
+    int total = 0;
+    for (int i = 0; i < vfs_volume_count(); i++) {
+        int n = 0;
+        u64 b;
+        char l = vfs_volume(i)->letter;
+        if (!rb_supported(l) && !rb_usage(l, &n, &b)) total += n;
+    }
+    if (!total) return;
+    char msg[120];
+    if (total == 1) snprintf(msg, sizeof msg, "Are you sure you want to permanently delete the item in the Recycle Bin?");
+    else snprintf(msg, sizeof msg, "Are you sure you want to delete all of the %d items in the Recycle Bin?", total);
+    if (msgbox(NULL, "Confirm Multiple File Delete", msg, ICON_WARNING, MB_YESNO) != ID_YES) return;
+    fileop_t *op = kzalloc(sizeof *op);
+    if (!op) return;
+    op->kind = FOP_EMPTY;
+    int r = fileop_run(NULL, op);
+    kfree(op);
+    if (r < 0 && r != E_CANCELED) {
+        snprintf(msg, sizeof msg, "The Recycle Bin could not be emptied.\n\n%s", strerror(r));
+        msgbox(NULL, "Recycle Bin", msg, ICON_ERROR, MB_OK);
+    }
+}
+
+/* ---------------- the desktop as a drop target ---------------- */
+enum { DROP_BIN = 1, DROP_DOCS };
+typedef struct { char *paths; int count, target, effect; } drop_job_t;
+
+static void job_drop(void *a) {
+    drop_job_t *j = a;
+    if (j->target == DROP_BIN) fileop_recycle(NULL, j->paths, j->count, settings_get_int("recycle.confirm", 1));
+    else fileop_transfer(NULL, j->effect == DND_COPY ? FOP_COPY : FOP_MOVE, j->paths, j->count, "C:/Documents");
+    kfree(j->paths);
+    kfree(j);
+}
+
+static int drop_icon_at(int x, int y) {
+    for (int i = 0; i < NDICONS; i++)
+        if (rect_contains(dicon_rect(i), x, y) && (dicons[i].launch == l_recycle || dicons[i].launch == l_docs)) return i;
+    return -1;
+}
+
+static void set_drop_hover(int i) {
+    if (i == drop_hover) return;
+    if (drop_hover >= 0) wm_invalidate_rect(dicon_rect(drop_hover));
+    drop_hover = i;
+    if (i >= 0) wm_invalidate_rect(dicon_rect(i));
+}
+
+int desktop_dnd(dnd_event_t *e) {
+    if (e->type == DND_LEAVE || e->type == DND_END) { set_drop_hover(-1); return 0; }
+    int i = drop_icon_at(e->x, e->y), len = 0, count = 0;
+    const char *paths = dnd_paths(e->serial, &len, &count);
+    int effect = DND_NONE, possible = 0;
+    if (i >= 0 && paths) {
+        if (dicons[i].launch == l_recycle) {
+            /* to the bin: unless everything is on read-only drives */
+            for (const char *p = paths; p < paths + len && *p; p += strlen(p) + 1) {
+                int s = rb_supported(p[0]);
+                if (s != E_ROFS && s != E_NODEV && !rb_is_bin_path(p)) { effect = possible = DND_MOVE; break; }
+            }
+        } else {
+            /* into My Documents: a move on C:, a copy from other drives; Ctrl copies, Shift moves */
+            effect = toupper(paths[0]) == 'C' ? DND_MOVE : DND_COPY;
+            if (e->mods & MOD_CTRL) effect = DND_COPY;
+            else if (e->mods & MOD_SHIFT) effect = DND_MOVE;
+            possible = DND_COPY | DND_MOVE;
+            for (const char *p = paths; p < paths + len && *p; p += strlen(p) + 1)
+                if (!strncasecmp(p, "C:/Documents", 12) && (!p[12] || (p[12] == '/' && !strchr(p + 13, '/')))) effect = possible = 0;
+        }
+    }
+    if (e->type == DND_DROP) {
+        set_drop_hover(-1);
+        if (i < 0 || !paths || !e->effect) return 0;
+        drop_job_t *j = kzalloc(sizeof *j);
+        if (!j || !(j->paths = kmalloc((size_t)len + 1))) { kfree(j); return 0; }
+        memcpy(j->paths, paths, (size_t)len);
+        j->paths[len] = 0;
+        j->count = count;
+        j->target = dicons[i].launch == l_recycle ? DROP_BIN : DROP_DOCS;
+        j->effect = e->effect;
+        gui_post(job_drop, j);       /* (questions and progress windows run their own loops) */
+        return 0;
+    }
+    set_drop_hover(effect ? i : -1);
+    return DND_ANSWER(effect, possible);
 }
 
 int desktop_event(gui_event_t *e) {
@@ -314,6 +433,14 @@ int desktop_event(gui_event_t *e) {
             if (hit >= 0) wm_invalidate_rect(dicon_rect(hit));
         }
         if (e->type == GE_DBLCLICK && hit >= 0 && e->button == MOUSE_LEFT) dicons[hit].launch();
+        if (e->type == GE_MOUSE_DOWN && e->button == MOUSE_RIGHT && hit >= 0) {
+            int bin = dicons[hit].launch == l_recycle;
+            icon_menu.count = bin ? 5 : 1;
+            icon_menu_items[2].flags = bin_full ? 0 : MI_DISABLED;
+            if (!desk_dummy) { desk_dummy = kzalloc(sizeof(window_t)); }
+            desk_dummy->on_menu = desk_menu_cmd;
+            menu_popup(desk_dummy, &icon_menu, e->x, e->y);
+        }
         if (e->type == GE_MOUSE_DOWN && e->button == MOUSE_RIGHT && hit < 0) {
             if (!desk_dummy) { desk_dummy = kzalloc(sizeof(window_t)); }
             desk_dummy->on_menu = desk_menu_cmd;
@@ -410,6 +537,13 @@ static rect_t task_rect(int i, int n) {
     int x0 = START_W + 12, x1 = tray_rect().x - 8;
     int w = n ? MIN(170, (x1 - x0) / n) : 170;
     return mkrect(x0 + i * w, t.y + 3, w - 3, t.h - 5);
+}
+
+window_t *taskbar_window_at(int x, int y) {
+    window_t *tasks[32];
+    int n = task_list(tasks, 32);
+    for (int i = 0; i < n; i++) if (rect_contains(task_rect(i, n), x, y)) return tasks[i];
+    return NULL;
 }
 
 void taskbar_paint(gc_t *g, rect_t clip) {
@@ -594,14 +728,15 @@ static const sitem_t right_items[] = {
     { "Network Connections", NULL, ICON_NETWORK, l_network },
     { "System Information", NULL, ICON_SYSINFO, l_sysinfo },
     { "Task Manager", NULL, ICON_DISPLAY, l_taskmgr },
-    { "About Halcyon", NULL, ICON_HELP, l_about },
+    { "Help and Support", NULL, ICON_HELP, l_help },
+    { "About Halcyon", NULL, ICON_LOGO, l_about },
     { "Install Halcyon", NULL, ICON_SETUP, app_installer },
 };
 #define SM_W 400
 #define SM_H 528                   /* 8 programs on the left */
 #define SM_HEAD 62
 #define SM_FOOT 44
-static int sm_hover = -1;   /* 0..7 left, 10..16 right, 20 restart?, 21 shutdown */
+static int sm_hover = -1;   /* 0..7 left, 10..18 right, 20 restart?, 21 shutdown */
 
 static rect_t sm_item_rect(int id) {
     if (id < 10) return mkrect(6, SM_HEAD + 8 + id * 44, 196, 42);
@@ -686,7 +821,7 @@ static void sm_event(window_t *w, gui_event_t *e) {
     } else if (e->type == GE_KEY && e->key.pressed) {
         if (e->key.key == KEY_ESC) menu_close_all();
         else if (e->key.key == KEY_DOWN || e->key.key == KEY_UP) {
-            int order[] = { 0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21 };
+            int order[] = { 0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 21 };
             int n = ARRAY_SIZE(order), cur = -1;
             for (int i = 0; i < n; i++) if (order[i] == sm_hover) cur = i;
             cur = cur < 0 ? 0 : (cur + (e->key.key == KEY_DOWN ? 1 : n - 1)) % n;
@@ -757,8 +892,28 @@ static int usb_count(void) {
 }
 static int known_letters[26];
 
+/* the Recycle Bin icon shows whether any bin holds something */
+static void bin_state(void) {
+    static u32 seen_gen, seen_vgen = ~0u;
+    if ((rb_generation() == seen_gen && vfs_generation() == seen_vgen) || rb_busy()) return;
+    seen_vgen = vfs_generation();
+    int full = 0;
+    for (int i = 0; i < vfs_volume_count() && !full; i++) {
+        int n = 0;
+        u64 b;
+        char l = vfs_volume(i)->letter;
+        if (!rb_supported(l) && !rb_usage(l, &n, &b) && n) full = 1;
+    }
+    seen_gen = rb_generation();         /* (reading may have repaired an index) */
+    if (full != bin_full) {
+        bin_full = full;
+        for (int i = 0; i < NDICONS; i++) if (dicons[i].launch == l_recycle) wm_invalidate_rect(dicon_rect(i));
+    }
+}
+
 void shell_tick(void) {
     struct rtc_time tm;
+    bin_state();
     static u64 last_clock;
     if (time_ms() - last_clock > 1000) {
         last_clock = time_ms();
@@ -817,7 +972,7 @@ static void restart_now(void) {
     sound_shutdown_begin();             /* plays while the log is saved; heard in full before the reset */
     bootlog_save("restart");
     vfs_sync_all();
-    sound_shutdown_wait(4000);
+    sound_shutdown_wait(8000);
     mdelay(400);
     reboot();
 }
@@ -873,7 +1028,7 @@ void shutdown_dialog(void) {
         sound_shutdown_begin();
         bootlog_save("shutdown");
         vfs_sync_all();
-        sound_shutdown_wait(4000);
+        sound_shutdown_wait(8000);
         mdelay(500);
         shutdown();
         final_screen("It is now safe to turn off your computer.");
