@@ -154,6 +154,7 @@ void wm_cursor_changed(void);          /* a window's cursor shape changed: redra
 window_t *wm_window_at(int x, int y);  /* the window at a screen position (drag and drop) */
 int  wm_mouse_buttons(void);           /* MOUSE_* held */
 void wm_capture_release(void);         /* a drag starts: no window has the mouse any more */
+window_t *wm_capture(void);            /* the window a held button was pressed in, or NULL */
 
 /* main loop */
 void gui_main(void);

@@ -531,6 +531,7 @@ static window_t *window_at(int x, int y) {
     return hit;
 }
 window_t *wm_window_at(int x, int y) { return window_at(x, y); }
+window_t *wm_capture(void) { return capture; }
 void wm_capture_release(void) {
     capture = NULL;
     capture_taskbar = capture_desktop = 0;

@@ -918,7 +918,8 @@ typedef struct { uwin_t *u; char *paths; int len, count, effects, icon, result; 
 static void job_dnd_begin(void *a) {
     dnd_job_t *j = a;
     window_t *w = j->u->w;
-    j->result = !w ? E_INVAL : wm_mouse_buttons() ? dnd_begin(w, j->paths, j->len, j->count, j->effects, j->icon) : E_AGAIN;
+    /* only the window the held button was pressed in can start a drag */
+    j->result = !w ? E_INVAL : wm_mouse_buttons() && wm_capture() == w ? dnd_begin(w, j->paths, j->len, j->count, j->effects, j->icon) : E_AGAIN;
 }
 
 static long usergui_syscall_more(proc_t *p, int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
