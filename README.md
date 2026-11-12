@@ -1,5 +1,8 @@
 # Halcyon
 
+A from-scratch Windows XP-like operating system (warning: fully vibe coded,
+use at your own risk).
+
 ![Halcyon desktop](docs/screenshot.png)
 
 Halcyon is a small x86-64 hobby operating system with an early-2000s style
@@ -363,3 +366,10 @@ tests/web    host tests of the web library and the browser's parser and decoders
     (82576) and rtl8139: the Realtek RTL8169/8111/8168 (QEMU has none), the Intel
     I217/I218/I219 with their Management Engine and ULP handling, 82571/2/3/83,
     I350/I210/I211 (see docs/HARDWARE.md)
+
+## License
+
+Halcyon is released under the [MIT License](LICENSE). Vendored third-party
+code (BearSSL, MIT; Mozilla's CA list, MPL-2.0) and the fonts used at build
+time (DejaVu) keep their own licenses: see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
