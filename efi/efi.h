@@ -82,6 +82,20 @@ typedef struct {
 #define HD_NODE_SIGNATURE  24
 #define HD_NODE_SIG_TYPE   41
 #define HD_SIG_TYPE_MBR    1
+#define HD_SIG_TYPE_GUID   2
+
+#define EFI_MEMORY_RUNTIME 0x8000000000000000ull
+
+/* ---- runtime services (only the variable services are used) ---- */
+#define EFI_GLOBAL_VARIABLE_GUID { 0x8BE4DF61, 0x93CA, 0x11D2, { 0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C } }
+typedef struct {
+    EFI_TABLE_HEADER Hdr;
+    void *GetTime, *SetTime, *GetWakeupTime, *SetWakeupTime;
+    void *SetVirtualAddressMap, *ConvertPointer;
+    EFI_STATUS (EFIAPI *GetVariable)(CHAR16 *, EFI_GUID *, UINT32 *, UINTN *, void *);
+    void *GetNextVariableName;
+    void *SetVariable;
+} EFI_RUNTIME_SERVICES;
 
 /* ---- text output ---- */
 typedef struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
@@ -175,7 +189,7 @@ typedef struct {
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *ConOut;
     EFI_HANDLE StandardErrorHandle;
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *StdErr;
-    void *RuntimeServices;
+    EFI_RUNTIME_SERVICES *RuntimeServices;
     EFI_BOOT_SERVICES *BootServices;
     UINTN NumberOfTableEntries;
     EFI_CONFIGURATION_TABLE *ConfigurationTable;

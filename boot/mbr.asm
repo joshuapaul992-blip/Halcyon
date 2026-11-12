@@ -1,7 +1,11 @@
 ; Halcyon OS - Master Boot Record
-; Loads stage2 (64 sectors, LBA 1..64) to 0000:8000 using INT 13h extensions
-; and jumps to it with DL = BIOS boot drive.
+; Loads stage2 (64 sectors from the LBA in stage2_lba, normally LBA 1..64)
+; to 0000:8000 using INT 13h extensions and jumps to it with DL = BIOS boot
+; drive.
 ; Only bytes 0..439 are written to disk; the partition table is preserved.
+; stage2_lba (offset 432) is 1 on the stick (stage2 in the gap after the
+; MBR); the installer patches it on GPT disks, where stage2 lives in a BIOS
+; boot partition (LBA 1 holds the GPT header there).
 
 bits 16
 org 0x7C00
@@ -34,11 +38,14 @@ start:
     ; read 2 x 32 sectors
     mov word [dap.count], 32
     mov word [dap.off], 0x8000
-    mov dword [dap.lba], 1
+    mov eax, [stage2_lba]
+    mov dword [dap.lba], eax
     call read
     mov word [dap.count], 32
     mov word [dap.off], 0xC000
-    mov dword [dap.lba], 33
+    mov eax, [stage2_lba]
+    add eax, 32
+    mov dword [dap.lba], eax
     call read
 
     mov dl, [boot_drive]
@@ -98,4 +105,9 @@ msg_boot:  db "Halcyon", 0
 msg_noext: db " - no LBA BIOS support", 0
 msg_disk:  db " - disk read error", 0
 
-times 440-($-$$) db 0
+times 432-($-$$) db 0
+stage2_lba: dd 1            ; offset 432: first sector of stage2 (patched by the installer)
+            dd 0
+%if ($-$$) != 440
+%error "MBR boot code must be exactly 440 bytes"
+%endif

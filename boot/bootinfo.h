@@ -28,6 +28,7 @@
 #define MMAP_BAD      5
 
 #define BOOTINFO_MAX_MMAP 256
+#define BOOTINFO_MAX_RT   48
 
 /* boot_flags: set by the loaders' F8 "Advanced Startup Options" menu */
 #define BOOTF_VERBOSE   0x0001   /* show the kernel log on screen while booting */
@@ -109,6 +110,19 @@ struct bootinfo {
     uint32_t edid_size;        /* 0 = no EDID; else 128 (base block only) */
     uint8_t  edid[128];
     uint32_t mode_reason;      /* MODE_BY_* */
+
+    /* UEFI only (zero from the BIOS loader) */
+    uint8_t  boot_part_guid[16];   /* GPT unique partition GUID of the boot partition (all zero: MBR / unknown) */
+    uint64_t efi_system_table;     /* EFI_SYSTEM_TABLE (physical; boot services are gone) */
+    uint64_t efi_runtime;          /* EFI_RUNTIME_SERVICES, callable in physical mode (no SetVirtualAddressMap) */
+    uint32_t efi_boot_current;     /* BootCurrent when the loader ran, 0xFFFFFFFF if unknown */
+    char     efi_boot_desc[64];    /* that Boot####'s description (ASCII, "" if unknown) */
+    uint32_t efi_rt_count;         /* memory ranges the runtime services need (EFI_MEMORY_RUNTIME) */
+    struct bootinfo_rtmem {
+        uint64_t base, pages;
+        uint32_t type;             /* EFI memory type (11 = MMIO, 12 = MMIO port space) */
+        uint32_t reserved;
+    } __attribute__((packed)) efi_rt[BOOTINFO_MAX_RT];
 } __attribute__((packed));
 
 #endif

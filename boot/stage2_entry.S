@@ -110,6 +110,39 @@ int_insn:
     calll unreal
     retl
 
+/* void chain_boot(uint32_t drive): start another system's boot record,
+ * already at 0000:7C00, as the standard MBR code would: real mode with
+ * 64 KiB segment limits again (not unreal), DL = drive, DS:SI = its
+ * partition entry (copied to 0000:07BE by the caller), SS:SP = 0000:7C00 */
+    .global chain_boot
+chain_boot:
+    movl 4(%esp), %edx
+    cli
+    lgdtl gdt_desc
+    movl %cr0, %eax
+    orb $1, %al
+    movl %eax, %cr0
+    jmp 1f
+1:  movw $0x20, %bx                  /* 16-bit data, limit 64 KiB */
+    movw %bx, %ds
+    movw %bx, %es
+    movw %bx, %fs
+    movw %bx, %gs
+    movw %bx, %ss
+    andb $0xFE, %al
+    movl %eax, %cr0
+    jmp 2f
+2:  xorw %ax, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %fs
+    movw %ax, %gs
+    movw %ax, %ss
+    movl $0x7C00, %esp
+    movw $0x07BE, %si
+    sti
+    ljmp $0, $0x7C00
+
 /* void enter_long(uint32_t pml4, uint32_t entry, uint32_t bootinfo) */
     .global enter_long
 enter_long:
@@ -152,6 +185,7 @@ gdt:
     .quad 0x00AF9A000000FFFF     /* 0x08: 64-bit code */
     .quad 0x00CF92000000FFFF     /* 0x10: flat 32-bit data */
     .quad 0x00CF9A000000FFFF     /* 0x18: flat 32-bit code */
+    .quad 0x000092000000FFFF     /* 0x20: 16-bit data, 64 KiB (for chain_boot) */
 gdt_end:
 gdt_desc:
     .word gdt_end - gdt - 1

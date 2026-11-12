@@ -133,10 +133,41 @@ static void find_boot_partition(EFI_LOADED_IMAGE_PROTOCOL *li, struct bootinfo *
             u64 start = rd_u64(n + HD_NODE_PART_START);
             if (start <= 0xFFFFFFFFull) bi->boot_part_lba = (u32)start;
             if (n[HD_NODE_SIG_TYPE] == HD_SIG_TYPE_MBR) bi->boot_disk_sig = rd_u32(n + HD_NODE_SIGNATURE);
+            if (n[HD_NODE_SIG_TYPE] == HD_SIG_TYPE_GUID) memcpy(bi->boot_part_guid, n + HD_NODE_SIGNATURE, 16);
             return;
         }
         dp = (EFI_DEVICE_PATH_PROTOCOL *)((u8 *)dp + len);
     }
+}
+
+/* ---------------- firmware boot entry ----------------
+ * Which Boot#### the firmware started us from (BootCurrent) and its
+ * description, for the log: the installer's tests check that an installed
+ * disk starts through the "Halcyon" entry it registered. */
+static void read_boot_current(struct bootinfo *bi) {
+    EFI_GUID g = EFI_GLOBAL_VARIABLE_GUID;
+    EFI_RUNTIME_SERVICES *rt = ST->RuntimeServices;
+    bi->efi_boot_current = 0xFFFFFFFF;
+    if (!rt || !rt->GetVariable) return;
+    u16 cur = 0;
+    UINTN n = sizeof cur;
+    UINT32 attr;
+    static CHAR16 bc[] = u"BootCurrent";
+    if (EFI_ERROR(rt->GetVariable(bc, &g, &attr, &n, &cur)) || n != 2) return;
+    bi->efi_boot_current = cur;
+    CHAR16 name[9] = u"Boot0000";
+    for (int i = 0; i < 4; i++) name[4 + i] = (CHAR16)"0123456789ABCDEF"[(cur >> (12 - 4 * i)) & 15];
+    static u8 opt[512];
+    n = sizeof opt;
+    if (EFI_ERROR(rt->GetVariable(name, &g, &attr, &n, opt)) || n < 8) return;
+    /* EFI_LOAD_OPTION: u32 attributes, u16 path length, CHAR16 description[] */
+    u32 k = 0;
+    for (UINTN i = 6; i + 1 < n && k < sizeof bi->efi_boot_desc - 1; i += 2) {
+        u16 c = (u16)(opt[i] | opt[i + 1] << 8);
+        if (!c) break;
+        bi->efi_boot_desc[k++] = c < 0x80 ? (char)c : '?';
+    }
+    bi->efi_boot_desc[k] = 0;
 }
 
 /* ---------------- kernel ---------------- */
@@ -468,6 +499,18 @@ static void convert_mmap(EFI_MEMORY_DESCRIPTOR *map, UINTN n, UINTN dsz,
         else
             work[m++] = work[i];
     }
+    /* the ranges the runtime services need (the kernel maps them and never
+     * allocates from them: their types are reserved / MMIO above) */
+    bi->efi_rt_count = 0;
+    for (UINTN i = 0; i < n && bi->efi_rt_count < BOOTINFO_MAX_RT; i++) {
+        EFI_MEMORY_DESCRIPTOR *d = DESC(map, i, dsz);
+        if (!(d->Attribute & EFI_MEMORY_RUNTIME) || !d->NumberOfPages) continue;
+        struct bootinfo_rtmem *r = &bi->efi_rt[bi->efi_rt_count++];
+        r->base = d->PhysicalStart;
+        r->pages = d->NumberOfPages;
+        r->type = d->Type;
+        r->reserved = 0;
+    }
     /* too many entries: drop plain reserved ranges first (the kernel only
      * allocates from usable memory), then truncate */
     int drop_reserved = m > BOOTINFO_MAX_MMAP;
@@ -649,6 +692,9 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *systab) {
     bi->boot_flags = check_f8();
     bi->bios_drive = 0;
     find_boot_partition(li, bi);
+    read_boot_current(bi);
+    bi->efi_system_table = (u64)(uintptr_t)ST;
+    bi->efi_runtime = (u64)(uintptr_t)ST->RuntimeServices;
     bi->rsdp = find_rsdp();
     u32 slen = read_settings(li);
     setup_gop(bi, settings_buf, slen);
