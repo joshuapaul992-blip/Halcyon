@@ -17,7 +17,7 @@
 #define PATHN 300
 
 enum { ID_PLAY = 10, ID_STOP, ID_OPEN, C_STATUS,
-       M_OPEN = 100, M_CLOSE, M_EXIT, M_PLAY, M_STOP, M_BACK, M_AHEAD, M_VOLUP, M_VOLDOWN, M_ABOUT };
+       M_OPEN = 100, M_CLOSE, M_EXIT, M_PLAY, M_STOP, M_BACK, M_AHEAD, M_VOLUP, M_VOLDOWN, M_ABOUT, M_HELP };
 enum { ST_NONE, ST_STOPPED, ST_PLAYING, ST_PAUSED };
 
 static const hal_menu_item_t bar[] = {
@@ -36,6 +36,8 @@ static const hal_menu_item_t bar[] = {
     { "Volume &up", "Up", M_VOLUP, 0, 0, 0 },
     { "Volume &down", "Down", M_VOLDOWN, 0, 0, 0 },
     { "&Help", 0, 0, MENU_TITLE, 0, 0 },
+    { "&Help Topics", "F1", M_HELP, 0, HICON_HELP, 0 },
+    { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
     { "&About Media Player", 0, M_ABOUT, 0, HICON_MEDIA, 0 },
 };
 #define N(a) ((int)(sizeof(a) / sizeof((a)[0])))
@@ -398,6 +400,7 @@ static void command(int id) {
     case M_AHEAD: skip(5); break;
     case M_VOLUP: set_volume(volume + 5); break;
     case M_VOLDOWN: set_volume(volume - 5); break;
+    case M_HELP: help_open("mplayer"); break;
     case M_ABOUT:
         msgbox(win, "About Media Player", "Halcyon Media Player\n\nPlays WAV files: PCM 8, 16, 24 and 32-bit, IEEE float, "
                "IMA ADPCM, mu-law and A-law, at any rate, mono, stereo or more channels.", MBX_ICON_INFO, MBX_OK);
@@ -419,6 +422,11 @@ static void handle(hal_event_t *ev) {
     case EVT_PAINT: paint_all(); break;
     case EVT_MENU: command(ev->id); break;
     case EVT_COMMAND: command(ev->id); ctl_focus(win, 0); break;
+    case EVT_DRAG: {                            /* a .wav file dropped on the window plays */
+        char p[PATHN];
+        if (dnd_open_target(ev, "wav;wave", p, sizeof p)) open_file(p, 1);
+        break;
+    }
     case EVT_MOUSE_DOWN:
         if (ev->button != MOUSE_LEFT) break;
         if (state != ST_NONE && in_rect(R_SEEK, ev->x, ev->y)) { seek_drag = (int)seek_frame_at(ev->x); paint_seek(); paint_display(); }
@@ -440,6 +448,7 @@ static void handle(hal_event_t *ev) {
         break;
     case EVT_KEY:
         if (!ev->pressed) break;
+        if (ev->id == KEY_F1) { help_open("mplayer"); break; }
         if (key_shortcut(ev, 'O')) { open_dialog(); break; }
         switch (ev->id) {
         case KEY_SPACE: play_pause(); break;

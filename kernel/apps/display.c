@@ -499,6 +499,7 @@ void app_display(void) {
     disp_t *d = kzalloc(sizeof *d);
     if (!d) return;
     window_t *w = wm_create("Display Properties", ICON_DISPLAY, -1, -1, DW, DH, WF_NO_MAXIMIZE);
+    if (w) w->help = "display";              /* F1 */
     if (!w) { kfree(d); return; }
     dp_win = w;
     w->data = d;

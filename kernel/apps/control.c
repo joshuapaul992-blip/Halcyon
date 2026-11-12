@@ -151,6 +151,7 @@ static void app_timezone(window_t *owner) {
     if (tz_win && wm_alive(tz_win)) { wm_show(tz_win); return; }
     int W = 420, H = 330;
     window_t *w = wm_create("Time Zone", ICON_CONTROL, -1, -1, W, H, WF_DIALOG | WF_CENTER);
+    if (w) w->help = "timezone";              /* F1 */
     if (!w) return;
     tz_win = w;
     w->owner = owner;
@@ -389,6 +390,7 @@ void app_control(void) {
     c->last_sec = -1;
     thumbnail(c, c->wall);
     window_t *w = wm_create("Control Panel", ICON_CONTROL, -1, -1, CP_W, CP_H, WF_NO_MAXIMIZE);
+    if (w) w->help = "control";              /* F1 */
     w->data = c;
     w->on_paint = cp_paint;
     w->on_tick = cp_tick;

@@ -154,6 +154,7 @@ void drive_props_dialog(window_t *owner, char letter) {
     snprintf(name, sizeof name, "%s (%c:)", v->label[0] ? v->label : drive_kind(v), v->letter);
     snprintf(title, sizeof title, "%s Properties", name);
     window_t *w = wm_create(title, drive_icon(v), -1, -1, W, H, WF_DIALOG | WF_CENTER);
+    if (w) w->help = "drives";              /* F1 */
     if (!w) return;
     w->data = &p;
     w->on_close = props_close;

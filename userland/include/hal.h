@@ -127,6 +127,51 @@ static inline int eject(char drive) { return (int)SC1(SYS_EJECT, drive); }      
  * with file arg, System Information, Control Panel, About); does not wait */
 static inline int shell_app(int app, const char *arg) { return (int)SC2(SYS_SHELL_APP, app, arg); }
 
+/* ---- the Recycle Bin (absolute paths; see docs/DESIGN-M8-EXPLORER.md) ---- */
+/* move a file or folder to its drive's bin: the entry's id; E_NOTSUP: the
+ * drive has no bin (removable) or it is turned off (RBF_NUKE): delete it for
+ * good instead, after asking; E_ROFS: nothing on that drive can be deleted;
+ * E_NOSPC: too big for the bin */
+static inline int recycle_delete(const char *path) { return (int)SC1(SYS_RECYCLE_DELETE, path); }
+/* entries of one drive's bin (0: every drive), oldest first; max 0: just count them */
+static inline int recycle_list(char drive, hal_rbentry_t *buf, int max) { return (int)SC3(SYS_RECYCLE_LIST, drive, buf, max); }
+/* back to where it was (missing folders are made); mode RBR_*: when something is there now */
+static inline int recycle_restore(char drive, unsigned id, int mode, char *out, int n) {
+    return (int)SC5(SYS_RECYCLE_RESTORE, drive, id, mode, out, n);
+}
+/* delete one entry for good; id 0: empty the drive's bin (drive 0: every bin) */
+static inline int recycle_purge(char drive, unsigned id) { return (int)SC2(SYS_RECYCLE_PURGE, drive, id); }
+static inline int recycle_info(char drive, hal_rbinfo_t *info) { return (int)SC2(SYS_RECYCLE_INFO, drive, info); }
+/* the size limit of a drive's bin (percent of the drive), or (drive 0) the RBF_* options; saved */
+static inline int recycle_set(char drive, int percent, unsigned flags) { return (int)SC3(SYS_RECYCLE_SET, drive, percent, flags); }
+/* Explorer's settings in SETTINGS.INI (keys "explorer.*"): the value's
+ * length or E_NOENT; set "" removes it */
+static inline int shell_setting_get(const char *key, char *buf, int n) { return (int)SC4(SYS_SHELL_SETTING, key, 0, buf, n); }
+static inline int shell_setting_set(const char *key, const char *value) { return (int)SC2(SYS_SHELL_SETTING, key, value); }
+
+/* ---- drag and drop (EVT_DRAG, DND_* in sysabi.h) ----
+ * Source: when the user presses a mouse button on an item and moves a few
+ * pixels with it held, start a drag of NUL-separated absolute paths (len
+ * bytes, count paths) with the effects allowed (DND_COPY | DND_MOVE) and the
+ * icon the pointer carries; the call returns at once (the serial number) and
+ * EVT_DRAG DND_END comes when it is over. The window gets no more mouse
+ * events for that press. Target: EVT_DRAG DND_ENTER / DND_OVER ask what a
+ * drop at x, y would do: answer each with dnd_accept (DND_NONE refuses);
+ * DND_DROP says to do it (ev.pressed: the effect), dnd_data gives the paths. */
+static inline int dnd_begin(int win, const char *paths, int len, int count, int effects, int icon) {
+    return (int)SC5(SYS_DND_BEGIN, win, paths, len, effects | (icon << 8), count);
+}
+static inline int dnd_accept(int win, int serial, int effect, int possible) { return (int)SC4(SYS_DND_ACCEPT, win, serial, effect, possible); }
+static inline int dnd_data(int serial, char *buf, int size) { return (int)SC3(SYS_DND_DATA, serial, buf, size); }
+/* for windows that open a file dropped on them (Notepad, Paint, Media
+ * Player): call it with every EVT_DRAG. exts: the extensions taken
+ * ("bmp", "wav;wave"), or NULL for any file. Returns 1 when one was dropped
+ * (its path in path), else 0 (it answers DND_ENTER / DND_OVER itself) */
+int  dnd_open_target(const hal_event_t *ev, const char *exts, char *path, int pathsz);
+
+/* ---- help: opens HELP.EXE (Help and Support) on a page of
+ * C:\HALCYON\HELP, e.g. help_open("notepad"), or the contents (NULL) ---- */
+int  help_open(const char *page);
 /* ---- settings kept in C:\HALCYON\SETTINGS.INI. Any key can be read; a
  * program writes only keys named after it: "paint.*" for PAINT.EXE,
  * "marquee.*" for MARQUEE.SCR (else E_PERM), of letters, digits, '.', '-',

@@ -1,0 +1,54 @@
+<html><head><title>Solving startup problems</title>
+<meta name="keywords" content="troubleshooting; startup problems; F8#f8; Advanced Startup Options#f8; safe mode#f8; verbose boot#f8; safe video mode#f8; black screen#f8; disabling drivers#f8; Secure Boot#secure; computer does not start from the USB stick#secure; frozen at startup#f8">
+</head><body>
+<h2 style="color:#1f4e9a">Solving startup problems</h2>
+<p>Most computers start Halcyon without any fuss. If yours does not, this page
+helps you find out why, and how to get going anyway.</p>
+
+<h3 id="secure">The computer does not start from the USB stick</h3>
+<ul>
+<li>Choose the stick in your computer's <b>boot menu</b> (often <kbd>F12</kbd>,
+<kbd>F11</kbd>, <kbd>F8</kbd> or <kbd>Esc</kbd> just after you switch on).</li>
+<li>On newer computers, turn <b>Secure Boot</b> off in the firmware settings:
+Halcyon's start-up program is not signed by Microsoft, and Secure Boot refuses
+to run it.</li>
+<li>Write the stick again with a "raw" or "DD image" writer, such as Rufus in
+DD image mode. Copying the image file onto the stick like an ordinary file does
+not work.</li>
+</ul>
+
+<h3 id="f8">Advanced Startup Options (F8)</h3>
+<p>While Halcyon starts, it shows <b>Press F8 for Advanced Startup
+Options</b> for a moment. Press <kbd>F8</kbd> then to see a menu. Use the arrow
+keys and <kbd>Enter</kbd>:</p>
+<table cellpadding="3" cellspacing="0">
+<tr><td width="230"><b>Start Halcyon normally</b></td><td>As if you had not pressed F8.</td></tr>
+<tr><td><b>Safe Mode</b></td><td>Starts with as little as possible: no USB, SATA or NVMe drivers and
+no interrupts, and with the system's messages on screen. Use it to see how far Halcyon gets.</td></tr>
+<tr><td><b>Start with the options below</b></td><td>Starts with the switches you ticked in the rest of the list.</td></tr>
+<tr><td><b>Verbose boot</b></td><td>Shows the system's messages on screen while it starts.</td></tr>
+<tr><td><b>Disable USB 3.x / USB 2.0 / USB 1.1 controllers</b></td><td>Leaves out a kind of USB controller. Try these
+when Halcyon stops while it looks for USB devices.</td></tr>
+<tr><td><b>Disable SATA controllers</b>, <b>Disable NVMe controllers</b></td><td>Leaves out the disk drivers.</td></tr>
+<tr><td><b>Disable ACPI</b></td><td>Does not read the firmware's description of the hardware.</td></tr>
+<tr><td><b>Disable interrupts</b></td><td>Polls every device instead. Slow and power-hungry, but it works around
+broken interrupt routing.</td></tr>
+<tr><td><b>Disable MSI</b>, <b>Use the legacy PIC</b></td><td>Older ways of delivering interrupts, for unusual hardware.</td></tr>
+<tr><td><b>Safe video mode (800 x 600)</b></td><td>For a screen that stays black or shows a garbled picture.</td></tr>
+</table>
+<p>A good way to narrow down a problem is to switch one thing off at a time. When
+you have found the switch that helps, please report it, with your boot log.</p>
+
+<h3>Halcyon starts, but something does not work</h3>
+<ul>
+<li>A device is missing: look in <a href="sysinfo.htm">System Information</a>.</li>
+<li>A drive is read-only: see <a href="ntfs.htm">NTFS drives and Windows</a>
+and <a href="drives.htm#props">Drive properties</a>.</li>
+<li>No network or no sound: see <a href="network.htm#problems">Connecting to a
+network</a> and <a href="sounds.htm#nosound">Sounds and Audio Devices</a>.</li>
+<li>A program hangs or closes: see <a href="crash.htm">When a program stops responding</a>.</li>
+</ul>
+
+<p><b>Related topics:</b> <a href="bootlog.htm">The boot log</a> &middot;
+<a href="install.htm">Installing Halcyon</a></p>
+</body></html>

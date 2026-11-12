@@ -23,6 +23,7 @@ struct sysframe {
 long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __attribute__((weak));
 long socket_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __attribute__((weak));   /* net/ */
 long sound_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __attribute__((weak));    /* sound/ */
+long shell_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __attribute__((weak));    /* apps/shellsys.c */
 
 /* ---- helpers ---- */
 
@@ -400,6 +401,8 @@ static long sys_setting_get(u64 ukey, u64 ubuf, u64 n) {
     return (long)len;
 }
 
+/* a program may write its own keys only ("notepad.*" for NOTEPAD.EXE: never
+ * a permission such as ntfs.write.*); saved a moment later, coalesced */
 static long sys_setting_set(proc_t *p, u64 ukey, u64 uval) {
     char key[SETTINGS_KEY_MAX];
     static char val[SETTINGS_VAL_MAX];          /* (system calls do not block until settings_user_set returns) */
@@ -559,6 +562,8 @@ void syscall_dispatch(struct sysframe *f) {
             if (socket_syscall) r = socket_syscall((int)nr, a1, a2, a3, a4, a5, a6);
         } else if (nr >= SYS_SOUND_FIRST && nr <= SYS_SOUND_LAST) {
             if (sound_syscall) r = sound_syscall((int)nr, a1, a2, a3, a4, a5, a6);
+        } else if (nr >= SYS_RECYCLE_DELETE && nr <= SYS_SHELL_SETTING) {     /* the Recycle Bin, Explorer's settings */
+            if (shell_syscall) r = shell_syscall((int)nr, a1, a2, a3, a4, a5, a6);
         } else if (nr >= SYS_WIN_CREATE && nr < SYS_COUNT && usergui_syscall) {
             r = usergui_syscall((int)nr, a1, a2, a3, a4, a5, a6);
         }

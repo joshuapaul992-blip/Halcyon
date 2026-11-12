@@ -1,0 +1,43 @@
+<html><head><title>Network tools for the Command Prompt</title>
+<meta name="keywords" content="PING#ping; IPCONFIG#ipconfig; NSLOOKUP#nslookup; WGET#wget; DNS, testing#nslookup; testing the network; network address, showing#ipconfig">
+</head><body>
+<h2 style="color:#1f4e9a">Network tools for the Command Prompt</h2>
+<p>When the network does not behave, these small programs help you find out
+where the trouble is. Type them in the <a href="cmd.htm">Command Prompt</a>.
+Unlike Halcyon's own commands, their options must be typed in lower case.</p>
+
+<h3 id="ipconfig">IPCONFIG: what is my address?</h3>
+<p><code>ipconfig</code> shows each network adapter with its address, subnet
+mask and gateway. <code>ipconfig /all</code> adds the DNS servers, the hardware
+address and the DHCP details.</p>
+<table cellpadding="3" cellspacing="0">
+<tr><td width="170"><code>ipconfig /renew</code></td><td>Asks the DHCP server for an address again.</td></tr>
+<tr><td><code>ipconfig /release</code></td><td>Gives the address back.</td></tr>
+<tr><td><code>ipconfig /flushdns</code></td><td>Forgets the names looked up so far.</td></tr>
+<tr><td><code>ipconfig /stats</code></td><td>Counts of what has been sent and received.</td></tr>
+<tr><td><code>ipconfig /conns</code></td><td>The connections that are open.</td></tr>
+</table>
+
+<h3 id="ping">PING: can I reach it?</h3>
+<p><code>ping 192.168.1.1</code> or <code>ping example.com</code> sends four
+small messages and shows how long each answer took. Answers mean the other
+computer can be reached; "Request timed out" means it cannot (or that it does
+not answer pings). <code>-n 10</code> sends ten, <code>-t</code> keeps going
+until you close the window.</p>
+<p>A good order for finding a problem: ping your router (the gateway from
+<code>ipconfig</code>), then an address on the Internet, then a name. If the
+address works but the name does not, the trouble is with DNS.</p>
+
+<h3 id="nslookup">NSLOOKUP: which address has this name?</h3>
+<p><code>nslookup example.com</code> asks the DNS server for the name's
+address. <code>-type=MX</code> asks for the mail servers instead, and a server
+after the name asks that server, for example
+<code>nslookup example.com 9.9.9.9</code>.</p>
+
+<h3 id="wget">WGET: fetch a file</h3>
+<p><code>wget https://example.com/</code> downloads a page or a file into the
+current folder; <code>wget -O - URL</code> shows it in the window instead.</p>
+
+<p><b>Related topics:</b> <a href="network.htm">Connecting to a network</a> &middot;
+<a href="cmd.htm">Command Prompt</a></p>
+</body></html>

@@ -34,7 +34,7 @@
 #define HOME_URL "about:home"
 
 enum { C_BACK = 100, C_FWD, C_STOP, C_RELOAD, C_HOME, C_ADDR_LABEL, C_ADDR, C_GO, C_VSCROLL, C_STATUS };
-enum { M_OPEN = 1, M_SAVE, M_EXIT, M_COPYURL, M_STOP, M_RELOAD, M_SOURCE, M_BACK, M_FWD, M_HOME, M_ABOUT,
+enum { M_OPEN = 1, M_SAVE, M_EXIT, M_COPYURL, M_STOP, M_RELOAD, M_SOURCE, M_BACK, M_FWD, M_HOME, M_ABOUT, M_HELP,
        M_LINK_OPEN, M_LINK_COPY, M_LINK_SAVE, M_IMG_OPEN, M_SELECT_BASE = 1000 };
 
 static const hal_menu_item_t bar[] = {
@@ -55,6 +55,8 @@ static const hal_menu_item_t bar[] = {
     { "&Forward", "Alt+Right", M_FWD, 0, HICON_FORWARD, 0 },
     { "&Home Page", "Alt+Home", M_HOME, 0, HICON_HOME, 0 },
     { "&Help", 0, 0, MENU_TITLE, 0, 0 },
+    { "&Help Topics", "F1", M_HELP, 0, HICON_HELP, 0 },
+    { 0, 0, 0, MENU_SEPARATOR, 0, 0 },
     { "&About Web Browser", 0, M_ABOUT, 0, HICON_WEB, 0 },
 };
 
@@ -1499,6 +1501,7 @@ static void command(int id) {
     case M_FWD: case C_FWD: go_hist(hpos + 1); break;
     case M_HOME: case C_HOME: navigate(HOME_URL, 0, 0); break;
     case M_ABOUT: about(); break;
+    case M_HELP: help_open("browser"); break;
     case C_GO: {
         char t[URL_MAX];
         ctl_get_text(win, C_ADDR, t, sizeof t);
@@ -1611,6 +1614,7 @@ static void on_key(const hal_event_t *ev) {
     if (ev->id == KEY_F5) { command(M_RELOAD); return; }
     if (ev->id == KEY_ESC) { if (loading) command(M_STOP); else if (focus) { focus = 0; dirty = 1; } return; }
     if (ev->id == KEY_F1 + 5) { ctl_focus(win, C_ADDR); return; }             /* F6 */
+    if (ev->id == KEY_F1) { command(M_HELP); return; }
     if (ev->id == KEY_TAB) { focus_next(shift); return; }
     if (focus) { edit_key(focus, ev); return; }
     int vh = view_h();

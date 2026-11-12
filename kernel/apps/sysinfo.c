@@ -436,6 +436,7 @@ static void si_destroy(window_t *w) {
 
 void app_sysinfo(void) {
     window_t *w = wm_create("System Information", ICON_SYSINFO, -1, -1, 760, 500, WF_RESIZABLE);
+    if (w) w->help = "sysinfo";              /* F1 */
     w->min_w = 480; w->min_h = 300;
     si_t *s = kzalloc(sizeof *s);
     s->rows = kzalloc(sizeof(row_t) * MAX_ROWS);

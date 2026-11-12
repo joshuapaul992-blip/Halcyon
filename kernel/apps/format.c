@@ -128,6 +128,7 @@ int format_dialog(window_t *owner, char letter) {
     snprintf(cap, sizeof cap, "Capacity: %s", sz);
 
     window_t *w = wm_create(title, ICON_HDD, 0, 0, 280, 392, WF_DIALOG | WF_CENTER);
+    if (w) w->help = "format";              /* F1 */
     fmt_t f = { 0 };
     f.bd = v->bd;
     f.letter = letter;
