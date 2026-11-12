@@ -360,6 +360,13 @@ otherwise. The kernel sources are compiled unmodified with ASan and UBSan.
   sectors on 512-byte devices, a volume larger than its device, an MBR
   partition, read-only and fault-injection configurations); the storage
   fuzzer (`make -C tests/host fuzz-run`) mounts, walks, reads and writes them.
+  About 65 minutes of libFuzzer (2-3 workers, about 1.6 million inputs from
+  the NTFS seeds) found one bug, a resident value length near 4 GiB that
+  wrapped a 32-bit bounds check (fixed: bounds are checked in 64 bits), and
+  one false alarm of the harness (a sparse file holding more than the device:
+  NTFS volumes are exempt from that heuristic); both inputs are in
+  `fuzz_regress/`. The 900-input corpus replays clean under gcc's ASan and
+  UBSan.
 - **QEMU** (`tools/boottest.py xhci:bios:ntfsrw`, in the default matrix): an
   internal SATA disk with an NTFS partition made on the host; it must mount
   read-only as an internal Windows drive; `NTFSTEST.EXE` reads files, allows

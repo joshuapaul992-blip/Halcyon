@@ -131,8 +131,8 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   the report descriptor parser and report decoder against QEMU's keyboard, mouse
   and tablet, an n-key-rollover gaming keyboard, a wireless receiver, media key
   interfaces and broken, truncated and randomly mutated descriptors
-- the host storage test suite (`tests/host/run.sh`, about 110,000 checks): the
-  FAT, exFAT and ISO 9660 drivers, Unicode names and formatting, compiled for the
+- the host storage test suite (`tests/host/run.sh`, about 450,000 checks): the
+  FAT, exFAT, ISO 9660 and NTFS drivers, Unicode names and formatting, compiled for the
   host with ASan/UBSan and run against images made by mkfs.fat, mkfs.exfat and
   xorriso. Results are cross-checked with mtools, `fsck.fat`, `fsck.exfat` and an
   independent exFAT implementation in Python (`tests/host/exfat_tool.py`), and
