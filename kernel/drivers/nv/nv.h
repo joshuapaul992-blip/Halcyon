@@ -114,6 +114,12 @@ int  nv_ccb_has_aux(nv_device_t *d, int ccb);
  * DDC on its I2C port. Bytes read (multiple of 128) or E_*; via says how. */
 int  nv_read_edid(nv_device_t *d, const nv_dcb_output_t *o, u8 *buf, int max, char *via, int vian);
 
+/* M10b: keep a CCB entry's hybrid pad in AUX mode (a DisplayPort output
+ * being driven); 1 if a pad was switched. nv_pad_restore puts every pad
+ * held on d back as it was found. */
+int  nv_pad_hold_aux(nv_device_t *d, int ccb);
+void nv_pad_restore(nv_device_t *d);
+
 /* lookups */
 const nv_dcb_output_t *nv_output(nv_device_t *d, int index);              /* bios->out[index] */
 /* the nth output (0..) on connector conn, of type (NV_OUT_*, -1 any) */
@@ -121,6 +127,16 @@ const nv_dcb_output_t *nv_output_on(nv_device_t *d, int conn, int type, int nth)
 nv_connector_t *nv_connector(nv_device_t *d, int conn);
 /* hot-plug sense of a connector from its GPIO: 1, 0, or -1 unknown */
 int  nv_hotplug(nv_device_t *d, int conn);
+
+/* disp.c (M10b): the modesetting driver for the EVO display engine (Tesla
+ * to Pascal). nv_display_probe registers each card with the display core
+ * (called at the end of nv_init; nothing on screen changes until
+ * display_start). nv_display_state: one line for System Information and
+ * NVREPORT ("native, in use on DP-1" / "firmware frame buffer: ..."),
+ * nv_display_log: the driver's log of this card (takeover, mode sets). */
+void nv_display_probe(void);
+const char *nv_display_state(nv_device_t *d, char *buf, int n);
+const char *nv_display_log(nv_device_t *d);
 
 /* report.c: text for BOOT.LOG, System Information and NVREPORT.EXE */
 int  nv_report_text(nv_device_t *d, char *buf, int size);   /* bytes (truncated to size - 1) */

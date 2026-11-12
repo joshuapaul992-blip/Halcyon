@@ -63,7 +63,10 @@ static void vram_str(nv_device_t *d, char *b, int n) {
 
 static const char *rom_source(nv_device_t *d) { return d->rom_best >= 0 ? d->rom[d->rom_best].source : "none"; }
 
-static const char *driver_line(void) { return "firmware frame buffer (native modesetting arrives with M10b)"; }
+static const char *driver_line(nv_device_t *d) {
+    static char b[160];
+    return nv_display_state(d, b, sizeof b);
+}
 
 /* the connector's name: "DisplayPort", "HDMI", "DVI-I" */
 static const char *conn_name(nv_device_t *d, const nv_connector_t *c) { (void)d; return nv_conn_type_str(c->type); }
@@ -117,7 +120,7 @@ void nv_log_summary(nv_device_t *d) {
         kprintf("nv%d: connector %d: %s, hot plug %s: %s%s%s%s\n", d->index, c->index, conn_name(d, c),
                 c->hpd > 0 ? "yes" : c->hpd == 0 ? "no" : "?", m, c->via[0] ? " (" : "", c->via, c->via[0] ? ")" : "");
     }
-    kprintf("nv%d: %s; %u ms, %u timeouts\n", d->index, driver_line(), d->init_ms, d->timeouts);
+    kprintf("nv%d: identified in %u ms, %u timeouts\n", d->index, d->init_ms, d->timeouts);
 }
 
 /* ---------------- registers for M10b (read only) ---------------- */
@@ -446,7 +449,7 @@ int nv_report_text(nv_device_t *d, char *buf, int size) {
                                 "newer than Pascal (not supported)" };
     static const char *in[] = { "none", "CRTC-indexed", "NV4E", "NV50", "G94", "GF119", "GM200" };
     sp(&s, "  Display engine: %s; I2C/AUX layout: %s\n", dn[d->chip.disp], in[d->chip.i2c]);
-    sp(&s, "  Display driver: %s\n", driver_line());
+    sp(&s, "  Display driver: %s\n", driver_line(d));
     sp(&s, "  Probe took %u ms, %u timeouts\n", d->init_ms, d->timeouts);
     if (d->chip.in_range || d->fake) {
         bios_part(&s, d);
@@ -460,6 +463,8 @@ int nv_report_text(nv_device_t *d, char *buf, int size) {
             for (int i = 0; i < n; i++) tmp[i] = nv_rom_rd8(&b->rom, b->dcb_offset + (u32)i, NULL);
             hexdump(&s, tmp, n);
         }
+        const char *lg = nv_display_log(d);
+        if (lg) sp(&s, "\nNative modesetting (M10b): the driver's log of this start\n%s", lg);
     }
     return s.n;
 }
@@ -484,7 +489,7 @@ void nv_sysinfo(nv_row_fn add, void *ctx) {
         else if (d->chip.in_range) sp(&s, "Video BIOS: not found\n");
         sp(&s, "Bus: %s\n", l);
         sp(&s, "Connectors: %d\n\nDisplay driver: %s\n\nNVREPORT in the Command Prompt saves a full report in "
-           "C:\\HALCYON\\NVREPORT.", d->nconn, driver_line());
+           "C:\\HALCYON\\NVREPORT.", d->nconn, driver_line(d));
         if (d->vram) snprintf(row, sizeof row, "%s (%s, %s)", d->name, d->chip.codename, v);
         else snprintf(row, sizeof row, "%s (%s)", d->name, d->chip.codename);
         add(ctx, 1, d->chip.in_range ? NV_ICON_CARD : NV_ICON_WARNING, dt, row);

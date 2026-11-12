@@ -278,6 +278,36 @@ static void pad_give(nv_device_t *d, pad_t *s) {
     nv_wr32(d, s->b, s->vb);
 }
 
+/* M10b: keep a CCB entry's hybrid pad in AUX (DisplayPort) mode while an
+ * output on it is driven; the values found the first time are kept for
+ * nv_pad_restore */
+static struct { nv_device_t *d; u32 a, b, va, vb; } held[8];
+static int nheld;
+
+int nv_pad_hold_aux(nv_device_t *d, int ccb) {
+    const nv_ccb_entry_t *c = ccb_get(d, ccb);
+    if (!c || d->fake || c->share == 0xFF || c->share > 7) return 0;
+    pad_t p;
+    pad_take(d, c, 1, &p);                          /* (AUX mode, powered: stays so) */
+    if (!p.used) return 0;
+    for (int i = 0; i < nheld; i++) if (held[i].d == d && held[i].a == p.a) return 0;
+    if (nheld < (int)ARRAY_SIZE(held)) {
+        held[nheld].d = d; held[nheld].a = p.a; held[nheld].b = p.b; held[nheld].va = p.va; held[nheld].vb = p.vb;
+        nheld++;
+    }
+    return 1;
+}
+
+void nv_pad_restore(nv_device_t *d) {
+    for (int i = 0; i < nheld; i++) {
+        if (held[i].d != d) continue;
+        nv_wr32(d, held[i].a, held[i].va);
+        nv_wr32(d, held[i].b, held[i].vb);
+        held[i] = held[--nheld];
+        i--;
+    }
+}
+
 static void bb_init(nv_i2c_bb_t *bb, port_t *p) {
     memset(bb, 0, sizeof *bb);
     bb->ctx = p;
@@ -905,4 +935,7 @@ void nv_init(void) {
     }
     fake_card();
     if (!seen && !ngpus) kprintf("nv: no NVIDIA graphics card\n");
+    /* M10b: the modesetting driver registers with the display core now that
+     * the cards are known (display_init ran before the settings were loaded) */
+    nv_display_probe();
 }
