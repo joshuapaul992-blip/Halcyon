@@ -25,6 +25,8 @@
 #include "fs/block.h"
 #include "fs/vfs.h"
 #include "fs/exfat.h"
+#include "fs/ntfs.h"
+#include "core/settings.h"
 #include "fuzz_fs.h"
 
 extern int shim_verbose;
@@ -3474,7 +3476,7 @@ static const scen_t scenarios[] = {
     { "paths", s_paths }, { "fat12", s_fat12 }, { "fat16", s_fat16 }, { "fat32", s_fat32 },
     { "gpt", s_gpt }, { "4k", s_4k }, { "misc", s_misc }, { "random", s_random }, { "testdisks", s_testdisks },
     { "hostile", s_hostile }, { "unicode", s_unicode }, { "format", s_format }, { "iso", s_iso }, { "exfat", s_exfat },
-    { "ntfs", s_ntfs }, { "ntfsw", s_ntfsw }, { "ntfsdbg", s_ntfsdbg },
+    { "ntfs", s_ntfs }, { "ntfsw", s_ntfsw }, { "ntfssafe", s_ntfssafe }, { "ntfsbig", s_ntfsbig }, { "ntfsdbg", s_ntfsdbg },
 };
 
 int main(int argc, char **argv) {

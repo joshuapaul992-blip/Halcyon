@@ -257,14 +257,22 @@ static npage_t *pg_get(ntfs_t *fs, u64 off, int *err) {
     return victim;
 }
 
-/* cached I/O of metadata through a run list (no holes allowed) */
+/* cached I/O of metadata through a run list (holes read as zeros and
+ * cannot be written) */
 int nt_meta_rw(ntfs_t *fs, const nrl_t *rl, u64 pos, u32 len, void *vbuf, int write) {
     u8 *buf = vbuf;
     while (len) {
         u64 contig = 0;
         i64 lcn = nrl_lcn(rl, (i64)(pos >> fs->cshift), &contig);
-        if (lcn < 0) return E_IO;
         u32 in = (u32)(pos & (fs->csize - 1));
+        if (lcn == NT_LCN_HOLE && !write) {
+            /* a hole reads as zeros */
+            u32 k = (u32)MIN((u64)len, contig * fs->csize - in);
+            memset(buf, 0, k);
+            pos += k; buf += k; len -= k;
+            continue;
+        }
+        if (lcn < 0) return E_IO;
         u64 voff = ((u64)lcn << fs->cshift) + in;
         u32 n = (u32)MIN((u64)len, contig * fs->csize - in);
         while (n) {
@@ -826,7 +834,7 @@ int nt_attr_read(nino_t *ino, u32 type, const u16 *name, u8 nlen, u64 pos, u32 l
     }
     if (ai.flags & (NTFS_ATTR_COMPRESSED | NTFS_ATTR_ENCRYPTED)) { nrl_free(&rl); return E_NOTSUP; }
     u32 disk = pos < ai.init ? (u32)MIN((u64)len, ai.init - pos) : 0;
-    if (disk) r = nt_runs_rw(fs, &rl, pos, disk, buf, 0);
+    if (disk) r = nt_meta_rw(fs, &rl, pos, disk, buf, 0);     /* (cached: bitmaps change through the cache) */
     if (!r && disk < len) memset((u8 *)buf + disk, 0, len - disk);
     nrl_free(&rl);
     return r ? r : (int)len;

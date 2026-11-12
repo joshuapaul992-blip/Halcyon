@@ -375,10 +375,21 @@ static int ibmp(nidx_t *ix, u64 blk, int set, int val, int *out) {
             b = *v;
             nt_actx_done(&c);
         }
-    } else if (blk / 8 >= ai.init) {
-        if (set) r = E_IO;
+    } else if (blk / 8 >= ai.init && !set) {
+        b = 0;                          /* past the initialized size: zeros */
     } else {
-        r = nt_meta_rw(fs, &rl, blk / 8, 1, &b, 0);
+        if (blk / 8 >= ai.init) {
+            /* initialize the rest of the bitmap first (zeros) */
+            u8 z[64];
+            memset(z, 0, sizeof z);
+            for (u64 o = ai.init; o < ai.size && !r; o += sizeof z)
+                r = nt_meta_rw(fs, &rl, o, (u32)MIN((u64)sizeof z, ai.size - o), z, 1);
+            if (!r) {
+                ai.init = ai.size;
+                r = nt_attr_set_sizes(ix->ino, NTFS_AT_BITMAP, ix->name, ix->nlen, &ai);
+            }
+        }
+        if (!r) r = nt_meta_rw(fs, &rl, blk / 8, 1, &b, 0);
         if (!r && set) {
             if (val) b |= (u8)(1u << (blk & 7)); else b &= (u8)~(1u << (blk & 7));
             r = nt_meta_rw(fs, &rl, blk / 8, 1, &b, 1);
@@ -494,7 +505,7 @@ static int ix_add_blocks(nidx_t *ix, u32 k) {
             if (r) goto fail;
         } else {
         nonres:;
-            u64 old = bi.size;
+            u64 old = MIN(bi.init, bi.size);
             r = nt_attr_resize_nr(ino, NTFS_AT_BITMAP, ix->name, ix->nlen, bbytes, 1);
             if (r) goto fail;
             nrl_t brl = { 0 };
@@ -531,6 +542,13 @@ static int blk_alloc(nidx_t *ix, i64 *vcn) {
     if (r) return r;
     if (!n) return E_NOSPC;
     if ((r = ibmp(ix, (u64)first, 1, 1, NULL))) return r;
+    if (((u64)first + 1) * ix->bsize > ix->aa.init) {
+        /* a block past the initialized size (unused blocks need no zeros) */
+        ainfo_t na = ix->aa;
+        na.init = na.size;
+        if ((r = nt_attr_set_sizes(ix->ino, NTFS_AT_INDEX_ALLOCATION, ix->name, ix->nlen, &na))) return r;
+        ix->aa.init = na.size;
+    }
     *vcn = (i64)(((u64)first * ix->bsize) >> ix->vunit_shift);
     return 0;
 }

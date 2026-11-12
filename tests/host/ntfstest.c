@@ -636,6 +636,367 @@ static void t_ntfs_random(const char *tag, img_t *im, u32 ss, u32 seed, int ops,
     free(buf);
 }
 
+/* ------------------------------------------------------------------ */
+/* the read-only rules                                                  */
+
+#include "fs/ntfs_layout.h"
+
+typedef struct { u32 ss, csize, rsize; u64 mft, mirr; } ngeo_t;
+
+static void ngeo(const img_t *im, ngeo_t *g) {
+    u8 b[512];
+    int fd = open(im->path, O_RDONLY);
+    pread(fd, b, 512, 0);
+    close(fd);
+    ntfs_boot_t *bs = (ntfs_boot_t *)b;
+    g->ss = bs->bytes_per_sector;
+    u32 spc = bs->sectors_per_cluster;
+    g->csize = spc >= 0xF4 ? (1u << (256 - spc)) * g->ss : spc * g->ss;
+    g->rsize = ntfs_record_bytes(bs->clusters_per_mft_record, g->csize);
+    g->mft = bs->mft_lcn * g->csize;
+    g->mirr = bs->mftmirr_lcn * g->csize;
+}
+
+/* change system record rec (in $MFT and, below 4, in $MFTMirr): fn edits
+ * the fixed-up record */
+static void rec_patch(const img_t *im, u32 rec, void (*fn)(u8 *rec, void *ctx), void *ctx) {
+    ngeo_t g;
+    ngeo(im, &g);
+    u8 *b = malloc(g.rsize);
+    int fd = open(im->path, O_RDWR);
+    for (int copy = 0; copy < (rec < 4 ? 2 : 1); copy++) {
+        u64 off = (copy ? g.mirr : g.mft) + (u64)rec * g.rsize;
+        pread(fd, b, g.rsize, (off_t)off);
+        CHECK(!ntfs_fixup_read(b, g.rsize, NTFS_FIXUP_STRIDE), "record %u fixup", rec);
+        fn(b, ctx);
+        u16 *usa = (u16 *)(b + ((ntfs_record_hdr_t *)b)->usa_offset);
+        usa[0]--;               /* the same number as before after the increment */
+        ntfs_fixup_write(b, g.rsize, NTFS_FIXUP_STRIDE);
+        pwrite(fd, b, g.rsize, (off_t)off);
+    }
+    close(fd);
+    free(b);
+}
+
+static ntfs_attr_t *rec_find_attr(u8 *rec, u32 type) {
+    ntfs_mft_record_t *m = (ntfs_mft_record_t *)rec;
+    for (u32 p = m->attrs_offset; p + 8 < m->bytes_in_use;) {
+        ntfs_attr_t *a = (ntfs_attr_t *)(rec + p);
+        if (a->type == NTFS_AT_END || !a->length) break;
+        if (a->type == type) return a;
+        p += a->length;
+    }
+    return NULL;
+}
+
+static void set_vflags(u8 *rec, void *ctx) {
+    ntfs_attr_t *a = rec_find_attr(rec, NTFS_AT_VOLUME_INFORMATION);
+    if (a) ((ntfs_volume_info_t *)((u8 *)a + a->r.value_offset))->flags = (u16)(uintptr_t)ctx;
+}
+
+static u16 get_vflags(const img_t *im) {
+    ngeo_t g;
+    ngeo(im, &g);
+    u8 *b = malloc(g.rsize);
+    int fd = open(im->path, O_RDONLY);
+    pread(fd, b, g.rsize, (off_t)(g.mft + 3ull * g.rsize));
+    close(fd);
+    ntfs_fixup_read(b, g.rsize, NTFS_FIXUP_STRIDE);
+    ntfs_attr_t *a = rec_find_attr(b, NTFS_AT_VOLUME_INFORMATION);
+    u16 f = a ? ((ntfs_volume_info_t *)((u8 *)a + a->r.value_offset))->flags : 0xFFFF;
+    free(b);
+    return f;
+}
+
+/* the volume offset of $LogFile's first cluster */
+static u64 logfile_off(const img_t *im) {
+    ngeo_t g;
+    ngeo(im, &g);
+    u8 *b = malloc(g.rsize);
+    int fd = open(im->path, O_RDONLY);
+    pread(fd, b, g.rsize, (off_t)(g.mft + 2ull * g.rsize));
+    close(fd);
+    ntfs_fixup_read(b, g.rsize, NTFS_FIXUP_STRIDE);
+    ntfs_attr_t *a = rec_find_attr(b, NTFS_AT_DATA);
+    u64 off = 0;
+    if (a && a->non_resident) {
+        const u8 *mp = (const u8 *)a + a->nr.mapping_pairs_offset;
+        u32 lb = mp[0] & 15, ob = mp[0] >> 4;
+        u64 lcn = 0;
+        for (u32 i = 0; i < ob; i++) lcn |= (u64)mp[1 + lb + i] << (8 * i);
+        off = lcn * g.csize;
+    }
+    free(b);
+    return off;
+}
+
+/* two restart pages: clients in use (in_use 0) or not (0xFFFF), flags */
+static void put_restart(const img_t *im, u16 in_use, u16 flags) {
+    u8 p[4096];
+    memset(p, 0, sizeof p);
+    memcpy(p, "RSTR", 4);
+    *(u16 *)(p + 4) = 0x1E;
+    *(u16 *)(p + 6) = 9;
+    *(u32 *)(p + 0x10) = 4096;
+    *(u32 *)(p + 0x14) = 4096;
+    *(u16 *)(p + 0x18) = 0x30;
+    *(i16 *)(p + 0x1A) = 1;
+    *(i16 *)(p + 0x1C) = 1;
+    u8 *ra = p + 0x30;
+    *(u64 *)ra = 0x123456;
+    *(u16 *)(ra + 8) = 1;
+    *(u16 *)(ra + 0x0A) = 0xFFFF;
+    *(u16 *)(ra + 0x0C) = in_use;
+    *(u16 *)(ra + 0x0E) = flags;
+    *(u16 *)(ra + 0x14) = 0x40;
+    *(u16 *)(ra + 0x16) = 0x30;
+    ntfs_fixup_write(p, 4096, NTFS_FIXUP_STRIDE);
+    u64 off = logfile_off(im);
+    CHECK(off, "no $LogFile");
+    int fd = open(im->path, O_RDWR);
+    pwrite(fd, p, 4096, (off_t)off);
+    pwrite(fd, p, 4096, (off_t)off + 4096);
+    close(fd);
+}
+
+static int logfile_empty(const img_t *im) {
+    static char out[64];
+    sh_out(out, sizeof out, "ntfscat %s '$LogFile' | tr -d '\\377' | wc -c", q(im->path));
+    return atoi(out) == 0;
+}
+
+/* mount, check the read-only state and the reason (a substring, or NULL
+ * for writable), try a write; returns the hdisk for more checks (detached
+ * when keep is 0) */
+static hdisk_t *safe_mount(const char *tag, const img_t *im, int removable, int dev_ro, const char *why, int keep) {
+    hdisk_t *h = ntfs_attach(im, 512, removable, dev_ro);
+    char L = letter_of(h);
+    CHECK(L, "[%s] not mounted", tag);
+    if (!L) { disk_detach(h); return NULL; }
+    volume_t *v = vfs_volume_by_letter(L);
+    if (why) {
+        CHECK(v->readonly && strstr(v->ro_reason, why), "[%s] read-only %d '%s', want '%s'", tag, v->readonly, v->ro_reason, why);
+        EXPECT(vfs_write_file(P(L, "new.txt"), (const u8 *)"x", 1), E_ROFS);
+        EXPECT(vfs_mkdir(P(L, "newdir")), E_ROFS);
+        CHECK(v_exists(P(L, "keep.txt")), "[%s] cannot read", tag);
+    } else {
+        CHECK(!v->readonly, "[%s] read-only: %s", tag, v->ro_reason);
+        EXPECT(vfs_write_file(P(L, "new.txt"), (const u8 *)"x", 1), 1);
+    }
+    if (!keep) { disk_detach(h); return NULL; }
+    return h;
+}
+
+static void put_hiberfil(const img_t *im, const char *sig) {
+    const char *mnt = ntfs3g_mount(im, 1);
+    if (!mnt) return;
+    char p[1200];
+    snprintf(p, sizeof p, "%s/hiberfil.sys", mnt);
+    u8 buf[8192];
+    memset(buf, 0, sizeof buf);
+    memcpy(buf, sig, strlen(sig));
+    host_write(p, buf, sizeof buf);
+    ntfs3g_umount(mnt);
+}
+
+static void s_ntfssafe(void) {
+    if (!ntfs_tools()) return;
+    img_t base, im;
+    ntfs_img(&base, "safe_base.img", 32, "empty", NULL);
+    {
+        const char *mnt = ntfs3g_mount(&base, 1);
+        char p[1200];
+        snprintf(p, sizeof p, "%s/keep.txt", mnt);
+        host_write(p, "keep", 4);
+        ntfs3g_umount(mnt);
+    }
+    memset(&im, 0, sizeof im);
+    snprintf(im.path, sizeof im.path, "%s", wpath("safe.img"));
+#define FRESH() sh("cp %s %s", q(base.path), q(im.path))
+    /* a clean volume on a removable disk: writable; the session sets the
+     * dirty flag and empties $LogFile; sync and unmount clear the flag */
+    FRESH();
+    put_restart(&im, 0xFFFF, 0);
+    {
+        hdisk_t *h = safe_mount("clean", &im, 1, 0, NULL, 1);
+        CHECK(get_vflags(&im) & NTFS_VOL_DIRTY, "[clean] dirty flag not set during a session");
+        CHECK(logfile_empty(&im), "[clean] $LogFile not emptied");
+        OK(vfs_sync_all());
+        CHECK(!(get_vflags(&im) & NTFS_VOL_DIRTY), "[clean] dirty flag after sync");
+        EXPECT(vfs_write_file(P(letter_of(h), "second.txt"), (const u8 *)"y", 1), 1);
+        CHECK(get_vflags(&im) & NTFS_VOL_DIRTY, "[clean] dirty flag not set again");
+        disk_detach(h);
+        CHECK(!(get_vflags(&im) & NTFS_VOL_DIRTY), "[clean] dirty flag after unmount");
+        ntfs_verify("clean", &im);
+        static char out[4096];
+        int r = sh_out(out, sizeof out, "ntfsfix -n %s", q(im.path));
+        CHECK(r == 0 && !strstr(out, "dirty"), "[clean] ntfsfix: %s", out);
+    }
+    /* the restart area with the clean flag, or no clients: writable */
+    FRESH(); put_restart(&im, 0, 0x0002); safe_mount("log clean flag", &im, 1, 0, NULL, 0);
+    /* a log with clients and no clean flag: Windows did not shut down */
+    FRESH(); put_restart(&im, 0, 0); safe_mount("log not clean", &im, 1, 0, "did not shut down", 0);
+    CHECK(!logfile_empty(&im), "[log not clean] $LogFile was touched");
+    {
+        /* a garbage log */
+        FRESH();
+        int fd = open(im.path, O_RDWR);
+        u8 junk[8192];
+        pattern(junk, sizeof junk, 3);
+        pwrite(fd, junk, sizeof junk, (off_t)logfile_off(&im));
+        close(fd);
+        safe_mount("log garbage", &im, 1, 0, "did not shut down", 0);
+    }
+    /* the dirty flag */
+    FRESH(); rec_patch(&im, 3, set_vflags, (void *)(uintptr_t)NTFS_VOL_DIRTY);
+    safe_mount("dirty", &im, 1, 0, "chkdsk", 0);
+    CHECK(get_vflags(&im) == NTFS_VOL_DIRTY, "[dirty] flags changed: %x", get_vflags(&im));
+    FRESH(); rec_patch(&im, 3, set_vflags, (void *)(uintptr_t)NTFS_VOL_CHKDSK_UNDERWAY);
+    safe_mount("chkdsk underway", &im, 1, 0, "chkdsk", 0);
+    /* hibernation and Fast Startup */
+    static const char *const hib[] = { "hibr", "HIBR", "Hibr", "RSTR", "rstr" };
+    for (size_t i = 0; i < ARRAY_SIZE(hib); i++) {
+        char tag[32];
+        snprintf(tag, sizeof tag, "hiberfil %s", hib[i]);
+        FRESH(); put_hiberfil(&im, hib[i]); safe_mount(tag, &im, 1, 0, "Fast Startup", 0);
+    }
+    FRESH(); put_hiberfil(&im, "wake"); safe_mount("hiberfil wake", &im, 1, 0, NULL, 0);
+    FRESH(); put_hiberfil(&im, ""); safe_mount("hiberfil zero", &im, 1, 0, NULL, 0);
+    /* an internal disk with Windows on it */
+    FRESH();
+    {
+        const char *mnt = ntfs3g_mount(&im, 1);
+        sh("mkdir -p %s/Windows/System32", q(mnt));
+        ntfs3g_umount(mnt);
+    }
+    safe_mount("removable with Windows", &im, 1, 0, NULL, 0);
+    {
+        hdisk_t *h = safe_mount("internal with Windows", &im, 0, 0, "internal Windows drive", 1);
+        char L = letter_of(h);
+        volume_t *v = vfs_volume_by_letter(L);
+        CHECK(v->ro_policy, "[internal] ro_policy not set");
+        char key[40];
+        ntfs_write_key(v->serial, key, sizeof key);
+        CHECK(strlen(key) == 27 && !strncmp(key, "ntfs.write.", 11), "key %s", key);
+        settings_set(key, "1");
+        ntfs_settings_changed();
+        CHECK(!v->readonly && !v->ro_policy, "[internal] not writable after the setting: %s", v->ro_reason);
+        EXPECT(vfs_write_file(P(L, "allowed.txt"), (const u8 *)"ok", 2), 2);
+        settings_set(key, NULL);
+        OK(vfs_remount(L));
+        v = vfs_volume_by_letter(L);
+        CHECK(v && v->readonly && v->ro_policy, "[internal] writable after the setting was removed");
+        settings_set(key, "1");
+        OK(vfs_remount(L));
+        v = vfs_volume_by_letter(L);
+        CHECK(v && !v->readonly, "[internal] remount with the setting: %s", v ? v->ro_reason : "-");
+        settings_set(key, NULL);
+        disk_detach(h);
+        ntfs_verify("internal", &im);
+        /* internal and dirty: the check comes first, no permission offered */
+        rec_patch(&im, 3, set_vflags, (void *)(uintptr_t)NTFS_VOL_DIRTY);
+        h = safe_mount("internal dirty", &im, 0, 0, "chkdsk", 1);
+        if (h) { CHECK(!vfs_volume_by_letter(letter_of(h))->ro_policy, "[internal dirty] ro_policy"); disk_detach(h); }
+    }
+    FRESH(); safe_mount("internal without Windows", &im, 0, 0, NULL, 0);
+    /* a write-protected disk: nothing is written at all */
+    FRESH();
+    {
+        hdisk_t *h = safe_mount("write-protected", &im, 1, 1, "write-protected", 1);
+        if (h) { CHECK(h->writes == 0, "[write-protected] %llu writes", (unsigned long long)h->writes); disk_detach(h); }
+    }
+    /* a damaged boot sector: the backup is used, read-only */
+    FRESH();
+    {
+        int fd = open(im.path, O_RDWR);
+        u8 z[512];
+        memset(z, 0, sizeof z);
+        pwrite(fd, z, 512, 0);
+        close(fd);
+        safe_mount("backup boot sector", &im, 1, 0, "chkdsk", 0);
+    }
+    /* $MFTMirr differs from $MFT */
+    FRESH();
+    {
+        ngeo_t g;
+        ngeo(&im, &g);
+        int fd = open(im.path, O_RDWR);
+        u8 b = 0x5A;
+        pwrite(fd, &b, 1, (off_t)(g.mirr + g.rsize + 200));
+        close(fd);
+        safe_mount("mirror mismatch", &im, 1, 0, "chkdsk", 0);
+    }
+#undef FRESH
+    unlink(im.path);
+    unlink(base.path);
+}
+
+/* ------------------------------------------------------------------ */
+/* a directory of 100k files                                            */
+
+static double now_s(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + t.tv_nsec / 1e9;
+}
+
+static void s_ntfsbig(void) {
+    if (!ntfs_tools()) return;
+    int n = getenv("NTFS_BIG") ? atoi(getenv("NTFS_BIG")) : 100000;
+    img_t im;
+    char cnt[16];
+    snprintf(cnt, sizeof cnt, "%d", n);
+    double t0 = now_s();
+    ntfs_img(&im, "big.img", 512, "big", cnt);
+    printf("   ntfsbig: %d files made by ntfs-3g in %.1f s\n", n, now_s() - t0);
+    hdisk_t *h = ntfs_attach(&im, 512, 1, 0);
+    char L = letter_of(h);
+    if (!L) { CHECK(0, "not mounted"); disk_detach(h); return; }
+    t0 = now_s();
+    vfs_dirent_t *ents;
+    int k = vfs_list(P(L, "Huge"), &ents);
+    double tl = now_s() - t0;
+    CHECK(k == n, "listed %d of %d", k, n);
+    int sorted = 1;
+    for (int i = 1; i < k; i++) if (utf8_casecmp(ents[i - 1].name, ents[i].name) >= 0) sorted = 0;
+    CHECK(sorted, "listing not in order");
+    if (k > 0) kfree(ents);
+    g_rng = 99;
+    char p[200];
+    int lookups = 2000;
+    t0 = now_s();
+    for (int i = 0; i < lookups; i++) {
+        int j = (int)rnd((u32)n);
+        char x[32];
+        memset(x, 'X', 23);
+        x[j % 23] = 0;
+        snprintf(p, sizeof p, "Huge/F%06d_%s.TXT", j, x);    /* other case: through $UpCase */
+        vfs_dirent_t st;
+        int r = vfs_stat(P(L, p), &st);
+        if (r) { CHECK(0, "stat %s: %s", p, ename(r)); break; }
+    }
+    double tk = now_s() - t0;
+    printf("   ntfsbig: listing %.2f s, %d lookups %.3f s (%.0f us each)\n", tl, lookups, tk, tk * 1e6 / lookups);
+    /* writes into the tree ntfs-3g built */
+    t0 = now_s();
+    for (int i = 0; i < 5000; i++) {
+        snprintf(p, sizeof p, "Huge/halcyon %05d.txt", i);
+        int w = vfs_write_file(P(L, p), (const u8 *)p, 10);
+        if (w != 10) { CHECK(0, "create %s: %s", p, ename(w)); break; }
+        int j = (int)rnd((u32)n);
+        char x[32];
+        memset(x, 'x', 23);
+        x[j % 23] = 0;
+        snprintf(p, sizeof p, "Huge/f%06d_%s.txt", j, x);
+        int r = vfs_unlink(P(L, p));
+        CHECK(r == 0 || r == E_NOENT, "delete %s: %s", p, ename(r));
+    }
+    printf("   ntfsbig: 5000 creates + 5000 deletes %.2f s\n", now_s() - t0);
+    disk_detach(h);
+    ntfs_verify("ntfsbig", &im);
+    unlink(im.path);
+}
+
 /* a debugging aid: NTFS_DBG="ops" runs c<name> (create) / d<name> (delete)
  * / m<name> (mkdir) on an empty image and leaves it in the work directory */
 static void s_ntfsdbg(void) {
