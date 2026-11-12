@@ -1,5 +1,5 @@
 <html><head><title>Display Properties</title>
-<meta name="keywords" content="Display Properties; screen resolution#res; resolution; monitor; keep these settings#res; screen saver#saver; graphics card#res; black screen after changing resolution#res; several monitors#monitors; second monitor#monitors; multiple monitors#monitors; extend the desktop#monitors; primary monitor#monitors; Identify#monitors; arrange monitors#monitors; display driver#driver; safe mode, display driver#driver; NVIDIA#driver; GeForce#driver; Can you see this message#driver; Turn on driver#driver">
+<meta name="keywords" content="Display Properties; screen resolution#res; resolution; monitor; keep these settings#res; screen saver#saver; graphics card#res; black screen after changing resolution#res; several monitors#monitors; second monitor#monitors; multiple monitors#monitors; extend the desktop#monitors; primary monitor#monitors; Identify#monitors; arrange monitors#monitors; display driver#driver; safe mode, display driver#driver; NVIDIA#driver; GeForce#driver; Can you see this message#driver; Turn on driver#driver; acceleration#driver">
 </head><body>
 <h2 style="color:#1f4e9a">Display Properties</h2>
 <p>Display Properties sets the screen resolution, arranges your monitors and
@@ -99,6 +99,15 @@ monitor misbehaves, one of these lines in <code>\HALCYON\SETTINGS.INI</code>
 narrows it down: <code>nv.hwcursor=0</code> (Halcyon draws the pointer
 itself), <code>nv.flip=0</code> (no waiting for the refresh),
 <code>nv.heads=1</code> (one monitor only).</p>
+<p>On GeForce 600 to GeForce 10 cards the driver also hands the copying of
+each new picture to the screen to the card itself, about ten seconds after
+the desktop appears; nothing should look different, and System Information
+says <b>Acceleration: in use</b>. If the picture shows stale or wrong
+patches, <code>nv.accel=0</code> in <code>\HALCYON\SETTINGS.INI</code> turns
+only this off. If the computer stops while it starts, the next start leaves
+it off (and the driver on); deleting the line
+<code>display.nv.accel.guard=blocked</code> from
+<code>\HALCYON\SETTINGS.INI</code> tries it again.</p>
 
 <p><b>Related topics:</b> <a href="control.htm">Changing the theme and wallpaper</a> &middot;
 <a href="windows.htm">Working with windows</a></p>
