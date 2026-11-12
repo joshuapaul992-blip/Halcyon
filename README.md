@@ -29,14 +29,14 @@ Build N" in the bottom right corner.
 virtio-sound, Ensoniq ES1370 and Sound Blaster 16; the PC speaker for beeps
 when there is no sound card) behind a mixer that plays any number of streams at once: any rate from 8 to 192 kHz, 8 or 16-bit, mono or stereo, resampled, with per-stream and master volume; the card stops when nothing plays. Programs get sound streams as handles (blocking or non-blocking writes, `poll`, drain, pause, seek, status). System sounds of Halcyon's own, synthesized at build time, for startup, shutdown, message boxes, balloons and USB devices, with a sound scheme to turn them off or choose other files. A speaker in the taskbar (popup slider, Mute, tooltip), the keyboard's volume keys with an on-screen indicator, Sounds and Audio Devices in the Control Panel, sound devices in System Information. Media Player (`MPLAYER.EXE`) and `PLAY` play WAV files: PCM 8 to 32-bit, float, IMA ADPCM, mu-law, A-law, any rate and channel count. See [docs/DESIGN-M7.md](docs/DESIGN-M7.md). |
 | Storage | AHCI SATA (LBA48, multiple controllers). NVMe SSDs (MSI-X, MSI, INTx or polled; every active namespace with 512- or 4096-byte blocks becomes a disk, `nvme0`, `nvme1`, ...; flushed when the drive has a volatile cache, shutdown notification on Turn Off/Restart). CD/DVD drives on SATA (ATAPI): read-only drive letters, discs detected when inserted, ejected or swapped, Eject in the drive's right-click menu. Block layer with MBR (including extended partitions), GPT and superfloppy detection. |
-| File systems | FAT12, FAT16 and FAT32, read and write: long file names, create, delete, rename and move, mkdir and rmdir, truncate, FSInfo. exFAT, read and write (USB sticks and SD cards over 32 GB): fragmented and contiguous files, ValidDataLength, the volume's up-case table for case-insensitive names, VolumeDirty handling. DOS drive letters; the boot drive is `C:`. Quick format (FAT12/16/32 and exFAT) from Explorer (right-click a drive) or the `FORMAT` command, with Windows' default cluster sizes. |
+| File systems | FAT12, FAT16 and FAT32, read and write: long file names, create, delete, rename and move, mkdir and rmdir, truncate, FSInfo. exFAT, read and write (USB sticks and SD cards over 32 GB): fragmented and contiguous files, ValidDataLength, the volume's up-case table for case-insensitive names, VolumeDirty handling. DOS drive letters; the boot drive is `C:`. Quick format (FAT12/16/32, exFAT and NTFS) from Explorer (right-click a drive: file system, allocation unit size, label) or the `FORMAT` command (`/FS:NTFS`), with Windows' default cluster sizes and file system choices. The NTFS formatter writes a Windows-style NTFS 3.1 volume (512-byte and 4K sectors, 512 B to 64 KiB clusters, up to 256 TiB; $LogFile with clean restart pages, $Secure, Windows' $UpCase table), checked with ntfs-3g; see [docs/DESIGN-M7.5-FORMAT.md](docs/DESIGN-M7.5-FORMAT.md). A drive's Properties show its file system, label, space and, for a read-only drive, why; NTFS drives on internal disks with Windows on them can be allowed writing there ("Allow Halcyon to write to this drive"). |
 | CD/DVD | ISO 9660 with Joliet (long Unicode names) and Rock Ridge names, multi-sector directories and multi-extent files, hardened against corrupt discs. Hybrid ISO images written to USB sticks or disks mount too. |
 | Keyboard | 20 layouts that follow Windows': US, US-International, UK, German, Swiss German, French, Belgian (AZERTY), Spanish, Italian, Portuguese, Brazilian (ABNT2), Swedish/Finnish, Norwegian, Danish, Dutch, Polish (Programmers), Czech, Turkish Q, Russian and Greek. AltGr (Right Alt, or Ctrl+Alt), dead keys (a dead key followed by a key it does not compose with gives the accent, then the key), Caps Lock per key, the ISO key next to left Shift and the ABNT2 keys. Ctrl shortcuts go by the letter on the key (Ctrl+A is the AZERTY "A"; US letters on Russian and Greek). Several layouts can be installed: Left Alt+Shift or the indicator on the taskbar switches; Keyboard settings in the Control Panel or the `KEYBOARD` command. Characters reach programs as Unicode code points. |
 | Unicode | File names and text are UTF-8 throughout; FAT long names are stored as UTF-16 (including characters outside the BMP), with Unicode case-insensitive lookup. The fonts cover Latin, Greek, Cyrillic and common symbols; other characters are kept and drawn as a replacement box. |
 | GUI | Compositing window manager (move, resize, minimize, maximize), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Theme and wallpaper are kept across restarts (`C:\HALCYON\SETTINGS.INI`). |
 | Display | The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; the QEMU/Bochs/VirtualBox adapter switches at once, with Windows' "keep these settings?" 15-second revert. The frame buffer is write-combining (PAT). |
 | Web | A web browser (Web Browser, `BROWSER.EXE`): HTTP/1.1 and HTTPS, pages with headings, lists, tables, forms and PNG / GIF / BMP images, history, error pages, local files; `WGET.EXE` on the command line. HTTPS through BearSSL (TLS 1.2) with certificates checked against Mozilla's root list. Both are user programs on libweb, a library for URLs, HTTP, TLS and gzip. They reach the network through the internet stack (see Network). See [docs/DESIGN-M6-WEB.md](docs/DESIGN-M6-WEB.md). |
-| Apps | Explorer (My Computer, file management; copies and deletes in a worker thread), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Media Player (WAV files), Sonar (a mine-hunting puzzle), Control Panel (with Time Zone), Display Properties, Keyboard settings, Network Connections, Sounds and Audio Devices, About. |
+| Apps | Explorer (My Computer with drive properties and a padlock on read-only drives, file management; copies and deletes in a worker thread), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Media Player (WAV files), Sonar (a mine-hunting puzzle), Control Panel (with Time Zone), Display Properties, Keyboard settings, Network Connections, Sounds and Audio Devices, About. |
 
 ## Building
 
@@ -138,10 +138,17 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   independent exFAT implementation in Python (`tests/host/exfat_tool.py`), and
   a few hundred deliberately corrupted images plus the fuzzer's regression
   inputs must fail cleanly
+- the host NTFS formatter tests (`tests/host/ntfsfmt.c`, also run by
+  `tests/host/run.sh`): volumes of 2 MiB to 2 TiB, 512-, 2048- and 4096-byte
+  sectors and every cluster size, checked with `ntfsfix -n`, `ntfsinfo -m`, an
+  independent NTFS reader in Python (`tests/host/ntfs_tool.py`) and the ntfs-3g
+  FUSE driver (thousands of files written, deleted, renamed and verified after
+  a remount), and compared with volumes made by `mkntfs`
 - a QEMU boot matrix (`tools/boottest.py`) covering UHCI, OHCI, EHCI, EHCI with
   companions, and xHCI, under BIOS and UEFI, plus the interrupt fallbacks (legacy
   PIC, no MSI, no interrupts) set through a QEMU-only `fw_cfg` hook, NVMe disks
-  (512- and 4096-byte blocks, INTx, polled), a CD drive with a disc swap, and
+  (512- and 4096-byte blocks, INTx, polled), a CD drive with a disc swap, a
+  scratch disk formatted as NTFS by the kernel and checked with ntfs-3g, and
   network adapters (virtio-net in its three PCI forms, e1000, e1000e, igb and
   rtl8139: an ARP exchange with QEMU's gateway and a few thousand more frames
   through every ring, with MSI-X, INTx and polled), the internet stack
@@ -209,7 +216,9 @@ puts it on the image as `C:\PROGRAMS\NAME.EXE`. Type its name in the Command Pro
 different ways on purpose; `TASKMGR.EXE` is Task Manager; `EXPLORER.EXE` is
 Explorer (My Computer, folder views, copy / move / delete in a worker thread
 behind a progress window; it opens files with `shell_open`, the shell's own
-tools with `shell_app` and reads Properties details with `stat_ex`); `CALC.EXE` and
+tools with `shell_app`, reads Properties details with `stat_ex` and a drive's
+read-only state with `volume_info`, and allows writing to an NTFS drive with
+`volume_set_write`); `CALC.EXE` and
 `SONAR.EXE` are full GUI programs (they draw into their own pixel buffer and
 blit it, then add text). `NOTEPAD.EXE` is Notepad: menus, a scroll bar and a
 status bar from the API below, the text drawn line by line and measured with
@@ -347,7 +356,7 @@ efi/         UEFI loader
 kernel/core  entry, CPU and timing, interrupts and idle, memory, library, panic screen
 kernel/drivers  PCI, PS/2, input, AHCI (disks and CD/DVD), NVMe, ACPI
 kernel/usb   USB core, hub/HID/MSC class drivers, UHCI/OHCI/EHCI/xHCI
-kernel/fs    block layer and partitions, VFS, FAT, exFAT, ISO 9660
+kernel/fs    block layer and partitions, VFS, FAT, exFAT, ISO 9660, the NTFS formatter
 kernel/gui   graphics, window manager, widgets, menus, dialogs, desktop, splash
 kernel/net   sockets and poll (generic layer), local sockets (AF_LOCAL), network
              devices and the IPv4 stack (ARP, IP, ICMP, UDP, TCP, DHCP, DNS); drivers/
