@@ -979,14 +979,18 @@ static void guard_clear(display_adapter_t *a, const char *why) {
     if (bootlog_save) bootlog_save("display driver running");
 }
 
-/* "DP-1 1920x1080;HDMI-1 1280x1024;" */
+/* "DP-1 1920x1080 fc;HDMI-1 1280x1024;": each output's mode, and whether its
+ * head flips pages (f) and draws the hardware cursor (c), so a driver that
+ * gains these asks once more */
 static void guard_signature(display_adapter_t *a, char *out, int n) {
     out[0] = 0;
     for (int k = 0; k < a->nconns; k++) {
         display_connector_t *c = &a->conns[k];
         if (!c->head) continue;
-        char one[40];
-        snprintf(one, sizeof one, "%s %dx%d;", c->name, c->head->mode.w, c->head->mode.h);
+        char one[48];
+        u32 caps = c->head->caps;
+        snprintf(one, sizeof one, "%s %dx%d%s%s%s;", c->name, c->head->mode.w, c->head->mode.h,
+                 caps & (HEAD_CAP_FLIP | HEAD_CAP_CURSOR) ? " " : "", caps & HEAD_CAP_FLIP ? "f" : "", caps & HEAD_CAP_CURSOR ? "c" : "");
         strlcat(out, one, (size_t)n);
     }
 }
