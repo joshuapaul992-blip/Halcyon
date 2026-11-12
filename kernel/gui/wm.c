@@ -9,6 +9,8 @@
 #include "core/kernel.h"
 #include "core/io.h"
 
+volatile int gui_desktop_ready;      /* the desktop is drawn (system sounds, test hooks wait for it) */
+
 /* ---------------- themes ---------------- */
 const theme_t g_themes[] = {
     { "Halcyon Blue",
@@ -1051,6 +1053,7 @@ void gui_main(void) {
     desktop_init();
     gui_full_redraw();
     kprintf("gui: desktop ready (%dx%d)\n", screen_w(), screen_h());
+    gui_desktop_ready = 1;
     /* test hook: QEMU fw_cfg "opt/halcyon/setmode" = "WIDTHxHEIGHT" switches the
      * display mode once the desktop is up (live adapters) */
     char setmode[32];

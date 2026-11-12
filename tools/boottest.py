@@ -66,6 +66,15 @@ or attach a network adapter on QEMU's user-mode network (-netdev user):
           be transmitted (replies to it may be dropped when the receive ring
           overruns), and the adapter must have the expected interrupt (MSI-X,
           INTx, or polled with noirq).
+or attach a sound card, its output recorded by QEMU's wav backend (48 kHz):
+  ac97          Intel 82801AA AC'97
+          The card's driver must register it as snd0. Once the desktop is up
+          the kernel's sound test (QEMU fw_cfg soundtest) plays a 440 Hz sine
+          at 44.1 kHz for 2 s through a stream, then a 1 kHz triangle at
+          22.05 kHz for 0.25 s as a static sound: the log must report no
+          underruns and the expected interrupt (live, or polled with noirq),
+          and the recording must hold both, at the right pitch and length,
+          without dropouts.
 NETDUMP=file.pcap records the net variants' frames (128 bytes each) for debugging.
 Exit status is the number of failed configurations.
 """
@@ -84,7 +93,7 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:cd", "xhci:bios:user", "uhci:uefi:user", "xhci:bios:sock", "xhci:bios:web",
           "xhci:bios:net", "xhci:bios:net+loss",
           "xhci:bios:res", "xhci:uefi:res+fwvideo", "xhci:uefi:switch",
-          "xhci:bios:virtio", "xhci:uefi:e1000e"]
+          "xhci:bios:virtio", "xhci:uefi:e1000e", "xhci:bios:ac97"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "net": 0, "loss": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
@@ -95,6 +104,11 @@ NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "igb": ("igb", "igb", True), "rtl8139": ("rtl8139", "rtl8139", False)}
 for _n in NICS:
     VARIANTS[_n] = 0
+# sound card variants: QEMU device arguments (audiodev snd0), the driver's name
+SOUNDS = {"ac97": ("-device AC97,audiodev=snd0", "ac97")}
+for _n in SOUNDS:
+    VARIANTS[_n] = 0
+SOUND_TEST_MS = 2000
 NET_PROBE = 3000
 NVME_ERRORS = ["failed", "timed out", "fatal", "offline", "not responding", "no interrupt seen"]
 IDLE_MAX_CPU = 40      # % of one host CPU used by QEMU at the idle desktop
@@ -228,6 +242,80 @@ def net_failures(text, nic, opts):
     return fails
 
 
+def wav_segments(path):
+    """the loud stretches of a QEMU wav capture (16-bit, 48 kHz expected):
+    [(start_s, length_ms, pitch_hz, dropouts)] (pitch from zero crossings)"""
+    import array
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        return None
+    # the header's sizes may be stale if QEMU did not exit cleanly: find "data"
+    i = data.find(b"data")
+    if data[:4] != b"RIFF" or i < 0:
+        return None
+    ch = data[22] | data[23] << 8
+    rate = int.from_bytes(data[24:28], "little")
+    pcm = array.array("h")
+    pcm.frombytes(data[i + 8: i + 8 + (len(data) - i - 8) // (2 * ch) * 2 * ch])
+    left = pcm[0::ch]
+    blk = rate // 100
+    loud = []
+    for b in range(len(left) // blk):
+        seg = left[b * blk:(b + 1) * blk]
+        loud.append(sum(v * v for v in seg) / blk > 1000 * 1000)
+    segs, b = [], 0
+    while b < len(loud):
+        if not loud[b]:
+            b += 1
+            continue
+        e = b
+        while e < len(loud) and loud[e]:
+            e += 1
+        x = left[b * blk:e * blk]
+        # pitch: rising zero crossings, interpolated, over the whole stretch
+        cross = []
+        for k in range(1, len(x)):
+            if x[k - 1] < 0 <= x[k]:
+                cross.append(k - 1 + (-x[k - 1]) / (x[k] - x[k - 1]))
+        pitch = (len(cross) - 1) * rate / (cross[-1] - cross[0]) if len(cross) > 2 else 0
+        run, drops = 0, 0
+        for v in x:
+            run = run + 1 if -50 < v < 50 else 0
+            if run == rate // 500:
+                drops += 1
+        segs.append((b / 100, (e - b) * 10, pitch, drops))
+        b = e
+    return segs
+
+
+def sound_failures(text, snd, opts, wav):
+    """the sound card variant's checks (see the docstring)"""
+    driver = SOUNDS[snd][1]
+    fails = []
+    if not any(l.startswith("sound: snd0: ") and "(%s)" % driver in l for l in text.splitlines()):
+        return ["no %s sound card registered" % driver]
+    m = re.search(r"sound: test: done: tone played in \d+ ms, stream underruns (\d+), device snd0 underruns (\d+), irq (\w+)", text)
+    if not m:
+        return fails + ["sound test did not finish"]
+    if m.group(1) != "0" or m.group(2) != "0":
+        fails.append("underruns (stream %s, device %s)" % (m.group(1), m.group(2)))
+    want = "polled" if "noirq" in opts else "live"
+    if m.group(3) != want:
+        fails.append("sound interrupt %s (expected %s)" % (m.group(3), want))
+    segs = wav_segments(wav)
+    if segs is None:
+        return fails + ["no recording"]
+    desc = ", ".join("%.2fs %dms %.1fHz%s" % (a, b, c, " %d dropouts" % d if d else "") for a, b, c, d in segs)
+    if len(segs) != 2:
+        return fails + ["recording: expected the tone and the beep, got: %s" % (desc or "silence")]
+    (t0, l0, f0, d0), (t1, l1, f1, d1) = segs
+    if not (SOUND_TEST_MS - 30 <= l0 <= SOUND_TEST_MS + 30 and abs(f0 - 440) < 1 and not d0 and
+            230 <= l1 <= 270 and abs(f1 - 1000) < 3 and not d1 and t1 > t0):
+        fails.append("recording: %s" % desc)
+    return fails
+
+
 def run(cfg):
     parts = cfg.split(":")
     hc, fw = parts[0], parts[1]
@@ -274,6 +362,13 @@ def run(cfg):
     if nic:
         extra += " -netdev user,id=n0 -device %s,netdev=n0 -fw_cfg name=opt/halcyon/netprobe,string=%d" % (
             NICS[nic][0], NET_PROBE)
+    snd = next((v for v in opts if v in SOUNDS), None)
+    wav = os.path.abspath(os.path.join(BUILD, "ci_sound.wav"))
+    if snd:
+        if os.path.exists(wav):
+            os.remove(wav)
+        extra += " -audiodev wav,id=snd0,path=%s,out.frequency=48000 %s -fw_cfg name=opt/halcyon/soundtest,string=%d" % (
+            wav, SOUNDS[snd][0], SOUND_TEST_MS)
     prog = next((PROGRAMS[v] for v in opts if v in PROGRAMS), None)
     prog_args = ""
     ini_lines = []
@@ -363,6 +458,11 @@ def run(cfg):
         while time.time() - t1 < 20 and p.poll() is None and "probe burst:" not in text:
             time.sleep(0.5)
             text = open(log, errors="replace").read()
+    if snd:
+        t1 = time.time()
+        while time.time() - t1 < 30 and p.poll() is None and "sound: test: done" not in text:
+            time.sleep(0.5)
+            text = open(log, errors="replace").read()
     idle = None
     if p.poll() is None and "gui: desktop ready" in text and not prog:
         time.sleep(2)
@@ -402,6 +502,8 @@ def run(cfg):
     failures += kbd_fails
     if nic:
         failures += net_failures(text, nic, opts)
+    if snd:
+        failures += sound_failures(text, snd, opts, wav)
     want_mode = {"": "irq: mode I/O APIC", "pic": "irq: mode 8259 PIC", "nomsi": "irq: mode I/O APIC",
                  "noirq": "interrupts disabled by boot option"}[irqmode]
     if want_mode not in text:

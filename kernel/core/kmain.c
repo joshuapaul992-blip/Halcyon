@@ -33,6 +33,8 @@ void hwreport_late(void) WEAK;
 int  bootlog_save(const char *reason) WEAK;
 void settings_load(void) WEAK;
 void keyboard_settings_load(void) WEAK;
+void sound_init(void) WEAK;
+void sound_settings_loaded(void) WEAK;
 #define PROGRESS(p, m) do { if (splash_progress) splash_progress(p, m); } while (0)
 
 
@@ -83,6 +85,10 @@ void kmain(struct bootinfo *bi) {
     if (settings_load) settings_load();
     if (keyboard_settings_load) keyboard_settings_load();
     if (net_settings_loaded) net_settings_loaded();
+    /* sound after the settings: the saved volume applies from the first sound */
+    if (sound_init && !(bf & BOOTF_NO_SOUND)) sound_init();
+    else kprintf("sound: disabled by boot option\n");
+    if (sound_settings_loaded && !(bf & BOOTF_NO_SOUND)) sound_settings_loaded();
     if (bootlog_save) {
         int r = bootlog_save("desktop starting");
         kprintf("bootlog: %s\n", r == 0 ? "saved" : strerror(r));

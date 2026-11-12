@@ -490,10 +490,13 @@ void proc_detach_console(void *ctx) {
     for (proc_t *p = procs; p; p = p->next) if (p->con_ctx == ctx) { p->con = NULL; p->con_ctx = NULL; }
 }
 
+void snd_release_pid(u32 pid) __attribute__((weak));   /* sound/: the program's streams */
+
 /* the last thread of p is ending: give back everything it owned */
 static void proc_finish(proc_t *p) {
     if (proc_release_hook) proc_release_hook(p);
     if (socket_release_all) socket_release_all(p);
+    if (snd_release_pid) snd_release_pid(p->pid);
     shm_release_all(p);
     for (int i = 0; i < PROC_HANDLES; i++) {
         if (p->handles[i].type == H_FILE) vfs_close(p->handles[i].obj);

@@ -249,6 +249,7 @@ void app_display(void);
 void app_about(void);
 void app_imageview(const char *path);
 void app_mines(void);
+extern volatile int gui_desktop_ready;  /* set once the desktop is drawn */
 void app_network(void);                /* Network Connections (apps/network.c) */
 void app_keyboard(void);               /* Keyboard settings (apps/keyboard.c) */
 void keyboard_menu(int x, int y);      /* the taskbar layout indicator's menu */

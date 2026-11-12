@@ -43,9 +43,10 @@
 #define BOOTF_NO_NVME   0x0400   /* don't start NVMe controllers */
 #define BOOTF_NO_DISPLAY 0x0800  /* no display adapter driver: firmware frame buffer only */
 #define BOOTF_NO_NET    0x1000   /* don't start network adapters */
+#define BOOTF_NO_SOUND  0x2000   /* don't start sound cards */
 #define BOOTF_SAFE_MODE (BOOTF_VERBOSE | BOOTF_NO_XHCI | BOOTF_NO_EHCI | BOOTF_NO_USB11 | BOOTF_NO_AHCI | \
                          BOOTF_NO_NVME | BOOTF_NO_ACPI | BOOTF_NO_IRQ | BOOTF_NO_DISPLAY | \
-                         BOOTF_NO_NET)
+                         BOOTF_NO_NET | BOOTF_NO_SOUND)
 
 struct kernel_header {
     uint32_t magic;       /* KERNEL_MAGIC */

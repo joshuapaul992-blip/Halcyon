@@ -39,9 +39,10 @@ enum {
     /* M9 number ranges (each owned by one part of the kernel):
      *   13-19   threads and futexes (core/proc.c, core/syscall.c)
      *   33-39   shell and shared memory (core/syscall.c)
-     *   50-59, 70-79, 87-89, 94-99, 140-159   more window / drawing / control /
+     *   50-59, 70-79, 87-89, 94-99, 152-159   more window / drawing / control /
      *           menu calls (gui/usergui.c; 48 and 49 are SYS_WIN_RESIZE and
      *           SYS_WIN_SET_ICON)
+     *   140-151 sound (sound/): streams, the master volume, system sounds
      *   100-139 sockets and poll (net/): 100-115 sockets, 116-127 the
      *           internet stack (interfaces, configuration, name lookup),
      *           128 SYS_GETRANDOM, 129-139 free
@@ -51,6 +52,7 @@ enum {
     SYS_DATETIME = 161, SYS_VOLUME_INFO, SYS_VFS_GENERATION,
     SYS_GETRANDOM = 128,        /* (buf, len <= 65536): cryptographically strong bytes */
     SYS_SHELL_APP = 168, SYS_STAT_EX,
+    SYS_SOUND_FIRST = 140, SYS_SOUND_LAST = 151,
     SYS_COUNT = 170
 };
 

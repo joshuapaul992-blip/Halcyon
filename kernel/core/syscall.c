@@ -21,6 +21,7 @@ struct sysframe {
 /* window / drawing calls (gui/usergui.c); E_NOTSUP without a GUI */
 long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __attribute__((weak));
 long socket_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __attribute__((weak));   /* net/ */
+long sound_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) __attribute__((weak));    /* sound/ */
 
 /* ---- helpers ---- */
 
@@ -496,6 +497,8 @@ void syscall_dispatch(struct sysframe *f) {
     default:
         if (nr >= 100 && nr < 140) {
             if (socket_syscall) r = socket_syscall((int)nr, a1, a2, a3, a4, a5, a6);
+        } else if (nr >= SYS_SOUND_FIRST && nr <= SYS_SOUND_LAST) {
+            if (sound_syscall) r = sound_syscall((int)nr, a1, a2, a3, a4, a5, a6);
         } else if (nr >= SYS_WIN_CREATE && nr < SYS_COUNT && usergui_syscall) {
             r = usergui_syscall((int)nr, a1, a2, a3, a4, a5, a6);
         }
