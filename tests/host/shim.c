@@ -69,3 +69,15 @@ void mutex_lock(mutex_t *m) { (void)m; }
 int mutex_trylock(mutex_t *m) { (void)m; return 1; }
 void mutex_unlock(mutex_t *m) { (void)m; }
 int mutex_held(mutex_t *m) { (void)m; return 1; }
+
+/* random numbers (core/random.c): not cryptographic here */
+void random_bytes(void *buf, size_t n) {
+    static u64 x = 0x9E3779B97F4A7C15ull;
+    if (x == 0x9E3779B97F4A7C15ull) x ^= (u64)time(NULL) * 0xBF58476D1CE4E5B9ull;
+    u8 *b = buf;
+    for (size_t i = 0; i < n; i++) {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        b[i] = (u8)(x >> 24);
+    }
+}
+u32 random_u32(void) { u32 v; random_bytes(&v, sizeof v); return v; }

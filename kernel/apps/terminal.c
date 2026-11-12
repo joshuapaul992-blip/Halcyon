@@ -449,7 +449,7 @@ static int parse_args(char *line, char **argv, int max) {
 
 static void run_command(term_t *t, char *line);
 
-/* FORMAT target [/FS:FAT|FAT12|FAT16|FAT32|EXFAT] [/V:label] [/A:size] [/Q] [/Y]
+/* FORMAT target [/FS:FAT|FAT12|FAT16|FAT32|EXFAT|NTFS] [/V:label] [/A:size] [/Q] [/Y]
  * target: a drive letter, or a device name from the list FORMAT prints */
 static int has_children(blockdev_t *bd) {
     for (blockdev_t *b = blockdev_first(); b; b = b->next) if (b->parent == bd) return 1;
@@ -464,9 +464,11 @@ static void cmd_format(term_t *t, int argc, char **argv) {
         tputs(t, "Formats a disk for use with Halcyon (quick format).\n\n"
                  "FORMAT target [/FS:file-system] [/V:label] [/A:size] [/Y]\n\n"
                  "  target   a drive letter (E:) or a device name below\n"
-                 "  /FS:     FAT32, FAT (FAT12/FAT16 chosen by size), FAT12, FAT16 or EXFAT\n"
-                 "  /V:      volume label\n"
-                 "  /A:      cluster size, e.g. 4096, 32K\n"
+                 "  /FS:     FAT32, FAT (FAT12/FAT16 chosen by size), FAT12, FAT16, EXFAT or NTFS\n"
+                 "           (default: the current one; else NTFS on fixed disks, FAT32 on\n"
+                 "           removable ones up to 32 GB, exFAT on larger ones)\n"
+                 "  /V:      volume label (11 characters, NTFS 32)\n"
+                 "  /A:      cluster size, e.g. 4096, 32K (NTFS: 512 to 64K)\n"
                  "  /Y       do not ask for confirmation\n\nDevices that can be formatted:\n");
         for (blockdev_t *b = blockdev_first(); b; b = b->next) {
             if (has_children(b) || !b->present) continue;
@@ -509,7 +511,10 @@ static void cmd_format(term_t *t, int argc, char **argv) {
     if (has_children(bd)) { tprintf(t, "%s has partitions: format one of them (type FORMAT for a list).\n", bd->name); return; }
     if (!fs) {
         u64 bytes = bd->sector_count * bd->sector_size;
-        fs = v ? (!strcmp(v->fs_name, "exFAT") ? "exFAT" : v->fs_name) : bytes > (32ull << 30) ? "exFAT" : "FAT";
+        blockdev_t *d = bd->parent ? bd->parent : bd;
+        int removable = d->removable || d->type == BDEV_DISK_USB;
+        fs = v ? v->fs_name : !removable && bytes >= (64ull << 20) ? "NTFS" : bytes > (32ull << 30) ? "exFAT" :
+             bytes >= (32ull << 20) ? "FAT32" : "FAT";
         if (!strcmp(fs, "FAT12") || !strcmp(fs, "FAT16")) fs = "FAT";
     }
     char tgt[40];
@@ -523,12 +528,14 @@ static void cmd_format(term_t *t, int argc, char **argv) {
     int r = vfs_format(bd, fs, label ? label : (v ? v->label : ""), cluster);
     if (r) {
         tprintf(t, "Format failed: %s\n", r == E_INVAL ? "the size does not suit this file system (or bad parameters)" :
+                                             r == E_NOSPC ? "the disk is too small for this file system" :
                                              r == E_BUSY ? "the drive is in use (open files)" :
                                              r == E_NOTSUP ? "this file system is not available" : strerror(r));
         return;
     }
     v = volume_of(bd);
     tputs(t, "Format complete.\n");
+    if (!v) tprintf(t, "Halcyon cannot open %s volumes yet: the disk is ready for Windows.\n", fs);
     if (v) {
         u64 total = 0, freeb = 0;
         vfs_statfs(v->letter, &total, &freeb);

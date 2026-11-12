@@ -118,6 +118,10 @@ static inline unsigned vfs_generation(void) { return (unsigned)SC0(SYS_VFS_GENER
 /* ---- the shell ---- */
 static inline int shell_open(const char *path) { return (int)SC1(SYS_SHELL_OPEN, path); }   /* like a double click */
 static inline int shell_format(char drive) { return (int)SC1(SYS_SHELL_FORMAT, drive); }    /* the user decides in it */
+/* allow Halcyon to write to an NTFS volume on an internal disk (hal_volinfo_t
+ * flags VOLF_WRITE_OPT / VOLF_WRITE_OK), or take it back: the volume is
+ * mounted again (E_BUSY while files are open on it: then nothing changes) */
+static inline int volume_set_write(char drive, int allow) { return (int)SC2(SYS_VOLUME_SET_WRITE, drive, allow); }
 static inline int eject(char drive) { return (int)SC1(SYS_EJECT, drive); }                  /* CD/DVD drives */
 /* open a built-in tool (SHELL_APP_*: Command Prompt in folder arg, Notepad
  * with file arg, System Information, Control Panel, About); does not wait */

@@ -477,6 +477,7 @@ static int vfs_write_file_locked(const char *path, const void *data, u32 size) {
 /* ---- formatting ---- */
 
 int exfat_format(blockdev_t *bd, const char *label, u32 cluster_bytes) __attribute__((weak));
+int ntfs_format(blockdev_t *bd, const char *label, u32 cluster_bytes) __attribute__((weak));   /* fs/ntfs_mkfs.c */
 
 static int vfs_format_locked(blockdev_t *bd, const char *fs, const char *label, u32 cluster_bytes) {
     if (!bd || !bd->present) return E_NODEV;
@@ -499,6 +500,9 @@ static int vfs_format_locked(blockdev_t *bd, const char *fs, const char *label, 
     if (!strcasecmp(fs, "exFAT")) {
         r = exfat_format ? exfat_format(bd, label, cluster_bytes) : E_NOTSUP;
         ptype = 0x07;
+    } else if (!strcasecmp(fs, "NTFS")) {
+        r = ntfs_format ? ntfs_format(bd, label, cluster_bytes) : E_NOTSUP;
+        ptype = 0x07;                            /* (GPT: the basic data GUID, as for FAT) */
     } else {
         int t = !strcasecmp(fs, "FAT12") ? 12 : !strcasecmp(fs, "FAT16") ? 16 : !strcasecmp(fs, "FAT32") ? 32 : 0;
         if (!t && strcasecmp(fs, "FAT")) return E_INVAL;
@@ -510,6 +514,13 @@ static int vfs_format_locked(blockdev_t *bd, const char *fs, const char *label, 
     g_pref_letter = letter;
     int m = vfs_try_mount(bd);
     g_pref_letter = 0;
+    /* formatted, but no driver here reads that file system (NTFS without
+     * the NTFS driver: the other probes say E_NOTSUP or E_INVAL): the
+     * format itself worked */
+    if (!r && (m == E_NOTSUP || m == E_INVAL) && !strcasecmp(fs, "NTFS")) {
+        kprintf("vfs: %s: formatted as %s; no driver mounts it\n", bd->name, fs);
+        m = 0;
+    }
     return r ? r : m;
 }
 

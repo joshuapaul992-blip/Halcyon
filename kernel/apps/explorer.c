@@ -12,6 +12,7 @@ typedef struct item {
     u64 size;
     vfs_time_t mtime;
     char letter;          /* drives (My Computer) */
+    u8 locked;            /* read-only (not a CD): a padlock on the drive's icon */
     u64 total, free;
 } item_t;
 
@@ -159,6 +160,15 @@ static void update_title(ex_t *x) {
     if (x->addr) widget_set_text(x->win, x->addr, x->path[0] ? x->path : "My Computer");
 }
 
+/* a small padlock (14 x 17) over a read-only drive's icon */
+static void draw_lock(gc_t *g, int x, int y) {
+    gfx_rounded_outline(g, mkrect(x + 3, y, 8, 12), 4, 15, HEX(0x505050));
+    gfx_rounded_outline(g, mkrect(x + 4, y + 1, 6, 10), 3, 15, HEX(0x909090));
+    gfx_rounded(g, mkrect(x, y + 7, 14, 10), 2, 15, HEX(0xFBE07A), HEX(0xC8901C));
+    gfx_rounded_outline(g, mkrect(x, y + 7, 14, 10), 2, 15, HEX(0x8A6408));
+    gfx_fill(g, mkrect(x + 6, y + 10, 2, 4), HEX(0x5A4004));
+}
+
 static void load(ex_t *x) {
     kfree(x->items);
     x->items = NULL; x->n = 0;
@@ -174,6 +184,7 @@ static void load(ex_t *x) {
             it->letter = v->letter;
             it->is_dir = 1;
             it->icon = drive_icon(v);
+            it->locked = it->icon != ICON_CDROM && (v->readonly || (v->bd && v->bd->readonly));
             vfs_statfs(v->letter, &it->total, &it->free);
         }
     } else {
@@ -356,14 +367,8 @@ static void cmd_props(ex_t *x) {
     }
     item_t *it = &x->items[x->sel];
     if (!x->path[0]) {
-        volume_t *v = vfs_volume_by_letter(it->letter);
-        char used[48], fr[48], tot[48];
-        format_size(it->total - it->free, used, sizeof used);
-        format_size(it->free, fr, sizeof fr);
-        format_size(it->total, tot, sizeof tot);
-        snprintf(msg, sizeof msg, "%s\n\nType: %s\nFile system: %s\nDevice: %s (%s)\n\nUsed space: %s\nFree space: %s\nCapacity: %s",
-                 it->name, drive_kind(v), v ? v->fs_name : "?", v && v->bd ? v->bd->model : "?", v && v->bd ? v->bd->name : "?", used, fr, tot);
-        msgbox(x->win, "Disk Properties", msg, it->icon, MB_OK);
+        drive_props_dialog(x->win, it->letter);
+        if (wm_alive(x->win)) load(x);
         return;
     }
     char p[VFS_MAX_PATH];
@@ -584,8 +589,8 @@ static void paint_pane(window_t *w, ex_t *x, gc_t *g) {
     }
     for (int i = first_link; i < x->nlinks; i++) { x->links[i].r.x += r.x; x->links[i].r.y += r.y; }
     /* details box */
-    char l1[VFS_MAX_NAME + 1], l2[64], l3[64], l4[64];
-    const char *lines[4] = { l1, l2, l3, l4 };
+    char l1[VFS_MAX_NAME + 1], l2[64], l3[64], l4[64], l5[64];
+    const char *lines[5] = { l1, l2, l3, l4, l5 };
     int n = 0;
     if (x->sel >= 0 && x->sel < x->n) {
         item_t *it = &x->items[x->sel];
@@ -599,6 +604,7 @@ static void paint_pane(window_t *w, ex_t *x, gc_t *g) {
             snprintf(l3, sizeof l3, "Free Space: %s", a);
             snprintf(l4, sizeof l4, "Total Size: %s", b);
             n = 4;
+            if (it->locked) { strlcpy(l5, "Read-only", sizeof l5); n = 5; }
         } else {
             strlcpy(l2, file_type_name(it->name, it->is_dir), sizeof l2);
             n = 2;
@@ -671,6 +677,7 @@ static void paint_view(window_t *w, ex_t *x, gc_t *g) {
             if (sel) gfx_rounded(gg, r, 3, 15, color_lighten(th->select, 170), color_lighten(th->select, 140));
             else if (i == x->hover) gfx_rounded(gg, r, 3, 15, color_lighten(th->select, 215), color_lighten(th->select, 200));
             gfx_icon(gg, r.x + 6, r.y + 6, &icons48[it->icon]);
+            if (it->locked) draw_lock(gg, r.x + 38, r.y + 36);
             gfx_text_box(gg, &font_ui_bold, mkrect(r.x + 60, r.y + 4, r.w - 64, 16), it->name, HEX(0x000000), 0);
             char a[32], b[32], line[80];
             format_size(it->free, a, sizeof a);
@@ -827,7 +834,7 @@ static void ex_event(window_t *w, gui_event_t *e) {
                 volume_t *v = vfs_volume_by_letter(x->items[i].letter);
                 int cd = v && drive_icon(v) == ICON_CDROM && ahci_cd_eject;
                 ctx_drive_items[1].flags = cd ? 0 : MI_DISABLED;
-                ctx_drive_items[3].flags = (!v || cd || v->is_boot || (v->bd && v->bd->readonly)) ? MI_DISABLED : 0;
+                ctx_drive_items[3].flags = (!v || cd || v->is_boot || (v->bd && v->bd->readonly) || v->readonly) ? MI_DISABLED : 0;
             }
             if (i >= 0) menu_popup(w, x->path[0] ? &ctx_file : &ctx_drive, c.x + e->x, c.y + e->y);
             else if (x->path[0]) menu_popup(w, &ctx_bg, c.x + e->x, c.y + e->y);
