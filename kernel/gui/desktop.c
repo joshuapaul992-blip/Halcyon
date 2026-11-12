@@ -1,5 +1,6 @@
 /* Halcyon OS - desktop shell: wallpaper, desktop icons, taskbar, start menu,
  * notification balloons, shutdown */
+#include "net/netcfg.h"
 #include "wm.h"
 #include "core/lib.h"
 #include "core/proc.h"
@@ -320,8 +321,11 @@ int desktop_event(gui_event_t *e) {
 static int start_hover, start_pressed;
 static window_t *start_menu;
 static int task_hover = -1, task_pressed = -1;
-static int tray_usb_hover;
+static int tray_usb_hover, tray_net_hover;
 static int last_minute = -1;
+/* the network icon: -1 no adapter (hidden), 0 not connected, 1 connected */
+static int net_tray = -1;
+static char net_tray_text[96];
 
 rect_t taskbar_rect(void) { return mkrect(0, screen_h() - TASKBAR_H, screen_w(), TASKBAR_H); }
 void taskbar_invalidate(void) { wm_invalidate_rect(taskbar_rect()); }
@@ -333,14 +337,42 @@ static int usb_disks_present(void) {
 }
 
 #define LANG_W 28          /* keyboard layout indicator */
+static int usb_w(void) { return usb_disks_present() ? 22 : 0; }
+static int net_w(void) { return net_tray >= 0 ? 22 : 0; }
 static rect_t tray_rect(void) {
-    int w = TRAY_MIN_W + LANG_W + (usb_disks_present() ? 22 : 0);
+    int w = TRAY_MIN_W + LANG_W + usb_w() + net_w();
     rect_t t = taskbar_rect();
     return mkrect(t.w - w, t.y, w, t.h);
 }
 static rect_t lang_rect(void) {
     rect_t tr = tray_rect();
-    return mkrect(tr.x + 6 + (usb_disks_present() ? 22 : 0), tr.y + 6, LANG_W - 4, tr.h - 11);
+    return mkrect(tr.x + 6 + usb_w() + net_w(), tr.y + 6, LANG_W - 4, tr.h - 11);
+}
+static rect_t usb_icon_rect(void) { rect_t tr = tray_rect(); return mkrect(tr.x + 4, tr.y, 22, tr.h); }
+static rect_t net_icon_rect(void) { rect_t tr = tray_rect(); return mkrect(tr.x + 4 + usb_w(), tr.y, 22, tr.h); }
+
+void net_status_text(const hal_ifinfo_t *f, char *out, int n);   /* apps/network.c */
+
+/* the first adapter that is connected, else the first one */
+static void net_tray_poll(void) {
+    int st = -1;
+    char text[96] = "";
+    hal_ifinfo_t f;
+    for (int i = 0; net_if_info && net_if_info(i, &f) == 0; i++) {
+        if (f.loopback) continue;
+        int up = f.link_up && f.addr;
+        if (st < 0 || (up && st == 0)) {
+            st = up;
+            char s[80];
+            net_status_text(&f, s, sizeof s);
+            snprintf(text, sizeof text, "%s: %s", f.name, s);
+        }
+    }
+    if (st != net_tray || strcmp(text, net_tray_text)) {
+        net_tray = st;
+        strlcpy(net_tray_text, text, sizeof net_tray_text);
+        taskbar_invalidate();
+    }
 }
 
 static int task_list(window_t **out, int max) {
@@ -406,6 +438,11 @@ void taskbar_paint(gc_t *g, rect_t clip) {
         gfx_icon_tinted(g, x, tr.y + 7, &icons16[ICON_USB], HEX(0xFFFFFF), 255);
         x += 22;
     }
+    if (net_tray >= 0) {
+        if (tray_net_hover) gfx_fill_alpha(g, mkrect(x - 3, tr.y + 5, 22, 20), HEX(0xFFFFFF), 70);
+        gfx_icon(g, x, tr.y + 7, &icons16[net_tray ? ICON_NETWORK : ICON_NETWORK_OFF]);
+        x += 22;
+    }
     rect_t lr = lang_rect();             /* keyboard layout: "EN", "DE"... */
     gfx_rounded(g, lr, 2, 15, HEX(0x3A78D8), HEX(0x1C4FA8));
     gfx_rounded_outline(g, lr, 2, 15, HEX(0x123A80));
@@ -424,8 +461,24 @@ static menu_item_t usb_menu_items[] = {
     { "Safely remove USB storage", NULL, 1, MI_BOLD, ICON_USBDRIVE },
 };
 static menu_t usb_menu = { "USB", usb_menu_items, 1 };
+static menu_item_t net_menu_items[] = {
+    { net_tray_text, NULL, 0, MI_DISABLED, ICON_NETWORK },
+    { NULL, NULL, 0, MI_SEPARATOR, 0 },
+    { "Network Connections", NULL, 10, MI_BOLD, ICON_NETWORK },
+    { "Renew address", NULL, 11, 0, 0 },
+};
+static menu_t net_menu = { "Network", net_menu_items, 4 };
 static window_t *tray_dummy;
 static void tray_cmd(window_t *w, int id) {
+    if (id == 10) app_network();
+    if (id == 11 && net_if_ctl) {
+        int r = net_if_ctl(NETCTL_RENEW, NULL);
+        if (r) {
+            char msg[120];
+            snprintf(msg, sizeof msg, "The address could not be renewed (%s).", r == E_INVAL ? "this adapter has a static address" : strerror(r));
+            msgbox(NULL, "Network", msg, ICON_WARNING, MB_OK);
+        }
+    }
     if (id == 1) {
         vfs_sync_all();
         msgbox(NULL, "Safely Remove Hardware", "All data has been written to the USB storage devices.\nIt is now safe to remove them.", ICON_INFO, MB_OK);
@@ -441,9 +494,11 @@ int taskbar_event(gui_event_t *e) {
         int th = -1;
         for (int i = 0; i < n; i++) if (rect_contains(task_rect(i, n), e->x, e->y)) th = i;
         rect_t tr = tray_rect();
-        int uh = rect_contains(mkrect(tr.x + 4, tr.y, 22, tr.h), e->x, e->y) && usb_disks_present();
-        if (sh != start_hover || th != task_hover || uh != tray_usb_hover) {
-            start_hover = sh; task_hover = th; tray_usb_hover = uh;
+        int uh = rect_contains(usb_icon_rect(), e->x, e->y) && usb_disks_present();
+        int nh = rect_contains(net_icon_rect(), e->x, e->y) && net_tray >= 0;
+        (void)tr;
+        if (sh != start_hover || th != task_hover || uh != tray_usb_hover || nh != tray_net_hover) {
+            start_hover = sh; task_hover = th; tray_usb_hover = uh; tray_net_hover = nh;
             taskbar_invalidate();
         }
         return 1;
@@ -454,10 +509,18 @@ int taskbar_event(gui_event_t *e) {
             if (rect_contains(task_rect(i, n), e->x, e->y)) { task_pressed = i; return 1; }
         rect_t tr = tray_rect();
         if (rect_contains(lang_rect(), e->x, e->y)) { keyboard_menu(lang_rect().x, t.y); return 1; }
-        if (usb_disks_present() && rect_contains(mkrect(tr.x + 4, tr.y, 22, tr.h), e->x, e->y)) {
+        if (usb_disks_present() && rect_contains(usb_icon_rect(), e->x, e->y)) {
             if (!tray_dummy) tray_dummy = kzalloc(sizeof(window_t));
             tray_dummy->on_menu = tray_cmd;
             menu_popup(tray_dummy, &usb_menu, tr.x, t.y - 26);
+            return 1;
+        }
+        if (net_tray >= 0 && rect_contains(net_icon_rect(), e->x, e->y)) {
+            if (e->type == GE_DBLCLICK) { menu_close_all(); app_network(); return 1; }
+            if (!tray_dummy) tray_dummy = kzalloc(sizeof(window_t));
+            tray_dummy->on_menu = tray_cmd;
+            net_menu_items[0].icon = net_tray ? ICON_NETWORK : ICON_NETWORK_OFF;
+            menu_popup(tray_dummy, &net_menu, net_icon_rect().x, t.y);
             return 1;
         }
         return 1;
@@ -478,6 +541,7 @@ int taskbar_event(gui_event_t *e) {
 
 /* ---------------- start menu ---------------- */
 typedef struct sitem { const char *label; const char *sub; int icon; void (*launch)(void); } sitem_t;
+static void l_network(void) { app_network(); }
 static void l_docs2(void) { shell_explorer("C:/Documents"); }
 static const sitem_t left_items[] = {
     { "My Computer", "Browse drives and files", ICON_COMPUTER, l_computer },
@@ -492,6 +556,7 @@ static const sitem_t right_items[] = {
     { "My Documents", NULL, ICON_DOCUMENTS, l_docs2 },
     { "My Computer", NULL, ICON_COMPUTER, l_computer },
     { "Control Panel", NULL, ICON_CONTROL, l_control },
+    { "Network Connections", NULL, ICON_NETWORK, l_network },
     { "System Information", NULL, ICON_SYSINFO, l_sysinfo },
     { "Task Manager", NULL, ICON_DISPLAY, l_taskmgr },
     { "About Halcyon", NULL, ICON_HELP, l_about },
@@ -655,6 +720,7 @@ void shell_tick(void) {
         last_clock = time_ms();
         rtc_read(&tm);
         if (tm.minute != last_minute) taskbar_invalidate();
+        net_tray_poll();
     }
     if (balloon && time_ms() > balloon_until) wm_destroy(balloon);
     if (usb_generation() != last_ugen) { last_ugen = usb_generation(); taskbar_invalidate(); }

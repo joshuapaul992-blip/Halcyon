@@ -568,7 +568,7 @@ static wconn_t *conn_open(web_session_t *s, const web_url_t *u, const web_reques
         if (canceled(c)) { *err = WEB_E_CANCELED; goto fail; }
         if (nip <= 0) {
             *err = nip < 0 ? nip : WEB_E_DNS;
-            if (*err == WEB_E_NONET) w_snprintf(why, whyn, "There is no network connection (no network adapter is set up).");
+            if (*err == WEB_E_NONET) w_snprintf(why, whyn, "There is no network connection: no DNS server is set up (the network cable may be unplugged, or no address was obtained).");
             else if (*err == WEB_E_TIMEOUT) w_snprintf(why, whyn, "Looking up %s took too long%s%s.", u->host, dwhy[0] ? ": " : "", dwhy);
             else w_snprintf(why, whyn, "The server name %s was not found%s%s.", u->host, dwhy[0] ? ": " : "", dwhy);
             goto fail;
@@ -607,7 +607,8 @@ static wconn_t *conn_open(web_session_t *s, const web_url_t *u, const web_reques
         c->fd = -1;
         if (r == WEB_E_TIMEOUT || r == E_TIMEOUT) { last = WEB_E_TIMEOUT; w_snprintf(lastwhy, sizeof lastwhy, "%s:%d did not answer.", u->host, u->port); }
         else if (r == E_CONNREFUSED) { last = WEB_E_CONNECT; w_snprintf(lastwhy, sizeof lastwhy, "%s:%d refused the connection.", u->host, u->port); }
-        else if (r == E_AFNOSUPPORT) { last = WEB_E_NONET; w_snprintf(lastwhy, sizeof lastwhy, "There is no network connection."); }
+        else if (r == E_AFNOSUPPORT || r == E_NETUNREACH) { last = WEB_E_NONET; w_snprintf(lastwhy, sizeof lastwhy, "There is no network connection (no route to %s).", u->host); }
+        else if (r == E_HOSTUNREACH) { last = WEB_E_CONNECT; w_snprintf(lastwhy, sizeof lastwhy, "%s could not be reached.", u->host); }
         else { last = WEB_E_CONNECT; w_snprintf(lastwhy, sizeof lastwhy, "%s:%d: %s.", u->host, u->port, hal_strerror(r)); }
     }
     if (last) { *err = last; w_strlcpy(why, lastwhy, whyn); goto fail; }

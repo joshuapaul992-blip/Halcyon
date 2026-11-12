@@ -28,6 +28,8 @@ static int map_errno(int e) {
     case ENOTCONN: return E_NOTCONN;
     case ENOMEM: return E_NOMEM;
     case EAFNOSUPPORT: return E_AFNOSUPPORT;
+    case EHOSTUNREACH: return E_HOSTUNREACH;
+    case ENETUNREACH: return E_NETUNREACH;
     case EINVAL: return E_INVAL;
     }
     return E_IO;
@@ -43,6 +45,8 @@ const char *hal_strerror(int e) {
     case E_PIPE: return "Connection closed";
     case E_NOTCONN: return "Not connected";
     case E_AFNOSUPPORT: return "Address family not supported";
+    case E_HOSTUNREACH: return "Host unreachable";
+    case E_NETUNREACH: return "Network unreachable";
     }
     return "Error";
 }
@@ -165,18 +169,10 @@ int wp_random(void *buf, size_t n) {
     return 0;
 }
 
-/* Name lookup is system call 116 (SYS_RESOLVE of the internet stack):
- * long resolve(host, unsigned *ipv4_out, int max, int timeout_ms). Called by
- * number here so libweb does not depend on that header change. */
-#define WEB_SYS_RESOLVE 116
-static long net_resolve(const char *host, unsigned int *out, int max, int timeout_ms) {
-    return SC4(WEB_SYS_RESOLVE, host, out, max, timeout_ms);
-}
-
 int wp_resolve(const char *host, uint32_t *ip, int max, int timeout_ms, char *why, size_t whyn) {
     unsigned int a[16];
     if (max > 16) max = 16;
-    long r = net_resolve(host, a, max, timeout_ms);
+    long r = resolve(host, a, max, timeout_ms);
     if (r > 0) {
         for (long i = 0; i < r && i < max; i++) ip[i] = a[i];
         return (int)(r < max ? r : max);
@@ -186,29 +182,18 @@ int wp_resolve(const char *host, uint32_t *ip, int max, int timeout_ms, char *wh
         if (why) w_snprintf(why, whyn, "the DNS server did not answer");
         return WEB_E_TIMEOUT;
     }
-    if (r == E_NOTSUP || r == E_AFNOSUPPORT || r == E_INVAL) return WEB_E_NONET;
+    if (r == E_NODEV || r == E_NETUNREACH || r == E_NOTSUP || r == E_AFNOSUPPORT) return WEB_E_NONET;
+    if (r == E_INVAL) return WEB_E_DNS;
     if (why) w_snprintf(why, whyn, "%s", hal_strerror((int)r));
     return r == E_NOTCONN ? WEB_E_NONET : WEB_E_DNS;
 }
 
-/* struct sockaddr_in as Linux lays it out (the stack's sockabi.h will have
- * the same; defined here under another name to stay independent of it) */
-typedef struct {
-    uint16_t family;
-    uint16_t port;              /* network byte order */
-    uint32_t addr;              /* network byte order */
-    uint8_t zero[8];
-} web_sockaddr_in_t;
-
 int wp_tcp_open(void) { return socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0); }
 
 int wp_tcp_connect(int fd, uint32_t ip, int port) {
-    web_sockaddr_in_t a;
-    memset(&a, 0, sizeof a);
-    a.family = AF_INET;
-    a.port = (uint16_t)(((port & 0xFF) << 8) | ((port >> 8) & 0xFF));
-    a.addr = ip;
-    return connect(fd, (const struct sockaddr *)&a, sizeof a);
+    struct sockaddr_in a;
+    socklen_t len = inet_sockaddr(&a, ip, port);
+    return connect(fd, (const struct sockaddr *)&a, len);
 }
 
 int wp_poll(int fd, int events, int ms) {

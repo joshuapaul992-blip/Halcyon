@@ -14,7 +14,7 @@
 #define TH_W 184           /* preview thumbnail */
 #define TH_H 138
 
-enum { ID_THEMES = 10, ID_WALLS, ID_APPLY };
+enum { ID_THEMES = 10, ID_WALLS, ID_APPLY, ID_TZLIST };
 
 static const char *wp_names[NWP] = { "Halcyon Bay", "Aurora", "Dunes", "Solid Teal" };
 
@@ -69,6 +69,106 @@ static int weekday(int y, int m, int d) {
     if (m < 1 || m > 12) return 0;
     if (m < 3) y--;
     return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+}
+
+/* ---------------- time zone ----------------
+ * The real-time clock keeps local time (as Windows does). The offset from
+ * UTC, clock.utc_offset in minutes east, lets programs work out UTC: the
+ * web browser checks certificate dates with it. Daylight saving time is not
+ * followed by itself: the list is of offsets, and the user picks the one in
+ * effect. */
+typedef struct tzone { int min; const char *places; } tzone_t;
+static const tzone_t tzones[] = {
+    { -720, "Baker Island" }, { -660, "American Samoa, Midway" }, { -600, "Hawaii" }, { -570, "Marquesas Islands" },
+    { -540, "Alaska" }, { -480, "Pacific Time (US and Canada)" }, { -420, "Mountain Time (US and Canada)" },
+    { -360, "Central Time (US and Canada), Mexico City" }, { -300, "Eastern Time (US and Canada), Bogota, Lima" },
+    { -240, "Atlantic Time (Canada), Caracas, Santiago" }, { -210, "Newfoundland" },
+    { -180, "Brasilia, Buenos Aires, Greenland" }, { -120, "South Georgia" }, { -60, "Azores, Cape Verde" },
+    { 0, "London, Dublin, Lisbon, Reykjavik" }, { 60, "Berlin, Paris, Rome, Madrid, Lagos" },
+    { 120, "Athens, Helsinki, Kyiv, Cairo, Johannesburg" }, { 180, "Moscow, Istanbul, Riyadh, Nairobi" },
+    { 210, "Tehran" }, { 240, "Dubai, Baku, Samara" }, { 270, "Kabul" }, { 300, "Karachi, Tashkent, Yekaterinburg" },
+    { 330, "India, Sri Lanka" }, { 345, "Nepal" }, { 360, "Dhaka, Almaty, Omsk" }, { 390, "Yangon" },
+    { 420, "Bangkok, Hanoi, Jakarta, Novosibirsk" }, { 480, "Beijing, Hong Kong, Singapore, Perth, Taipei" },
+    { 525, "Eucla" }, { 540, "Tokyo, Seoul, Yakutsk" }, { 570, "Adelaide, Darwin" },
+    { 600, "Sydney, Melbourne, Brisbane, Vladivostok" }, { 630, "Lord Howe Island" },
+    { 660, "Solomon Islands, New Caledonia, Magadan" }, { 720, "Auckland, Wellington, Fiji" },
+    { 765, "Chatham Islands" }, { 780, "Tonga, Samoa" }, { 840, "Line Islands (Kiribati)" },
+};
+#define NTZ ((int)(sizeof tzones / sizeof tzones[0]))
+
+static void tz_label(int i, char *out, int n) {
+    if (i < 0) { strlcpy(out, "Not set", n); return; }
+    int m = tzones[i].min, a = m < 0 ? -m : m;
+    snprintf(out, n, "(UTC%c%02d:%02d) %s", m < 0 ? '-' : '+', a / 60, a % 60, tzones[i].places);
+}
+static int tz_current(void) {
+    const char *v = settings_get("clock.utc_offset", NULL);
+    if (!v || !*v) return -1;
+    int m = settings_get_int("clock.utc_offset", 0);
+    for (int i = 0; i < NTZ; i++) if (tzones[i].min == m) return i;
+    return -1;
+}
+
+#define ID_TZBTN 20
+static void tz_button_text(window_t *cp) {
+    widget_t *b = cp ? widget_find(cp, ID_TZBTN) : NULL;
+    if (!b) return;
+    int i = tz_current();
+    char t[32] = "Set time zone...";
+    if (i >= 0) {
+        int m = tzones[i].min, a = m < 0 ? -m : m;
+        snprintf(t, sizeof t, "Zone: UTC%c%02d:%02d...", m < 0 ? '-' : '+', a / 60, a % 60);
+    }
+    widget_set_text(cp, b, t);
+}
+
+static void tz_ok(window_t *w, widget_t *b) {
+    (void)b;
+    widget_t *lb = widget_find(w, ID_TZLIST);
+    if (lb && lb->value >= 0 && lb->value < NTZ) {
+        settings_set_int("clock.utc_offset", tzones[lb->value].min);
+        int r = settings_save();
+        if (r) {
+            char msg[120];
+            snprintf(msg, sizeof msg, "The time zone could not be saved (%s).", strerror(r));
+            msgbox(w, "Time Zone", msg, ICON_ERROR, MB_OK);
+            return;
+        }
+        if (cp_win && wm_alive(cp_win)) tz_button_text(cp_win);
+    }
+    wm_close(w);
+}
+static void tz_cancel(window_t *w, widget_t *b) { (void)b; wm_close(w); }
+
+static window_t *tz_win;
+static void tz_destroy(window_t *w) { if (tz_win == w) tz_win = NULL; }
+static void app_timezone(window_t *owner) {
+    if (tz_win && wm_alive(tz_win)) { wm_show(tz_win); return; }
+    int W = 420, H = 330;
+    window_t *w = wm_create("Time Zone", ICON_CONTROL, -1, -1, W, H, WF_DIALOG | WF_CENTER);
+    if (!w) return;
+    tz_win = w;
+    w->owner = owner;
+    w->on_destroy = tz_destroy;
+    widget_t *lbl = widget_add(w, W_LABEL, mkrect(14, 10, W - 28, 46),
+                               "Choose the difference between this computer's clock and Coordinated Universal Time (UTC). "
+                               "Where clocks change for summer, choose the offset in effect now.", 0);
+    lbl->style |= WS_WRAP;
+    char *items[NTZ];
+    char buf[NTZ][72];
+    for (int i = 0; i < NTZ; i++) { tz_label(i, buf[i], sizeof buf[i]); items[i] = buf[i]; }
+    widget_t *lb = widget_add(w, W_LISTBOX, mkrect(14, 60, W - 28, H - 60 - 48), "", ID_TZLIST);
+    widget_list_set(w, lb, items, NTZ);
+    int cur = tz_current();
+    lb->value = cur >= 0 ? cur : 14;             /* UTC+00:00 */
+    int vis = lb->r.h / 18;
+    lb->top = MAX(0, lb->value - vis / 2);
+    lb->on_activate = tz_ok;
+    widget_t *ok = widget_add(w, W_BUTTON, mkrect(W - 12 - 2 * 75 - 8, H - 35, 75, 23), "OK", ID_OK);
+    ok->style |= WS_DEFAULT; ok->on_click = tz_ok;
+    widget_t *cn = widget_add(w, W_BUTTON, mkrect(W - 12 - 75, H - 35, 75, 23), "Cancel", ID_CANCEL);
+    cn->style |= WS_CANCEL; cn->on_click = tz_cancel;
+    w->focus = lb;
 }
 
 /* ---------------- painting ---------------- */
@@ -179,12 +279,12 @@ static void cp_paint(window_t *w, gc_t *g) {
     int h12 = tm.hour % 12 == 0 ? 12 : tm.hour % 12;
     snprintf(t1, sizeof t1, "%d:%02d:%02d", h12, tm.minute, tm.second);
     int tx = dg.x + 112;
-    int ex = gfx_text(g, &font_large, tx, dg.y + 28, t1, color_lighten(th->menu_header_bottom, -60));
-    gfx_text(g, &font_ui_bold, ex + 4, dg.y + 36, tm.hour < 12 ? "AM" : "PM", color_lighten(th->menu_header_bottom, -30));
+    int ex = gfx_text(g, &font_large, tx, dg.y + 22, t1, color_lighten(th->menu_header_bottom, -60));
+    gfx_text(g, &font_ui_bold, ex + 4, dg.y + 30, tm.hour < 12 ? "AM" : "PM", color_lighten(th->menu_header_bottom, -30));
     snprintf(t2, sizeof t2, "%s,", days[weekday(tm.year, tm.month, tm.day)]);
     snprintf(t3, sizeof t3, "%s %d, %d", tm.month >= 1 && tm.month <= 12 ? months[tm.month - 1] : "?", tm.day, tm.year);
-    gfx_text(g, &font_ui, tx, dg.y + 62, t2, HEX(0x1C2230));
-    gfx_text(g, &font_ui, tx, dg.y + 78, t3, HEX(0x1C2230));
+    gfx_text(g, &font_ui, tx, dg.y + 52, t2, HEX(0x1C2230));
+    gfx_text(g, &font_ui, tx, dg.y + 67, t3, HEX(0x1C2230));
 
     /* system */
     rect_t sg = mkrect(286, 196, 262, 176);
@@ -253,6 +353,8 @@ static void on_display(window_t *w, widget_t *b) { (void)w; (void)b; app_display
 static void on_ok(window_t *w, widget_t *b) { apply(w); wm_close(w); }
 static void on_cancel(window_t *w, widget_t *b) { wm_close(w); }
 static void on_keyboard(window_t *w, widget_t *b) { app_keyboard(); }
+static void on_network(window_t *w, widget_t *b) { (void)w; (void)b; app_network(); }
+static void on_timezone(window_t *w, widget_t *b) { (void)b; app_timezone(w); }
 
 static void cp_tick(window_t *w) {
     cpanel_t *c = w->data;
@@ -310,6 +412,12 @@ void app_control(void) {
     ap->style |= WS_DISABLED; ap->on_click = on_apply;
     widget_t *kb = widget_add(w, W_BUTTON, mkrect(110, CP_H - 35, 90, 23), "Keyboard...", 0);
     kb->on_click = on_keyboard;
+    widget_t *nb = widget_add(w, W_BUTTON, mkrect(208, CP_H - 35, 90, 23), "Network...", 0);
+    nb->on_click = on_network;
+    widget_t *tz = widget_add(w, W_BUTTON, mkrect(286 + 112, 68 + 88, 138, 22), "", ID_TZBTN);
+    tz->on_click = on_timezone;
+    strlcpy(tz->tip, "The difference between this computer's clock and UTC", sizeof tz->tip);
+    tz_button_text(w);
     w->focus = tl;
     cp_win = w;
 }

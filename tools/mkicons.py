@@ -505,6 +505,27 @@ def ic_home():
     return finish(img, m)
 
 
+def ic_network(off=False):
+    """two computers on a cable: network connections (off: a red cross)"""
+    img = new()
+    def pc(x, y):
+        m = fill(img, rrect((x, y, x + 14, y + 11), 1.2), "#E8ECF4", "#9AA4B8", outline="#3A4458")
+        fill(img, rrect((x + 1.8, y + 1.8, x + 12.2, y + 8.6), 0.4), "#8FD0FF", "#2A6AD0")
+        fill(img, rrect((x + 4.5, y + 11, x + 9.5, y + 13.5), 0.3), "#9AA4B8", "#6A7488", outline="#3A4458")
+        gloss(img, m, 0.5, 90)
+        return m
+    line(img, [(9, 16), (9, 22), (23, 22), (23, 26)], "#3A4458", 1.8)
+    line(img, [(9, 16), (9, 22), (23, 22), (23, 26)], "#F0C040" if not off else "#A0A0A0", 0.9)
+    pc(2, 2)
+    pc(16, 16)
+    if off:
+        line(img, [(12, 19), (20, 27)], "#701800", 3.6)
+        line(img, [(20, 19), (12, 27)], "#701800", 3.6)
+        line(img, [(12, 19), (20, 27)], "#F04020", 2.2)
+        line(img, [(20, 19), (12, 27)], "#F04020", 2.2)
+    return finish(img)
+
+
 ICONS = [
     ("computer", ic_computer),
     ("hdd", ic_hdd),
@@ -548,6 +569,8 @@ ICONS = [
     ("reload", ic_reload),
     ("stop", ic_stop),
     ("home", ic_home),
+    ("network", ic_network),
+    ("network_off", lambda: ic_network(True)),
 ]
 
 SIZES = (16, 32, 48)

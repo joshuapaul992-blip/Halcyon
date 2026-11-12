@@ -25,6 +25,8 @@
 #define E_PIPE        -25
 #define E_AFNOSUPPORT -26
 #define E_INPROGRESS  -29
+#define E_HOSTUNREACH -30
+#define E_NETUNREACH  -31
 const char *hal_strerror(int err);
 #else
 #include "hal.h"

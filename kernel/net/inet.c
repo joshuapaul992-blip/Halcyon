@@ -4,6 +4,7 @@
  * interface, the packet-loss test hook, and the internet system calls
  * 116-127 (name lookup, interface information and configuration). */
 #include "net/inet.h"
+#include "net/netcfg.h"
 #include "core/kernel.h"
 #include "core/lib.h"
 #include "core/mm.h"
@@ -300,9 +301,9 @@ static void save_dns(const u32 *dns, int n) {
     settings_set("net.dns", n ? val : NULL);
 }
 
-static long sys_ifconfig(u64 ucfg) {
-    hal_ifconfig_t c;
-    if (copyin(&c, ucfg, sizeof c)) return E_INVAL;
+int net_if_config(const hal_ifconfig_t *cfg) {
+    if (!stack_up) return E_NODEV;
+    hal_ifconfig_t c = *cfg;
     c.name[sizeof c.name - 1] = 0;
     iface_t *f = iface_by_name(c.name);
     if (!f) return E_NOENT;
@@ -339,11 +340,16 @@ static long sys_ifconfig(u64 ucfg) {
     return 0;
 }
 
-static long sys_netctl(long op, u64 uname) {
+static long sys_ifconfig(u64 ucfg) {
+    hal_ifconfig_t c;
+    if (copyin(&c, ucfg, sizeof c)) return E_INVAL;
+    return net_if_config(&c);
+}
+
+int net_if_ctl(int op, const char *name) {
+    if (!stack_up) return E_NODEV;
     iface_t *f = NULL;
-    if (uname) {
-        char name[16];
-        if (copyin_str(name, uname, sizeof name)) return E_INVAL;
+    if (name) {
         f = iface_by_name(name);
         if (!f) return E_NOENT;
     }
@@ -362,6 +368,20 @@ static long sys_netctl(long op, u64 uname) {
         return 0;
     }
     return E_INVAL;
+}
+
+static long sys_netctl(long op, u64 uname) {
+    char name[16];
+    if (uname && copyin_str(name, uname, sizeof name)) return E_INVAL;
+    return net_if_ctl((int)op, uname ? name : NULL);
+}
+
+int net_if_info(int index, hal_ifinfo_t *out) {
+    if (!stack_up) return E_NODEV;
+    iface_t *f = index >= 0 ? iface_get(index) : NULL;
+    if (!f) return E_NOENT;
+    fill_ifinfo(f, out);
+    return 0;
 }
 
 static long sys_netstats(u64 uout) {
