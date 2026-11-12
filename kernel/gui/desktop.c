@@ -234,9 +234,76 @@ static const dicon_t dicons[] = {
 #define NDICONS ((int)ARRAY_SIZE(dicons))
 static int dsel = -1;
 
+/* Icons sit in cells of an 84 x 84 grid. Dragged ones keep their cell
+ * across restarts: desktop.icon.<name>=column,row (all of them, once one
+ * has been moved; "Arrange Icons" goes back to the columns). */
+#define CELL 84
+static int icol[NDICONS], irow[NDICONS];      /* -1: in the default column */
+static int drag_i = -1, dragging, drag_x0, drag_y0, drag_x, drag_y;
+
+static int grid_rows(void) { return MAX(1, (screen_h() - TASKBAR_H - 10) / CELL); }
+static int grid_cols(void) { return MAX(1, (screen_w() - 8) / CELL); }
+static void icon_key(int i, char *out, int n) {
+    int o = snprintf(out, (size_t)n, "desktop.icon.");
+    for (const char *c = dicons[i].label; *c && o < n - 1; c++) if (isalnum((u8)*c)) out[o++] = (char)tolower((u8)*c);
+    out[o] = 0;
+}
+static void icons_load(void) {
+    for (int i = 0; i < NDICONS; i++) {
+        char k[64];
+        icon_key(i, k, sizeof k);
+        const char *v = settings_get(k, NULL), *comma = v ? strchr(v, ',') : NULL;
+        icol[i] = irow[i] = -1;
+        if (comma) { icol[i] = atoi(v); irow[i] = atoi(comma + 1); }
+        if (icol[i] < 0 || irow[i] < 0) icol[i] = irow[i] = -1;
+    }
+}
+static void icon_cell(int i, int *c, int *r) {
+    if (icol[i] >= 0) { *c = MIN(icol[i], grid_cols() - 1); *r = MIN(irow[i], grid_rows() - 1); return; }
+    *c = i / grid_rows(); *r = i % grid_rows();
+}
 static rect_t dicon_rect(int i) {
-    int rows = MAX(1, (screen_h() - TASKBAR_H - 10) / 84);
-    return mkrect(8 + (i / rows) * 84, 10 + (i % rows) * 84, 80, 78);
+    int c, r;
+    icon_cell(i, &c, &r);
+    return mkrect(8 + c * CELL, 10 + r * CELL, 80, 78);
+}
+static int cell_used(int c, int r, int except) {
+    for (int i = 0; i < NDICONS; i++) {
+        int ic, ir;
+        icon_cell(i, &ic, &ir);
+        if (i != except && ic == c && ir == r) return 1;
+    }
+    return 0;
+}
+/* drop icon i at screen point (x, y): the nearest free cell */
+static void icon_drop(int i, int x, int y) {
+    for (int k = 0; k < NDICONS; k++) icon_cell(k, &icol[k], &irow[k]);   /* all explicit from now on */
+    int c0 = CLAMP((x - 8) / CELL, 0, grid_cols() - 1), r0 = CLAMP((y - 10) / CELL, 0, grid_rows() - 1);
+    int best = -1, bc = c0, br = r0;
+    for (int c = 0; c < grid_cols(); c++)
+        for (int r = 0; r < grid_rows(); r++) {
+            if (cell_used(c, r, i)) continue;
+            int d = (c - c0) * (c - c0) + (r - r0) * (r - r0);
+            if (best < 0 || d < best) { best = d; bc = c; br = r; }
+        }
+    icol[i] = bc; irow[i] = br;
+    for (int k = 0; k < NDICONS; k++) {
+        char key[64], v[16];
+        icon_key(k, key, sizeof key);
+        snprintf(v, sizeof v, "%d,%d", icol[k], irow[k]);
+        settings_set(key, v);
+    }
+    settings_save_later();
+}
+static void icons_arrange(void) {
+    for (int i = 0; i < NDICONS; i++) {
+        char key[64];
+        icon_key(i, key, sizeof key);
+        settings_set(key, NULL);
+        icol[i] = irow[i] = -1;
+    }
+    settings_save_later();
+    gui_full_redraw();
 }
 
 void desktop_paint(gc_t *g, rect_t clip) {
@@ -249,6 +316,7 @@ void desktop_paint(gc_t *g, rect_t clip) {
         int ix = r.x + (r.w - 32) / 2, iy = r.y + 4;
         if (sel) gfx_icon_tinted(g, ix, iy, &icons32[dicons[i].icon], g_theme->select, 110);
         else gfx_icon(g, ix, iy, &icons32[dicons[i].icon]);
+        if (dragging && i == drag_i) gfx_fill_alpha(g, mkrect(ix - 2, iy - 2, 36, 36), g_theme->select, 60);
         /* label: up to two lines, centred, with shadow */
         const char *lbl = dicons[i].label;
         int tw = gfx_text_width(&font_ui, lbl);
@@ -267,6 +335,12 @@ void desktop_paint(gc_t *g, rect_t clip) {
             else gfx_text(g, &font_ui, tx + 1, ty + 1, t, HEX(0x000000));
             gfx_text(g, &font_ui, tx, ty, t, HEX(0xFFFFFF));
         }
+    }
+    /* the icon being dragged follows the pointer, see-through */
+    if (dragging && drag_i >= 0) {
+        rect_t r = dicon_rect(drag_i);
+        int gx = r.x + (r.w - 32) / 2 + drag_x - drag_x0, gy = r.y + 4 + drag_y - drag_y0;
+        if (!rect_empty(rect_intersect(mkrect(gx - 2, gy - 2, 36, 36), clip))) gfx_icon_alpha(g, gx, gy, &icons32[dicons[drag_i].icon], 140);
     }
 #if OS_PRERELEASE
     /* the pre-release watermark, bottom right above the tray:
@@ -289,19 +363,26 @@ void desktop_paint(gc_t *g, rect_t clip) {
 }
 
 static menu_item_t desk_menu_items[] = {
+    { "Arrange Icons", NULL, 4, 0, 0 },
     { "Refresh", NULL, 1, 0, 0 },
     { "", NULL, 0, MI_SEPARATOR, 0 },
     { "Open Command Prompt here", NULL, 2, 0, ICON_TERMINAL },
     { "", NULL, 0, MI_SEPARATOR, 0 },
     { "Properties", NULL, 3, MI_BOLD, ICON_CONTROL },
 };
-static menu_t desk_menu = { "Desktop", desk_menu_items, 5 };
+static menu_t desk_menu = { "Desktop", desk_menu_items, 6 };
 
 static window_t *desk_dummy;   /* owner for desktop context menus */
 static void desk_menu_cmd(window_t *w, int id) {
     if (id == 1) gui_full_redraw();
     else if (id == 2) app_terminal();
     else if (id == 3) app_display();
+    else if (id == 4) icons_arrange();
+}
+
+static rect_t drag_ghost(void) {
+    rect_t r = dicon_rect(drag_i);
+    return mkrect(r.x + (r.w - 32) / 2 + drag_x - drag_x0 - 2, r.y + 2 + drag_y - drag_y0, 36, 36);
 }
 
 int desktop_event(gui_event_t *e) {
@@ -314,11 +395,38 @@ int desktop_event(gui_event_t *e) {
             if (hit >= 0) wm_invalidate_rect(dicon_rect(hit));
         }
         if (e->type == GE_DBLCLICK && hit >= 0 && e->button == MOUSE_LEFT) dicons[hit].launch();
+        if (e->type == GE_MOUSE_DOWN && hit >= 0 && e->button == MOUSE_LEFT) {   /* may become a drag */
+            drag_i = hit; dragging = 0;
+            drag_x0 = drag_x = e->x; drag_y0 = drag_y = e->y;
+        } else {
+            drag_i = -1;
+        }
         if (e->type == GE_MOUSE_DOWN && e->button == MOUSE_RIGHT && hit < 0) {
             if (!desk_dummy) { desk_dummy = kzalloc(sizeof(window_t)); }
             desk_dummy->on_menu = desk_menu_cmd;
             menu_popup(desk_dummy, &desk_menu, e->x, e->y);
         }
+        return 1;
+    }
+    if (e->type == GE_MOUSE_MOVE && drag_i >= 0 && (e->buttons & MOUSE_LEFT)) {
+        int ddx = e->x - drag_x0, ddy = e->y - drag_y0;
+        if (!dragging && ddx * ddx + ddy * ddy < 25) return 1;
+        if (dragging) wm_invalidate_rect(drag_ghost());
+        dragging = 1;
+        drag_x = e->x; drag_y = e->y;
+        wm_invalidate_rect(drag_ghost());
+        wm_invalidate_rect(dicon_rect(drag_i));
+        return 1;
+    }
+    if (e->type == GE_MOUSE_UP && drag_i >= 0) {
+        if (dragging) {
+            wm_invalidate_rect(drag_ghost());
+            wm_invalidate_rect(dicon_rect(drag_i));
+            rect_t r = dicon_rect(drag_i);
+            icon_drop(drag_i, r.x + r.w / 2 + e->x - drag_x0, r.y + r.h / 2 + e->y - drag_y0);
+            wm_invalidate_rect(dicon_rect(drag_i));
+        }
+        drag_i = -1; dragging = 0;
         return 1;
     }
     if (e->type == GE_KEY && e->key.pressed) {
@@ -920,6 +1028,7 @@ void desktop_init(void) {
     int th = settings_get_int("desktop.theme", 0);
     if (th > 0 && th < g_theme_count) theme_set(th);
     desktop_wallpaper_set(CLAMP(settings_get_int("desktop.wallpaper", 0), 0, 3));
+    icons_load();
     last_vgen = vfs_generation();
     last_ugen = usb_generation();
     usb_known = usb_count();

@@ -862,9 +862,24 @@ long usergui_syscall(int nr, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) {
                   (a5 && copyin_str(j->ext, a5, sizeof j->ext) == E_INVAL) || !user_writable(a6, VFS_MAX_PATH);
         if (bad) { kfree(j); return E_INVAL; }
         if (filedlg_open) { kfree(j); return E_BUSY; }
+        /* the folder the program's last Open / Save dialog ended in, kept as
+         * dialog.<program>.folder: used when the program asks for no folder
+         * or the default one (My Documents) */
+        char key[64], pre[40];
+        settings_prog_prefix(p->name, pre, sizeof pre);
+        snprintf(key, sizeof key, "dialog.%s.folder", pre);
+        const char *last = settings_get(key, NULL);
+        vfs_dirent_t st;
+        if (last && (!j->dir[0] || !strcasecmp(j->dir, "C:/Documents")) && !vfs_stat(last, &st) && st.is_dir)
+            strlcpy(j->dir, last, sizeof j->dir);
         filedlg_open = 1;
         gui_call(job_filedlg, j);
         filedlg_open = 0;
+        if (j->ok) {
+            char d[VFS_MAX_PATH];
+            vfs_dirname(j->out, d, sizeof d);
+            if (d[0] && strlen(d) < SETTINGS_VAL_MAX) { settings_set(key, d); settings_save_later(); }
+        }
         int r = j->ok ? (copyout(a6, j->out, strlen(j->out) + 1) ? E_INVAL : 1) : 0;
         kfree(j);
         return r;

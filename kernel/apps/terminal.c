@@ -1072,6 +1072,7 @@ void app_terminal_in(const char *dir) {
     w->on_event = term_event;
     w->on_tick = term_tick;
     w->on_destroy = term_destroy;
+    wm_place_restore(w, "cmd");       /* where it was last time (window.cmd) */
     term_layout(t);
     tprintf(t, "Halcyon [Version %s]\n(C) Halcyon contributors. Type HELP for a list of commands.\n\n", OS_VERSION);
 }
