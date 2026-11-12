@@ -90,6 +90,10 @@ and two drivers that exercise all of it in QEMU: Bochs (moved behind the
 interface) and virtio GPU (several outputs, cursor, flips, hotplug). Its
 "Writing a native display driver" section is the checklist for 10b and 10d.
 
+**Status:** the display core and 10a are done. Next is 10b, then the NVIDIA
+side of 10d; 10e is decided from NVREPORT's frame-buffer speed test on the
+GTX 1070; 10c stays deferred.
+
 Two display engines cover all eight generations, so the work splits by engine:
 
 - **10a, identification:** PCI ID and the chip ID register, the video BIOS
