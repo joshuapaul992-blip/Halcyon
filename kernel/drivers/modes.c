@@ -148,6 +148,35 @@ int edid_detailed(const u8 *p, display_mode_t *out) {
     return 1;
 }
 
+/* a DisplayID detailed timing (20 bytes): type I (tag 0x03, the clock in
+ * 10 kHz units) or type VII (tag 0x22, 1 kHz units); every field is stored
+ * minus one, bit 15 of the front porches is the sync polarity (1:
+ * positive); 0 if it is no usable timing */
+static int did_detailed(const u8 *p, int khz_units, display_mode_t *out) {
+    u32 clk = (u32)(p[0] | p[1] << 8 | p[2] << 16) + 1;
+    int ha = (p[4] | p[5] << 8) + 1, hb = (p[6] | p[7] << 8) + 1;
+    int hso = ((p[8] | p[9] << 8) & 0x7FFF) + 1, hsw = (p[10] | p[11] << 8) + 1;
+    int va = (p[12] | p[13] << 8) + 1, vb = (p[14] | p[15] << 8) + 1;
+    int vso = ((p[16] | p[17] << 8) & 0x7FFF) + 1, vsw = (p[18] | p[19] << 8) + 1;
+    if (ha < 64 || va < 64 || ha + hb > 0xFFFF || va + vb > 0xFFFF || hso + hsw > hb || vso + vsw > vb) return 0;
+    display_timing_t t;
+    t.clock_khz = khz_units ? clk : clk * 10;
+    t.hactive = (u16)ha;
+    t.hsync_start = (u16)(ha + hso);
+    t.hsync_end = (u16)(ha + hso + hsw);
+    t.htotal = (u16)(ha + hb);
+    t.vactive = (u16)va;
+    t.vsync_start = (u16)(va + vso);
+    t.vsync_end = (u16)(va + vso + vsw);
+    t.vtotal = (u16)(va + vb);
+    u32 fl = DT_DETAILED;
+    if (p[9] & 0x80) fl |= DT_HSYNC_POS;
+    if (p[17] & 0x80) fl |= DT_VSYNC_POS;
+    mode_set_timing(out, &t, fl);
+    if (p[3] & 0x10) out->flags |= DT_INTERLACE;
+    return 1;
+}
+
 static int add_timing(display_mode_t *out, int n, int max, const display_mode_t *m) {
     if (n >= max) return n;
     out[n] = *m;
@@ -200,10 +229,31 @@ int edid_timings(const u8 *e, int size, display_mode_t *out, int max) {
     /* standard timings */
     for (int k = 0; k < 8; k++)
         if (std_timing(e[38 + 2 * k], e[39 + 2 * k], rev13, &m)) n = add_timing(out, n, max, &m);
-    /* CTA-861 extension blocks: short video descriptors, detailed timings */
+    /* extension blocks: CTA-861 (short video descriptors, detailed timings)
+     * and DisplayID (type I and type VII detailed timings) */
     int ext = e[126];
     for (int b = 1; b <= ext && (b + 1) * 128 <= size; b++) {
         const u8 *x = e + b * 128;
+        if (x[0] == 0x70) {
+            /* a DisplayID section: data blocks from byte 5 (tag, revision, length) */
+            int end = MIN(5 + x[2], 127);
+            for (int o = 5; o + 3 <= end;) {
+                int tag = x[o], blen = x[o + 2];
+                if (o + 3 + blen > end || (!tag && !blen)) break;
+                if ((tag == 0x03 || tag == 0x22) && blen % 20 == 0)
+                    for (int k = 0; k < blen / 20; k++) {
+                        const u8 *p = x + o + 3 + k * 20;
+                        if (!did_detailed(p, tag == 0x22, &m)) continue;
+                        /* its preferred flag counts only when nothing before was preferred */
+                        int pref = 0;
+                        for (int i = 0; i < n; i++) if (out[i].flags & DT_PREFERRED) pref = 1;
+                        if ((p[3] & 0x80) && !pref) m.flags |= DT_PREFERRED;
+                        n = add_timing(out, n, max, &m);
+                    }
+                o += 3 + blen;
+            }
+            continue;
+        }
         if (x[0] != 0x02) continue;
         int dtd = x[2];
         if (dtd >= 4 && dtd <= 127) {
@@ -235,6 +285,7 @@ int edid_timings(const u8 *e, int size, display_mode_t *out, int max) {
 static int within(const mode_limits_t *l, const display_mode_t *m) {
     int minw = l->min_w ? l->min_w : 640, minh = l->min_h ? l->min_h : 480;
     if (m->flags & DT_INTERLACE) return 0;
+    if (m->hz <= 0) return 0;                        /* (a timing below half a frame per second) */
     if (m->w < minw || m->h < minh) return 0;
     if (l->max_w && m->w > l->max_w) return 0;
     if (l->max_h && m->h > l->max_h) return 0;
@@ -244,7 +295,7 @@ static int within(const mode_limits_t *l, const display_mode_t *m) {
     return 1;
 }
 
-/* is a better than b for the same size? */
+/* is a better than b for the same size (one mode per size)? */
 static int better(const display_mode_t *a, const display_mode_t *b) {
     if ((a->flags & DT_PREFERRED) != (b->flags & DT_PREFERRED)) return (a->flags & DT_PREFERRED) != 0;
     if ((a->flags & DT_EDID) != (b->flags & DT_EDID)) return (a->flags & DT_EDID) != 0;
@@ -256,10 +307,27 @@ static int better(const display_mode_t *a, const display_mode_t *b) {
     return 0;
 }
 
-static int insert(display_mode_t *out, int n, int max, const display_mode_t *m) {
+/* is a better than b for the same size and refresh rate? The monitor's own
+ * timings first: its exact (detailed) one, else one it lists (DMT / CVT /
+ * the CEA table for its standard, established and short video timings) */
+static int better_rate(const display_mode_t *a, const display_mode_t *b) {
+    static const u32 order[] = { DT_PREFERRED, DT_DETAILED, DT_EDID, DT_DMT };
+    for (unsigned i = 0; i < ARRAY_SIZE(order); i++)
+        if ((a->flags & order[i]) != (b->flags & order[i])) return (a->flags & order[i]) != 0;
+    return 0;
+}
+
+/* a before b in the list: width, height, refresh rate */
+static int before(const display_mode_t *a, const display_mode_t *b) {
+    if (a->w != b->w) return a->w < b->w;
+    if (a->h != b->h) return a->h < b->h;
+    return a->hz < b->hz;
+}
+
+static int insert(display_mode_t *out, int n, int max, const display_mode_t *m, int rates) {
     for (int i = 0; i < n; i++)
-        if (out[i].w == m->w && out[i].h == m->h) {
-            if (better(m, &out[i])) {
+        if (out[i].w == m->w && out[i].h == m->h && (!rates || out[i].hz == m->hz)) {
+            if (rates ? better_rate(m, &out[i]) : better(m, &out[i])) {
                 u32 keep = out[i].flags & DT_PREFERRED;
                 out[i] = *m;
                 out[i].flags |= keep;
@@ -270,7 +338,7 @@ static int insert(display_mode_t *out, int n, int max, const display_mode_t *m) 
         }
     if (n >= max) return n;
     int i = n++;
-    while (i > 0 && (out[i - 1].w > m->w || (out[i - 1].w == m->w && out[i - 1].h > m->h))) {
+    while (i > 0 && before(m, &out[i - 1])) {
         out[i] = out[i - 1];
         i--;
     }
@@ -286,20 +354,29 @@ int modes_build(const u8 *edid, int edid_len, const mode_limits_t *lim, int pref
         { 1600, 1200 }, { 1680, 1050 }, { 1920, 1080 }, { 1920, 1200 }, { 2048, 1152 }, { 2560, 1440 },
         { 2560, 1600 }, { 3840, 2160 },
     };
-    display_mode_t t[96], m;
+    display_mode_t t[128], m;
     int nt = edid_len >= 128 ? edid_timings(edid, edid_len, t, (int)ARRAY_SIZE(t)) : 0;
-    int n = 0, have_pref = 0;
-    for (int i = 0; i < nt; i++)
+    int n = 0, have_pref = 0, pw = 0, ph = 0;
+    for (int i = 0; i < nt; i++) {
+        if ((t[i].flags & DT_PREFERRED) && !(t[i].flags & DT_INTERLACE)) { pw = t[i].w; ph = t[i].h; }
         if (within(lim, &t[i])) {
-            n = insert(out, n, max, &t[i]);
+            n = insert(out, n, max, &t[i], lim->rates);
             if (t[i].flags & DT_PREFERRED) have_pref = 1;
         }
+    }
+    /* with refresh rates: a preferred timing the hardware cannot drive (a
+     * DisplayPort link too slow for it) leaves its size recommended, at the
+     * highest rate that is left there */
+    if (lim->rates && !have_pref && pw) {
+        int k = modes_find(out, n, pw, ph);
+        if (k >= 0) { out[k].flags |= DT_PREFERRED; have_pref = 1; }
+    }
     if (lim->virtual_sizes) {
         for (unsigned i = 0; i < ARRAY_SIZE(common); i++) {
             if (!mode_dmt(common[i][0], common[i][1], 60, &m) && !mode_dmt(common[i][0], common[i][1], 0, &m))
                 mode_cvt_rb(common[i][0], common[i][1], 60, &m);
             m.flags |= DT_DRIVER;
-            if (within(lim, &m)) n = insert(out, n, max, &m);
+            if (within(lim, &m)) n = insert(out, n, max, &m, lim->rates);
         }
     }
     /* the size the hardware asks for (a virtual machine's window), when the
@@ -307,14 +384,41 @@ int modes_build(const u8 *edid, int edid_len, const mode_limits_t *lim, int pref
     if (!have_pref && pref_w > 0 && pref_h > 0) {
         if (!mode_dmt(pref_w, pref_h, 60, &m)) mode_cvt_rb(pref_w, pref_h, 60, &m);
         m.flags |= DT_PREFERRED | DT_DRIVER;
-        if (within(lim, &m)) n = insert(out, n, max, &m);
+        if (within(lim, &m)) n = insert(out, n, max, &m, lim->rates);
     }
     return n;
 }
 
 int modes_find(const display_mode_t *m, int n, int w, int h) {
-    for (int i = 0; i < n; i++) if (m[i].w == w && m[i].h == h) return i;
+    int p = modes_preferred(m, n), best = -1;
+    for (int i = 0; i < n; i++) {
+        if (m[i].w != w || m[i].h != h) continue;
+        if (p >= 0 && m[i].hz == m[p].hz) return i;
+        if (best < 0 || m[i].hz > m[best].hz) best = i;
+    }
+    return best;
+}
+
+int modes_find_rate(const display_mode_t *m, int n, int w, int h, int hz) {
+    if (!hz) return modes_find(m, n, w, h);
+    for (int i = 0; i < n; i++) if (m[i].w == w && m[i].h == h && m[i].hz == hz) return i;
     return -1;
+}
+
+int modes_saved(const display_mode_t *m, int n, int w, int h, int hz, int *fell_back) {
+    int k = modes_find_rate(m, n, w, h, hz);
+    *fell_back = 0;
+    if (k >= 0) return k;
+    k = modes_find(m, n, w, h);
+    *fell_back = k >= 0;
+    return k;
+}
+
+int modes_rates(const display_mode_t *m, int n, int w, int h, int *hz, int max) {
+    int k = 0;
+    for (int i = 0; i < n && k < max; i++)
+        if (m[i].w == w && m[i].h == h && (!k || hz[k - 1] != m[i].hz)) hz[k++] = m[i].hz;
+    return k;
 }
 
 int modes_preferred(const display_mode_t *m, int n) {
@@ -335,12 +439,12 @@ int modes_default(const display_mode_t *m, int n, int cap_w, int cap_h) {
         for (i = 0; i < n; i++)
             if (m[i].w <= cap_w && m[i].h <= cap_h && (long)m[i].w * nh == (long)m[i].h * nw &&
                 (best < 0 || (long)m[i].w * m[i].h > (long)m[best].w * m[best].h)) best = i;
-        if (best >= 0) return best;
+        if (best >= 0) return modes_find(m, n, m[best].w, m[best].h);
     }
     int best = -1;
     for (int i = 0; i < n; i++)
         if (m[i].w <= 1024 && m[i].h <= 768 && (best < 0 || (long)m[i].w * m[i].h > (long)m[best].w * m[best].h)) best = i;
-    return best >= 0 ? best : 0;
+    return best >= 0 ? modes_find(m, n, m[best].w, m[best].h) : modes_find(m, n, m[0].w, m[0].h);
 }
 
 void mode_describe(const display_mode_t *m, char *out, int n) {
