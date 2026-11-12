@@ -26,6 +26,9 @@ make --no-print-directory nv > $out/nvtest.log 2>&1 || { cat $out/nvtest.log; ex
 tail -1 $out/nvtest.log
 make --no-print-directory fuzz-nv-regress > $out/fuzz_nv.log 2>&1 || { cat $out/fuzz_nv.log; exit 1; }
 tail -1 $out/fuzz_nv.log
+# NVIDIA modesetting (M10b): method streams, PLLs, DisplayPort, VBIOS scripts, the EVO channel on a simulated engine
+make --no-print-directory evo > $out/evotest.log 2>&1 || { cat $out/evotest.log; exit 1; }
+tail -1 $out/evotest.log
 # Notepad's text model (word wrap) and undo engine
 make --no-print-directory notepad > $out/notepad.log 2>&1 || { cat $out/notepad.log; exit 1; }
 tail -1 $out/notepad.log
