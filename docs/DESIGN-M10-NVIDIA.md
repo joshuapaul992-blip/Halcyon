@@ -329,6 +329,28 @@ The register addresses come from nouveau, which runs on these cards; the
 order of operations follows it, with save / restore added. The first test on
 the GTX 1070 (NVREPORT and BOOT.LOG) is what 10b starts from.
 
+### Status (paused here)
+
+Done: everything above, committed, building without warnings;
+`tools/ci.sh quick` passes, and the boot variants `xhci:bios`,
+`xhci:uefi`, `nvfake` (BIOS and UEFI), `user`, `help` and `res+fwvideo`
+pass. Without an NVIDIA card the code only logs `nv: no NVIDIA graphics
+card` and adds nothing to System Information.
+
+Remains for 10a:
+
+- The first run on the GTX 1070: NVREPORT's folder and BOOT.LOG, then fix
+  whatever the real card disagrees with (register values, ROM sources,
+  I2C / AUX, VRAM, the interrupt guard's decision).
+- Not implemented: ACPI `_ROM` (needs an AML interpreter), external
+  encoders (DCB location 1), LVDS panels whose EDID comes from straps, the
+  extended GPIO (XPIO) tables, merging DCB 2.0's duplicate entries, the
+  head owner (CR44) on dual-head pre-NV50 cards, a dedicated F8 entry
+  (Safe Mode and `nv.disable=1` cover it), ROM / I2C for Volta and later.
+- Expected merge points with the new display layer: `SYS_COUNT` (now 200,
+  196-199 reserved), `CAT_NVIDIA` in `sysinfo.c`, the `nv_init()` call in
+  `kmain.c`, the functions appended to `edid.c` / `edid.h`.
+
 ## 10b: Tesla to Pascal modesetting
 
 (to be written)
