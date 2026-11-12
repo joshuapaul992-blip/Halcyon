@@ -357,5 +357,5 @@ the trust anchor converter) is written for Halcyon.
 - Possible next steps for the browser: a CSS subset (selectors for
   `display: none`, colours, widths), JPEG decoding, rowspan, text selection
   and copy, find in page, bookmarks, persistent cookies, IPv6, TLS 1.3 when
-  BearSSL (or a replacement) has it. M15 (Firefox on the Linux layer) is
+  BearSSL (or a replacement) has it. M14 (Firefox on the Linux layer) is
   the real browser; this one stays a small, safe viewer.

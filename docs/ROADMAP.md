@@ -153,42 +153,15 @@ testing sets its pace.
 - A software renderer behind it, written for speed: perspective-correct
   triangle setup, SSE2 inner loops, tiles. Target: textured scenes at 640x480
   at interactive frame rates on one core.
-- Halcyon's own programs use it; Linux programs (M14) get their 3D from Mesa
-  instead (M12, or Mesa's own software renderer without a GPU driver).
+- Halcyon's own programs use it; Linux programs (M13) get their 3D from Mesa
+  instead (M15, or Mesa's own software renderer without a GPU driver).
 - Frames reach the window through M9's shared memory (no copy per frame).
 - Demos: a 3D screensaver (ties in with M8) and a small 3D game or viewer.
 - Fully testable without hardware: the renderer also builds on the host and
   the CI compares rendered scenes with reference images.
 - Depends on M9 (threads, shared memory).
 
-### M12: Hardware 3D: Mesa on NVIDIA (Pascal first)
-
-Decided: a Mesa port, so programs get modern OpenGL, OpenGL ES 3 and (later)
-Vulkan with programmable shaders, as M16 needs.
-
-- Mesa itself runs unmodified as Linux libraries on M14, the distribution's
-  build. Halcyon's kernel provides what Mesa's nouveau driver talks to: the
-  Linux DRM device files (`/dev/dri/card0`, `renderD128`) with the nouveau
-  interface (GPU memory objects, per-process GPU address spaces, command
-  submission, fences, mode setting for the compositor).
-- Behind that interface, Halcyon's own NVIDIA kernel driver, extending M10 with
-  GPU memory management, command channels, the graphics engine and recovery
-  from GPU faults (end the program, reset the engine). The Linux nouveau kernel
-  driver (MIT-licensed) is the reference and source for porting.
-- First on the GTX 1070; second-generation Maxwell (900 series) uses the same
-  firmware model and comes almost for free. Other generations later.
-- Needs NVIDIA's signed GP104 firmware (from linux-firmware); mandatory for 3D.
-- OpenGL / OpenGL ES through Mesa's nouveau driver is the mature path on
-  Pascal; Vulkan (NVK) on Pascal is less mature.
-- The card stays at its boot clocks (no power-management firmware for Pascal),
-  so it is much slower than under NVIDIA's own driver, but far faster than
-  software.
-- The M14 compositor then takes GPU buffers (dma-buf) directly, and Firefox
-  can render on the GPU.
-- Tested on the GTX 1070 only (VFIO passthrough or bare metal).
-- Depends on M10 (10a, 10b) and M14.
-
-### M13: Intel and AMD graphics
+### M12: Intel and AMD graphics
 
 Display (modesetting) and the M10 features (native modes, resolution switching
 without reboot, several monitors, hardware cursor, page flips), like M10 for
@@ -205,18 +178,18 @@ NVIDIA. Proposed range, matching M10's Pascal (2016):
   this needs an AtomBIOS interpreter (the Linux radeon/amdgpu version is
   MIT-licensed). Vega and RDNA are deferred: their security processor must load
   signed firmware first, and their display code (DCN) is very large.
-- Hardware 3D on Intel or AMD is not part of M13. With M12's design it would
+- Hardware 3D on Intel or AMD is not part of M12. With M15's design it would
   mean the Linux DRM interface for Intel (i915) or AMD (radeon/amdgpu) behind
   the kernel driver, with Mesa's matching drivers on top: a separate milestone
-  after M12 if wanted. Until then Mesa and M11 render in software.
+  after M15 if wanted. Until then Mesa and M11 render in software.
 - Testing: QEMU emulates neither. AMD cards can be tested through VFIO
   passthrough; Intel integrated GPUs mostly on bare metal.
-- Depends on M5. Independent of M10 to M12, so it can move earlier if running
+- Depends on M5. Independent of M10, M11 and M15, so it can move earlier if running
   well on laptops matters more than the NVIDIA card.
 
-### M14: Linux compatibility layer
+### M13: Linux compatibility layer
 
-Both M15 and M16 need far more than Halcyon's program interface offers: a full
+Both M14 and M16 need far more than Halcyon's program interface offers: a full
 C/C++ runtime, POSIX threads and futexes, `mmap` with protection changes
 (JIT compilers), signals (JITs use fault handlers), sockets and `poll`,
 shared libraries (`dlopen`), thread-local storage, and several CPU cores to
@@ -227,25 +200,52 @@ be usable. Decided: get all of it at once by running Linux programs.
   Linux user land (libraries from a distribution) under a Halcyon directory,
   and `/proc` and `/sys` as far as programs need them.
 - A Wayland compositor that puts Linux programs' windows on the Halcyon
-  desktop (shared-memory buffers first, GPU buffers with M12).
+  desktop (shared-memory buffers first, GPU buffers with M15).
 - Multi-core support (SMP), with a real kernel locking scheme in place of the
   big lock: browsers and games are unusable on one core.
 - Depends on M6 (sockets) and M9. Comparable in size to everything built so
   far.
 
-### M15: A web browser for modern sites
+### M14: A web browser for modern sites
 
 Only three engines render today's web: Gecko (Firefox), Blink (Chromium) and
 WebKit. Ladybird, a new independent engine, is promising but not yet complete.
 
-- **Decided: the official Linux Firefox build, unmodified, on M14.** No
+- **Decided: the official Linux Firefox build, unmodified, on M13.** No
   port to maintain, and the security updates a browser needs every few weeks
   come for free. Firefox's own software renderer (SWGL) draws without a GPU;
-  with M12 it can use the GPU. Its sandbox needs Linux features (seccomp,
-  namespaces) that M14 can add later or switch off at first.
+  with M15 it can use the GPU. Its sandbox needs Linux features (seccomp,
+  namespaces) that M13 can add later or switch off at first.
 - Halcyon side: the browser as the default for web links, downloads into the
   file system, and a handler for app links (needed by M16).
-- Depends on M14 (and M6, M5; M7 for sound).
+- Depends on M13 (and M6, M5; M7 for sound).
+
+### M15: Hardware 3D: Mesa on NVIDIA (Pascal first)
+
+Decided: a Mesa port, so programs get modern OpenGL, OpenGL ES 3 and (later)
+Vulkan with programmable shaders, as M16 needs.
+
+- Mesa itself runs unmodified as Linux libraries on M13, the distribution's
+  build. Halcyon's kernel provides what Mesa's nouveau driver talks to: the
+  Linux DRM device files (`/dev/dri/card0`, `renderD128`) with the nouveau
+  interface (GPU memory objects, per-process GPU address spaces, command
+  submission, fences, mode setting for the compositor).
+- Behind that interface, Halcyon's own NVIDIA kernel driver, extending M10 with
+  GPU memory management, command channels, the graphics engine and recovery
+  from GPU faults (end the program, reset the engine). The Linux nouveau kernel
+  driver (MIT-licensed) is the reference and source for porting.
+- First on the GTX 1070; second-generation Maxwell (900 series) uses the same
+  firmware model and comes almost for free. Other generations later.
+- Needs NVIDIA's signed GP104 firmware (from linux-firmware); mandatory for 3D.
+- OpenGL / OpenGL ES through Mesa's nouveau driver is the mature path on
+  Pascal; Vulkan (NVK) on Pascal is less mature.
+- The card stays at its boot clocks (no power-management firmware for Pascal),
+  so it is much slower than under NVIDIA's own driver, but far faster than
+  software.
+- The M13 compositor then takes GPU buffers (dma-buf) directly, and Firefox
+  can render on the GPU.
+- Tested on the GTX 1070 only (VFIO passthrough or bare metal).
+- Depends on M10 (10a, 10b) and M13.
 
 ### M16: Xenithium, a Roblox client for Halcyon (Sober-style)
 
@@ -258,12 +258,12 @@ compatibility layers), so Xenithium runs the x86-64 build of the Android app.
   (JNI): the native code calls into hundreds of Android and Roblox Java
   classes, which must be reimplemented. This is most of the work, and it is
   reverse engineering.
-- Graphics: OpenGL ES 3 or Vulkan through Mesa (M12). Audio through M7,
-  input (mouse lock, keyboard, controllers), the window through M14's
+- Graphics: OpenGL ES 3 or Vulkan through Mesa (M15). Audio through M7,
+  input (mouse lock, keyboard, controllers), the window through M13's
   compositor.
 - Browser integration: roblox.com's "Play" buttons and app links open
-  Xenithium through M15's link handler; parts of the app that show web pages
-  (Android WebView) can be served by M15's engine.
+  Xenithium through M14's link handler; parts of the app that show web pages
+  (Android WebView) can be served by M14's engine.
 - Automatic client updates (a setting, "Keep the Roblox client up to date",
   on by default):
   - Xenithium checks an APK download site for a newer Roblox release when it
@@ -297,7 +297,8 @@ compatibility layers), so Xenithium runs the x86-64 build of the Android app.
   its terms of use, with a risk to the account. APK sites redistribute the
   app without Roblox's involvement; the signature check guards against a
   tampered package, but not against the site disappearing or being blocked.
-- Depends on M14, M15, M7 and M12.
+- Depends on M13, M14, M7 and M15.
 
-**Recommended order:** 5 → 9 → 6 → 7 → 7.5 → 8 → 10 → 11 → 13 → 14 → 15 → 12 → 16
-(M12 moved after M14, which Mesa runs on; Firefox does not need it).
+**Recommended order:** 5 → 9 → 6 → 7 → 7.5 → 8 → 10 → 11 → 12 → 13 → 14 → 15 → 16
+(Mesa, M15, comes after the Linux layer, M13, which it runs on; Firefox, M14,
+does not need it.)

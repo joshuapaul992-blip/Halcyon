@@ -26,7 +26,7 @@ built-in versions remain only as a fallback, see "The shell" below).
   and condition variables (a sequence number) on them; `malloc` is locked.
 - Thread-local storage: each thread has an FS base (`SYS_SET_TLS`), loaded on
   every switch to it. The compiler's `__thread` is not supported yet (the
-  loader does not set up a TLS segment); M14 needs the FS base for Linux
+  loader does not set up a TLS segment); M13 needs the FS base for Linux
   programs.
 
 ## Shared memory and window pixels
@@ -96,7 +96,7 @@ milestone 6 only has to add the internet families. Code: `kernel/net/`
 Names, argument order, structures and constant values are BSD's as Linux lays
 them out (a 16-bit family first in every address; Linux's `AF_`, `SOCK_`,
 `SO_`, `MSG_`, `POLL*` and `FIONBIO`/`FIONREAD` numbers), so the Linux layer
-(M14) can pass most of them through. Results are Halcyon's negative `E_*`
+(M13) can pass most of them through. Results are Halcyon's negative `E_*`
 codes. Sockets are handles (`H_SOCKET`) in the process's handle table:
 `read()`, `write()` and `close()` work on them.
 
