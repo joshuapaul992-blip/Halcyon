@@ -1,6 +1,8 @@
 /* Fuzz harness for the Halcyon storage stack (kernel/fs/block.c, vfs.c, fat.c,
  * exfat.c, iso9660.c).
  *
+ * NTFS (ntfs*.c) is covered too.
+ *
  * Input: one config byte (fuzz_fs.h: sector size, read-only, boot disk,
  * I/O fault injection, operation variant) and a disk image. The image becomes a RAM block device that is registered
  * (partition scan + mount), every mounted volume is walked (vfs_list of every
@@ -204,6 +206,10 @@ static void walk_volume(walk_t *w, volume_t *v) {
     memset(w, 0, sizeof *w);
     w->letter = v->letter;
     w->dev_bytes = v->bd->sector_count * v->bd->sector_size;
+    /* NTFS: sparse files and data past the initialized size read as zeros
+     * without using the device, so a file may hold more than it (reads stay
+     * bounded by the file size and MAX_TOTAL_READ) */
+    if (!strcmp(v->fs_name, "NTFS")) w->dev_bytes = ~0ull >> 1;
     char root[4] = { v->letter, ':', '/', 0 };
     vfs_dirent_t st;
     g_op = "vfs_stat root";
