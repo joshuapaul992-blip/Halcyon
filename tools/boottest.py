@@ -154,6 +154,17 @@ interrupts on, get a working interrupt:
           reaching GUIDEMO (press or release) and the desktop come back, the
           next click must reach it; started again, a key must end it, and
           the third time a mouse movement
+  game3d  the 3D library (M11a): C:\\PROGRAMS\\SHARDS.EXE /demo runs after
+          boot (fw_cfg autorun), the game steering itself; it logs its
+          window and every 25th frame with the frame rate. The test waits
+          for the 50th frame (bounded, generous: the frame rate depends on
+          the host), then a screendump of the window must show the scene:
+          not dark, textured (many colours), the platform's grey-blue
+          tiles, the sled's red-orange and the sky
+  saver3d the 3D screen saver: Lantern Valley (fw_cfg screensaver =
+          "4:LANTERNS.SCR") must start full screen and log its 20th frame
+          (waited for, bounded), then a screendump must show the dusk sky
+          (orange and violet), the green valley and bright lanterns
   nvfake  the NVIDIA identification's test hook (fw_cfg nvfake, nvrom, nvedid):
           a simulated GTX 1070 without registers, its video BIOS a
           Pascal-style image from tests/host/nvtest (PC-AT + EFI + NVIDIA
@@ -268,11 +279,12 @@ MATRIX = ["uhci:bios", "ohci:bios", "ehci:bios", "ich9:bios", "xhci:bios",
           "xhci:bios:nvfake+nvoff", "xhci:bios:nvfake+nvset", "xhci:bios:guard", "xhci:uefi:guardblock",
           "xhci:bios:rates", "xhci:uefi:ratesave", "xhci:bios:ratefall",
           "xhci:bios:vgpu+accel", "xhci:uefi:dual+accel", "xhci:bios:vgpu+accelhang",
+          "xhci:bios:game3d", "xhci:uefi:saver3d",
           "xhci:uefi:install", "xhci:bios:install"]
 VARIANTS = {"pic": 0x200, "nomsi": 0x100, "noirq": 0x80, "nvme": 0, "nvme4k": 0, "cd": 0, "user": 0, "help": 0, "sock": 0, "web": 0,
             "fwvideo": 0x800, "res": 0, "switch": 0, "vgpu": 0, "dual": 0, "arrange": 0, "multi": 0, "gpufail": 0, "gpuoff": 0, "net": 0, "loss": 0, "beep": 0, "ntfs": 0, "ntfsrw": 0,
             "recycle": 0, "saver": 0, "nvfake": 0, "nvoff": 0, "nvset": 0, "guard": 0, "guardblock": 0,
-            "rates": 0, "ratesave": 0, "ratefall": 0, "accel": 0, "accelhang": 0}
+            "rates": 0, "ratesave": 0, "ratefall": 0, "accel": 0, "accelhang": 0, "game3d": 0, "saver3d": 0}
 # network variants: QEMU device, the driver's name, whether it has MSI-X
 NICS = {"virtio": ("virtio-net-pci", "virtio-net", True),
         "virtiolegacy": ("virtio-net-pci,disable-modern=on", "virtio-net", True),
@@ -462,6 +474,67 @@ def saver_test(log):
     if not wait_log(log, "screensaver: stopped (mouse moved)", start, 8):
         fails.append("mouse movement did not end the screen saver")
     return fails
+
+
+def colour_shares(im, tests):
+    """share of the pixels of im that pass each test (a function of r, g, b)"""
+    px = im.convert("RGB").tobytes()
+    n = len(px) // 3 or 1
+    counts = [0] * len(tests)
+    for i in range(0, len(px) - 2, 3):
+        r, g, b = px[i], px[i + 1], px[i + 2]
+        for k, t in enumerate(tests):
+            if t(r, g, b):
+                counts[k] += 1
+    return [c / n for c in counts], len(set(px[i:i + 3] for i in range(0, len(px) - 2, 3 * 7)))
+
+
+def game3d_test(log):
+    """SHARDS.EXE /demo: the 50th frame logged, then its window's picture"""
+    fails = []
+    if not wait_log(log, "shards: demo, window client at", 0, 60):
+        return ["SHARDS.EXE did not start"]
+    m = re.search(r"shards: demo, window client at (-?\d+),(-?\d+) size (\d+)x(\d+)", open(log, errors="replace").read())
+    if not wait_log(log, "shards: 50 frames rendered", 0, 240):
+        return ["SHARDS.EXE did not log its 50th frame in 240 s"]
+    png = os.path.abspath(os.path.join(BUILD, "ci_game3d.png"))
+    subprocess.run([sys.executable, "tools/qemu_ctl.py", os.path.join(BUILD, "mon.sock"), "png:" + png], stdout=subprocess.DEVNULL)
+    from PIL import Image
+    im = Image.open(png).convert("RGB")
+    x, y, w, h = (int(v) for v in m.groups()) if m else (0, 0, im.size[0], im.size[1])
+    # (the text of the heads-up display is at the top and the bottom: the middle only)
+    win = im.crop((x, y + 30, x + w, y + h - 30))
+    (tiles, sled, sky), ncol = colour_shares(win, [
+        lambda r, g, b: 70 < b < 240 and b >= r and abs(r - g) < 40 and b - r < 60,
+        lambda r, g, b: r > 150 and g < 120 and b < 100,
+        lambda r, g, b: b > r + 25 and b > 60])
+    dark = dark_share(win)
+    if dark > 0.25 or tiles < 0.15 or sled < 0.0005 or sky < 0.05 or ncol < 150:
+        fails.append("the game's picture: %.0f%% dark, %.0f%% tiles, %.2f%% sled, %.0f%% sky, %d colours"
+                     % (dark * 100, tiles * 100, sled * 100, sky * 100, ncol))
+    return fails
+
+
+def saver3d_test(log):
+    """Lantern Valley: full screen, the 20th frame logged, then its picture"""
+    if not wait_log(log, "screensaver: LANTERNS.SCR is showing", 0, 60):
+        return ["the 3D screen saver did not start"]
+    if not wait_log(log, "lanterns: 20 frames rendered", 0, 240):
+        return ["the 3D screen saver did not log its 20th frame in 240 s"]
+    png = os.path.abspath(os.path.join(BUILD, "ci_saver3d.png"))
+    subprocess.run([sys.executable, "tools/qemu_ctl.py", os.path.join(BUILD, "mon.sock"), "png:" + png], stdout=subprocess.DEVNULL)
+    from PIL import Image
+    im = Image.open(png).convert("RGB")
+    (orange, violet, green, glow), ncol = colour_shares(im, [
+        lambda r, g, b: r > 190 and 90 < g < 210 and b < 170 and r - b > 60,
+        lambda r, g, b: b > g + 15 and r > g and b > 40,
+        lambda r, g, b: g > r and g > b + 10,
+        lambda r, g, b: r > 235 and g > 190])
+    dark = dark_share(im)
+    if dark > 0.3 or orange < 0.003 or violet < 0.05 or green < 0.03 or glow < 0.0002 or ncol < 200:
+        return ["the screen saver's picture: %.0f%% dark, %.1f%% orange, %.0f%% violet, %.0f%% green, %.2f%% lantern glow, %d colours"
+                % (dark * 100, orange * 100, violet * 100, green * 100, glow * 100, ncol)]
+    return []
 
 
 def qmp_heads(device, n):
@@ -1650,6 +1723,13 @@ def run(cfg):
         with open(argf, "w") as f:
             f.write("C:/PROGRAMS/" + prog[0] + prog_args)
         extra += " -fw_cfg name=opt/halcyon/autorun,file=" + argf
+    if "game3d" in opts:
+        argf = os.path.abspath(os.path.join(BUILD, "ci_autorun.txt"))
+        with open(argf, "w") as f:
+            f.write("C:/PROGRAMS/SHARDS.EXE /demo")
+        extra += " -fw_cfg name=opt/halcyon/autorun,file=" + argf
+    if "saver3d" in opts:
+        extra += " -fw_cfg name=opt/halcyon/screensaver,string=4:LANTERNS.SCR"
     if "saver" in opts:
         extra += " -fw_cfg name=opt/halcyon/screensaver,string=5:STARS.SCR"
         if not prog:                     # GUIDEMO.EXE logs the input that reaches it
@@ -1973,8 +2053,16 @@ def run(cfg):
     if "saver" in opts and p.poll() is None and "gui: desktop ready" in text:
         saver_fails = saver_test(log)
         text = open(log, errors="replace").read()
+    gl_fails = []
+    if "game3d" in opts and p.poll() is None and "gui: desktop ready" in text:
+        gl_fails += game3d_test(log)
+        text = open(log, errors="replace").read()
+    if "saver3d" in opts and p.poll() is None and "gui: desktop ready" in text:
+        gl_fails += saver3d_test(log)
+        text = open(log, errors="replace").read()
     if p.poll() is None and "gui: desktop ready" in text and not prog and "saver" not in opts and "dual" not in opts \
-            and "arrange" not in opts and "accel" not in opts and "accelhang" not in opts:
+            and "arrange" not in opts and "accel" not in opts and "accelhang" not in opts \
+            and "game3d" not in opts and "saver3d" not in opts:
         time.sleep(2)
         c0 = cpu_seconds(p.pid)
         time.sleep(4)
@@ -2011,6 +2099,7 @@ def run(cfg):
         failures += cd_fails
     failures += kbd_fails
     failures += saver_fails
+    failures += gl_fails
     failures += gpu_fails
     if ntfs_disk:
         failures += ntfs_failures(text, ntfs_disk)
@@ -2052,6 +2141,11 @@ def run(cfg):
     status = "PASS" if not failures else "FAIL (%s)" % ", ".join(failures)
     cpu = "" if idle is None else "  idle CPU %3.0f%%" % idle
     print("%-22s %5.1fs%s  %s" % (cfg, elapsed, cpu, status), flush=True)
+    if "game3d" in opts or "saver3d" in opts:     # the frame rates measured
+        rates = [l[l.index("] ") + 2:].strip() for l in text.splitlines()
+                 if ("shards: " in l or "lanterns: " in l) and "frames rendered" in l and "] " in l]
+        for line in rates[-2:]:
+            print("    " + line)
     if net:
         for line in text.splitlines():
             if "nettest: " in line and any(k in line for k in ("MB/s", "KB/s", "parallel", "ping 10", "loopback 4",
