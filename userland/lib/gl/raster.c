@@ -116,6 +116,12 @@ gl_tri *gl_queue_tri(gl_context *c) {
 
 void gl_bin_tri(gl_context *c, gl_tri *t) {
     uint32_t id = (uint32_t)(t - c->tris);
+    if (c->dirty_x1 <= c->dirty_x0) {
+        c->dirty_x0 = t->minx; c->dirty_y0 = t->miny; c->dirty_x1 = t->maxx; c->dirty_y1 = t->maxy;
+    } else {
+        c->dirty_x0 = GL_MIN(c->dirty_x0, t->minx); c->dirty_y0 = GL_MIN(c->dirty_y0, t->miny);
+        c->dirty_x1 = GL_MAX(c->dirty_x1, t->maxx); c->dirty_y1 = GL_MAX(c->dirty_y1, t->maxy);
+    }
     int tx0 = t->minx >> TILE_LOG, tx1 = (t->maxx - 1) >> TILE_LOG;
     int ty0 = t->miny >> TILE_LOG, ty1 = (t->maxy - 1) >> TILE_LOG;
     for (int ty = ty0; ty <= ty1; ty++)
@@ -281,7 +287,7 @@ static inline float fast_log2(float x) {
     float e = (float)((int)(b.u >> 23) - 127);
     b.u = (b.u & 0x7FFFFF) | 0x3F800000;
     float m = b.f;
-    return e + (-0.34484843f * m + 2.02466578f) * m - 0.67487759f;
+    return e + (-0.34484843f * m + 2.02466578f) * m - 1.67487759f;   /* log2(m) for m in [1, 2), within 0.005 */
 }
 
 /* ---------------- one triangle in one tile ---------------- */
@@ -523,7 +529,7 @@ static void draw_tri_tile(gl_context *c, const gl_tri *t, int tx0, int ty0, int 
     if (!(t->flags & TF_SMOOTH))
         tc.color = soa_px(_mm_set1_ps(GL_CLAMPF(t->p[A_R][0], 0.0f, 255.0f)), _mm_set1_ps(GL_CLAMPF(t->p[A_G][0], 0.0f, 255.0f)),
                           _mm_set1_ps(GL_CLAMPF(t->p[A_B][0], 0.0f, 255.0f)), _mm_set1_ps(GL_CLAMPF(t->p[A_A][0], 0.0f, 255.0f)));
-    if (!(t->flags & TF_SPEC_SMOOTH))
+    if ((t->rs->flags & RS_SPECULAR) && !(t->flags & TF_SPEC_SMOOTH))
         tc.spec = soa_px(_mm_set1_ps(GL_CLAMPF(t->p[A_SR][0], 0.0f, 255.0f)), _mm_set1_ps(GL_CLAMPF(t->p[A_SG][0], 0.0f, 255.0f)),
                          _mm_set1_ps(GL_CLAMPF(t->p[A_SB][0], 0.0f, 255.0f)), _mm_setzero_ps());
     __m128i lanes = _mm_setr_epi32(0, 1, 2, 3);

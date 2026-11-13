@@ -132,6 +132,26 @@ $(BUILD)/user/mplayer.exe $(BUILD)/user/play.exe: $(BUILD)/user/%.exe: userland/
 	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(WAVLIB) $(ULIBA)
 	strip $@
 
+# Halcyon's 3D library (userland/lib/gl, GL/gl.h, GL/glu.h, GL/hgl.h): an
+# archive linked only into the programs that use it (before libm.a)
+GL_SRC := $(wildcard userland/lib/gl/*.c)
+GL_OBJ := $(patsubst userland/lib/gl/%.c,$(BUILD)/user/gl/%.o,$(GL_SRC))
+GL_HDR := $(wildcard userland/lib/gl/*.h) $(wildcard userland/include/GL/*.h)
+GLLIB := $(BUILD)/user/libgl.a
+$(BUILD)/user/gl/%.o: userland/lib/gl/%.c $(GL_HDR) userland/include/hal.h userland/include/halmath.h kernel/core/sysabi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(GLLIB): $(GL_OBJ)
+	rm -f $@
+	ar rcs $@ $^
+# 3D programs: NAME.c (and NAME/*.c) with libgl.a
+SHARDS_SRC := $(wildcard userland/programs/shards/*.c)
+$(BUILD)/user/shards.exe: userland/programs/shards.c $(SHARDS_SRC) $(wildcard userland/programs/shards/*.h) $(ULIB) $(GLLIB) $(ULIBA) \
+                          $(GL_HDR) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(SHARDS_SRC) $(GLLIB) $(ULIBA)
+	strip $@
+
 # programs in several files: NAME.c plus NAME/*.c (explicit rules replace the pattern rule)
 NOTEPAD_SRC := $(wildcard userland/programs/notepad/*.c)
 $(BUILD)/user/notepad.exe: userland/programs/notepad.c $(NOTEPAD_SRC) $(wildcard userland/programs/notepad/*.h) $(ULIB) $(ULIBA) \
@@ -148,8 +168,14 @@ $(BUILD)/user/%.scr: userland/savers/%.c userland/savers/saver.h $(ULIB) $(ULIBA
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(ULIBA)
 	strip $@
+# the 3D screen saver: with libgl.a
+$(BUILD)/user/lanterns.scr: userland/savers/lanterns.c userland/savers/saver.h $(ULIB) $(GLLIB) $(ULIBA) $(GL_HDR) \
+                            userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(GLLIB) $(ULIBA)
+	strip $@
 IMG_DEPS += $(USAVERS)
-.SECONDARY: $(ULIB) $(ULIBA) $(WAVLIB)
+.SECONDARY: $(ULIB) $(ULIBA) $(WAVLIB) $(GLLIB)
 
 # ---- libraries linked only into the programs that use them ----
 # BearSSL (userland/third_party/bearssl, unmodified): its own C sources with

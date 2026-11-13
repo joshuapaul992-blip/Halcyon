@@ -128,6 +128,7 @@ typedef struct gl_attrib_save {
     gl_hints hints;
     float line_width, point_size;
     GLuint list_base;
+    struct { GLenum min, mag, ws, wt; } tex_params[MAX_UNITS];   /* the bound textures' (GL_TEXTURE_BIT) */
 } gl_attrib_save;
 
 /* ---------------- texture objects ---------------- */
@@ -233,7 +234,8 @@ struct gl_context {
     unsigned *color;
     int w, h, stride;
     int own_color;                         /* color was allocated here */
-    float *depth;                          /* rows of dstride floats (a multiple of 4) */
+    float *depth;                          /* rows of dstride floats (a multiple of 4), 16-byte aligned */
+    void *depth_mem;                       /* (what was allocated for it) */
     int dstride, depth_w, depth_h;
     int no_depth;
     int win;                               /* the Halcyon window, or -1 */
@@ -300,6 +302,7 @@ struct gl_context {
     int tiles_x, tiles_y;
     int clip_x0, clip_y0, clip_x1, clip_y1; /* scissor and frame buffer (pixels, y down) */
     int frame_dirty;                       /* something was queued or drawn since the last swap */
+    int dirty_x0, dirty_y0, dirty_x1, dirty_y1;   /* pixels touched since the last swap (x1 <= x0: none) */
 
     /* statistics */
     unsigned frames;

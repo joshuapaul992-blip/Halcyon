@@ -98,7 +98,7 @@ void gl_update_matrices(gl_context *c) {
 }
 
 static int record(gl_context *c, int op, int n, const float *f) {
-    gl_dlarg a[16];
+    gl_dlarg a[16] = { { 0 } };
     for (int i = 0; i < n; i++) a[i].f = f[i];
     return gl_dl_record(c, op, n, a);
 }

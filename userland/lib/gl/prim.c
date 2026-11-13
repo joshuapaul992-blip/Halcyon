@@ -55,10 +55,12 @@ static void setup_tri(gl_context *c, const gl_vertex *v0, const gl_vertex *v1, c
     px1 = GL_MIN(px1, c->clip_x1); py1 = GL_MIN(py1, c->clip_y1);
     if (px0 >= px1 || py0 >= py1) return;
 
-    const gl_rstate *rs = gl_get_rstate(c);
-    if (!rs) return;
+    /* the record first: making room may draw the queue and start the
+     * snapshots again, which the state pointer must come after */
     gl_tri *t = gl_queue_tri(c);
     if (!t) return;
+    const gl_rstate *rs = gl_get_rstate(c);
+    if (!rs) { c->ntris--; return; }
     t->rs = rs;
     t->flags = 0;
     t->minx = px0; t->miny = py0; t->maxx = px1; t->maxy = py1;
