@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include "../../kernel/core/sysabi.h"
+#include "halmath.h"           /* float math: sqrtf, sinf, powf... (libm.a) */
 
 /* error codes (negative results) */
 #define E_IO      -1

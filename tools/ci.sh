@@ -34,6 +34,13 @@ if ! snd=$(sh tests/sound/run.sh 2>&1); then
 fi
 echo "$snd" | tail -2
 
+echo "== host math tests"
+if ! gl=$(sh tests/gl/run.sh 2>&1); then
+    echo "$gl" | tail -30
+    exit 1
+fi
+echo "$gl" | tail -1
+
 echo "== QEMU boot matrix"
 if [ "$1" = quick ]; then
     python3 tools/boottest.py xhci:bios xhci:uefi

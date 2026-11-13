@@ -101,18 +101,24 @@ endif
 UCFLAGS := -std=gnu11 -O2 -g0 -ffreestanding -fno-builtin -fPIE -fno-stack-protector -fno-asynchronous-unwind-tables \
            -Wall -Wextra -Wno-unused-parameter -Iuserland/include
 ULDFLAGS := -static-pie -nostdlib -Wl,--no-dynamic-linker -Wl,-z,noexecstack -Wl,--build-id=none
-ULIB := $(BUILD)/user/crt0.o $(patsubst userland/lib/%.c,$(BUILD)/user/%.o,$(filter-out userland/lib/wav.c,$(wildcard userland/lib/*.c)))
+ULIB := $(BUILD)/user/crt0.o $(patsubst userland/lib/%.c,$(BUILD)/user/%.o,$(filter-out userland/lib/wav.c userland/lib/math.c,$(wildcard userland/lib/*.c)))
+# archives: on the link line after the program's own objects
+ULIBA := $(BUILD)/user/libm.a
 UPROGS := $(patsubst userland/programs/%.c,$(BUILD)/user/%.exe,$(wildcard userland/programs/*.c))
 
 $(BUILD)/user/crt0.o: userland/lib/crt0.S
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -c $< -o $@
-$(BUILD)/user/%.o: userland/lib/%.c userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
+$(BUILD)/user/%.o: userland/lib/%.c userland/include/hal.h userland/include/halmath.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -c $< -o $@
-$(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
+# float math (userland/lib/math.c): an archive, so a program takes only what it calls
+$(BUILD)/user/libm.a: $(BUILD)/user/math.o
+	rm -f $@
+	ar rcs $@ $^
+$(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) $(ULIBA) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
 	@mkdir -p $(dir $@)
-	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $<
+	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(ULIBA)
 	strip $@
 
 # the WAV library (userland/lib/wav.c), linked only into the programs that play files
@@ -120,30 +126,30 @@ WAVLIB := $(BUILD)/user/wav.o
 $(BUILD)/user/wav.o: userland/lib/wav.c userland/include/wav.h
 	@mkdir -p $(dir $@)
 	$(CC) $(UCFLAGS) -c $< -o $@
-$(BUILD)/user/mplayer.exe $(BUILD)/user/play.exe: $(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) $(WAVLIB) userland/include/wav.h \
+$(BUILD)/user/mplayer.exe $(BUILD)/user/play.exe: $(BUILD)/user/%.exe: userland/programs/%.c $(ULIB) $(ULIBA) $(WAVLIB) userland/include/wav.h \
                            userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
 	@mkdir -p $(dir $@)
-	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(WAVLIB)
+	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(WAVLIB) $(ULIBA)
 	strip $@
 
 # programs in several files: NAME.c plus NAME/*.c (explicit rules replace the pattern rule)
 NOTEPAD_SRC := $(wildcard userland/programs/notepad/*.c)
-$(BUILD)/user/notepad.exe: userland/programs/notepad.c $(NOTEPAD_SRC) $(wildcard userland/programs/notepad/*.h) $(ULIB) \
+$(BUILD)/user/notepad.exe: userland/programs/notepad.c $(NOTEPAD_SRC) $(wildcard userland/programs/notepad/*.h) $(ULIB) $(ULIBA) \
                            userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
 	@mkdir -p $(dir $@)
-	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(NOTEPAD_SRC)
+	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(NOTEPAD_SRC) $(ULIBA)
 	strip $@
 
 IMG_DEPS += $(UPROGS)
 
 # screen savers (userland/savers/*.c): ordinary programs named NAME.SCR
 USAVERS := $(patsubst userland/savers/%.c,$(BUILD)/user/%.scr,$(wildcard userland/savers/*.c))
-$(BUILD)/user/%.scr: userland/savers/%.c userland/savers/saver.h $(ULIB) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
+$(BUILD)/user/%.scr: userland/savers/%.c userland/savers/saver.h $(ULIB) $(ULIBA) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
 	@mkdir -p $(dir $@)
-	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $<
+	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(ULIBA)
 	strip $@
 IMG_DEPS += $(USAVERS)
-.SECONDARY: $(ULIB) $(WAVLIB)
+.SECONDARY: $(ULIB) $(ULIBA) $(WAVLIB)
 
 # ---- libraries linked only into the programs that use them ----
 # BearSSL (userland/third_party/bearssl, unmodified): its own C sources with
@@ -185,21 +191,21 @@ WEBLIBS := $(BUILD)/user/libweb.a $(BUILD)/user/libbearssl.a
 # programs that use libweb (explicit rules: they replace the pattern rule above)
 BROWSER_SRC := $(wildcard userland/programs/browser/*.c)
 $(BUILD)/user/browser.exe: userland/programs/browser.c $(BROWSER_SRC) $(wildcard userland/programs/browser/*.h) \
-                           userland/lib/web/web.h $(ULIB) $(WEBLIBS) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
+                           userland/lib/web/web.h $(ULIB) $(ULIBA) $(WEBLIBS) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
 	@mkdir -p $(dir $@)
-	$(CC) $(UCFLAGS) -Iuserland/lib/web $(ULDFLAGS) -o $@ $(ULIB) $< $(BROWSER_SRC) $(WEBLIBS)
+	$(CC) $(UCFLAGS) -Iuserland/lib/web $(ULDFLAGS) -o $@ $(ULIB) $< $(BROWSER_SRC) $(WEBLIBS) $(ULIBA)
 	strip $@
 # Help and Support: the browser's HTML parser and layout draw the help pages
 HELP_ENGINE := userland/programs/browser/html.c userland/programs/browser/layout.c
 $(BUILD)/user/help.exe: userland/programs/help.c $(HELP_ENGINE) userland/programs/browser/browser.h \
-                        userland/lib/web/web.h $(ULIB) $(WEBLIBS) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
+                        userland/lib/web/web.h $(ULIB) $(ULIBA) $(WEBLIBS) userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h
 	@mkdir -p $(dir $@)
-	$(CC) $(UCFLAGS) -Iuserland/lib/web $(ULDFLAGS) -o $@ $(ULIB) $< $(HELP_ENGINE) $(WEBLIBS)
+	$(CC) $(UCFLAGS) -Iuserland/lib/web $(ULDFLAGS) -o $@ $(ULIB) $< $(HELP_ENGINE) $(WEBLIBS) $(ULIBA)
 	strip $@
-$(BUILD)/user/wget.exe $(BUILD)/user/webtest.exe: $(BUILD)/user/%.exe: userland/programs/%.c userland/lib/web/web.h $(ULIB) $(WEBLIBS) \
+$(BUILD)/user/wget.exe $(BUILD)/user/webtest.exe: $(BUILD)/user/%.exe: userland/programs/%.c userland/lib/web/web.h $(ULIB) $(ULIBA) $(WEBLIBS) \
                            userland/include/hal.h kernel/core/sysabi.h kernel/net/sockabi.h kernel/sound/sndabi.h $(wildcard userland/programs/webtest_certs.h)
 	@mkdir -p $(dir $@)
-	$(CC) $(UCFLAGS) -Iuserland/lib/web -I$(BEARPORT) -I$(BEARSSL)/inc $(ULDFLAGS) -o $@ $(ULIB) $< $(WEBLIBS)
+	$(CC) $(UCFLAGS) -Iuserland/lib/web -I$(BEARPORT) -I$(BEARSSL)/inc $(ULDFLAGS) -o $@ $(ULIB) $< $(WEBLIBS) $(ULIBA)
 	strip $@
 
 $(BUILD)/halcyon.img: $(IMG_DEPS)
