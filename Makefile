@@ -152,6 +152,11 @@ $(BUILD)/user/shards.exe: userland/programs/shards.c $(SHARDS_SRC) $(wildcard us
 	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(SHARDS_SRC) $(GLLIB) $(ULIBA)
 	strip $@
 
+$(BUILD)/user/glbench.exe: userland/programs/glbench.c $(ULIB) $(GLLIB) $(ULIBA) $(GL_HDR) userland/include/hal.h kernel/core/sysabi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(UCFLAGS) $(ULDFLAGS) -o $@ $(ULIB) $< $(GLLIB) $(ULIBA)
+	strip $@
+
 # programs in several files: NAME.c plus NAME/*.c (explicit rules replace the pattern rule)
 NOTEPAD_SRC := $(wildcard userland/programs/notepad/*.c)
 $(BUILD)/user/notepad.exe: userland/programs/notepad.c $(NOTEPAD_SRC) $(wildcard userland/programs/notepad/*.h) $(ULIB) $(ULIBA) \

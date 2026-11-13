@@ -1,23 +1,28 @@
-/* Benchmark of Halcyon's 3D library on the host: a textured scene at
- * 640 x 480 (a mipmapped, fogged floor, lit textured boxes, a sphere,
- * translucent quads), drawn for about two seconds per configuration, the
+/* GLBENCH.EXE - the benchmark of Halcyon's 3D library: a textured scene
+ * (a mipmapped, fogged floor, lit textured boxes, a sphere, translucent
+ * quads), drawn into memory for about two seconds per configuration, the
  * frames per second printed. Not a pass / fail test: the number depends on
- * the computer. Built without sanitizers, -O2 as on Halcyon.
- *   bench [W H] [seconds] [--shot FILE.ppm]   (--shot: the first frame, to look at) */
+ * the computer. The same file builds on the host (tests/gl, GL_HOST, -O2
+ * as on Halcyon, no sanitizers), so both can draw the same frames.
+ *   glbench [W H] [seconds] [--shot FILE.ppm]   (--shot: the first frame, to look at) */
+#ifdef GL_HOST
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "GL/gl.h"
-#include "GL/glu.h"
-#include "GL/hgl.h"
 #include "halmath.h"
-
 static double now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
+#else
+#include "hal.h"
+static double now(void) { return (double)time_ms() * 0.001; }
+#endif
+#include "GL/gl.h"
+#include "GL/glu.h"
+#include "GL/hgl.h"
 
 static GLuint tex_ground, tex_box;
 static unsigned char img[256 * 256 * 3];
@@ -140,8 +145,9 @@ static void frame(int w, int h, float time, int cfg, GLUquadric *q) {
 int main(int argc, char **argv) {
     const char *shot = NULL;
     if (argc > 2 && !strcmp(argv[argc - 2], "--shot")) { shot = argv[argc - 1]; argc -= 2; }
+    (void)shot;                             /* (pictures are written on the host only) */
     int w = argc > 2 ? atoi(argv[1]) : 640, h = argc > 2 ? atoi(argv[2]) : 480;
-    double secs = argc > 3 ? atof(argv[3]) : argc == 2 ? atof(argv[1]) : 2.0;
+    double secs = argc > 3 ? atoi(argv[3]) : argc == 2 ? atoi(argv[1]) : 2;
     HGLRC rc = hglCreateMemoryContext(w, h, 0);
     if (!rc) return 1;
     hglMakeCurrent(rc);
@@ -156,6 +162,7 @@ int main(int argc, char **argv) {
         do {
             frame(w, h, frames * 0.04f, cfg, q);
             hglFinishFrame(rc);
+#ifdef GL_HOST
             if (shot && !cfg && !frames) {
                 int pw, ph, ps;
                 unsigned *px = hglGetPixels(rc, &pw, &ph, &ps);
@@ -167,10 +174,12 @@ int main(int argc, char **argv) {
                     fclose(f);
                 }
             }
+#endif
             frames++;
             t = now() - t0;
         } while (t < secs || frames < 3);
-        printf("bench: %dx%d %s: %.1f frames/s (%d frames in %.2f s)\n", w, h, names[cfg], frames / t, frames, t);
+        int tenths = (int)(frames * 10 / t + 0.5);
+        printf("glbench: %dx%d %s: %d.%d frames/s (%d frames in %d ms)\n", w, h, names[cfg], tenths / 10, tenths % 10, frames, (int)(t * 1000));
     }
     gluDeleteQuadric(q);
     hglDeleteContext(rc);

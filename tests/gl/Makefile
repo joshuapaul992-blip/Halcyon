@@ -26,9 +26,10 @@ $(OUT)/scenetest: scenetest.c scenes.h qoi.h $(GL_DEPS)
 	@mkdir -p $(OUT)
 	$(CC) $(GLFLAGS) -g -O1 $(SAN) -o $@ scenetest.c $(GL_SRC) $(ROOT)/userland/lib/math.c
 
-$(OUT)/bench: bench.c $(GL_DEPS)
+# (the same benchmark as GLBENCH.EXE on Halcyon)
+$(OUT)/bench: $(ROOT)/userland/programs/glbench.c $(GL_DEPS)
 	@mkdir -p $(OUT)
-	$(CC) $(GLFLAGS) -O2 -o $@ bench.c $(GL_SRC) $(ROOT)/userland/lib/math.c
+	$(CC) $(GLFLAGS) -O2 -o $@ $(ROOT)/userland/programs/glbench.c $(GL_SRC) $(ROOT)/userland/lib/math.c
 
 clean:
 	rm -rf $(OUT)
