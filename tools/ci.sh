@@ -34,7 +34,7 @@ if ! snd=$(sh tests/sound/run.sh 2>&1); then
 fi
 echo "$snd" | tail -2
 
-echo "== host math tests"
+echo "== host math and 3D library tests"
 if ! gl=$(sh tests/gl/run.sh 2>&1); then
     echo "$gl" | tail -30
     exit 1

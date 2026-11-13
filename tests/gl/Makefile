@@ -1,18 +1,34 @@
-# Host tests of Halcyon's float math (userland/lib/math.c), with ASan and
-# UBSan. (The 3D library's scene tests will join them here: M11a, in progress.)
+# Host tests of Halcyon's float math (userland/lib/math.c) and 3D library
+# (userland/lib/gl): the same sources as on Halcyon, built for Linux with
+# ASan and UBSan (GL_HOST); the benchmark without them, optimized as on
+# Halcyon.
 #   make -C tests/gl             build
-#   tests/gl/run.sh              build and run
+#   tests/gl/run.sh              build and run (math, scenes)
+#   tests/gl/run.sh bench        the benchmark (frames per second)
 ROOT := ../..
 OUT ?= $(ROOT)/build/hostgl
 CC := gcc
 SAN := -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
 CFLAGS := -std=gnu11 -g -O1 -Wall -Wextra -Wno-unused-parameter -fno-builtin -I$(ROOT)/userland/include $(SAN)
+GL := $(ROOT)/userland/lib/gl
+GL_SRC := $(filter-out $(GL)/hgl.c,$(wildcard $(GL)/*.c))
+GL_DEPS := $(GL_SRC) $(wildcard $(GL)/*.h) $(wildcard $(ROOT)/userland/include/GL/*.h) $(ROOT)/userland/lib/math.c $(ROOT)/userland/include/halmath.h
+GLFLAGS := -std=gnu11 -Wall -Wextra -Wno-unused-parameter -fno-builtin -DGL_HOST -I$(ROOT)/userland/include
 
-all: $(OUT)/mathtest
+all: $(OUT)/mathtest $(OUT)/scenetest $(OUT)/bench
 
 $(OUT)/mathtest: mathtest.c $(ROOT)/userland/lib/math.c $(ROOT)/userland/include/halmath.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -o $@ mathtest.c -lm
+
+# (no -lm: the library's own float math, as on Halcyon)
+$(OUT)/scenetest: scenetest.c scenes.h qoi.h $(GL_DEPS)
+	@mkdir -p $(OUT)
+	$(CC) $(GLFLAGS) -g -O1 $(SAN) -o $@ scenetest.c $(GL_SRC) $(ROOT)/userland/lib/math.c
+
+$(OUT)/bench: bench.c $(GL_DEPS)
+	@mkdir -p $(OUT)
+	$(CC) $(GLFLAGS) -O2 -o $@ bench.c $(GL_SRC) $(ROOT)/userland/lib/math.c
 
 clean:
 	rm -rf $(OUT)
