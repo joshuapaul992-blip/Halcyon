@@ -1,0 +1,57 @@
+<html><head><title>Shards and 3D graphics</title>
+<meta name="keywords" content="3D graphics; Shards#shards; games#shards; hover sled#shards; frame rate#fps; frames per second#fps; Lantern Valley#lanterns; 3D screen saver#lanterns; OpenGL#library; 3D library#library; GL/gl.h#library; software renderer#library">
+</head><body>
+<h2 style="color:#1f4e9a">Shards and 3D graphics</h2>
+<p>Halcyon draws 3D pictures with its own 3D library. It needs no graphics
+card: the processor draws every pixel, so 3D works on any computer Halcyon
+runs on. Two programs show it off: the game <b>Shards</b> and the screen
+saver <b>Lantern Valley</b>.</p>
+
+<h3 id="shards">Playing Shards</h3>
+<p>Open <b>Shards</b> from the Start menu or the desktop. You steer a hover
+sled over a stone platform floating in the evening sky. Glowing crystal
+shards hover over the platform: pick them all up before the time runs out
+by gliding through them. Stone pillars stand in the way; bumping into one
+or into the glowing rim slows you down.</p>
+<table cellpadding="3" cellspacing="0">
+<tr><td width="150"><b>Up arrow</b> or <b>W</b></td><td>Speed up</td></tr>
+<tr><td><b>Down arrow</b> or <b>S</b></td><td>Brake, then go backwards</td></tr>
+<tr><td><b>Left</b> / <b>Right arrow</b>, <b>A</b> / <b>D</b></td><td>Turn</td></tr>
+<tr><td><b>Enter</b></td><td>Start a game (on the title screen, or after the time is up)</td></tr>
+<tr><td><b>P</b> or <b>Esc</b></td><td>Pause, and go on again</td></tr>
+<tr><td><b>F2</b></td><td>A new game</td></tr>
+<tr><td><b>F</b></td><td>Show or hide the frame rate</td></tr>
+<tr><td><b>F1</b></td><td>This page</td></tr>
+</table>
+<p>Every level has more shards and pillars than the one before, and a
+little less time for each shard. A shard is worth 100 points times the
+level; the seconds left when you clear a level add 10 points each. Your
+best score is kept.</p>
+
+<h3 id="fps">The frame rate</h3>
+<p>Press <b>F</b> in Shards to see how many pictures (frames) a second the
+computer draws, in the bottom right corner. On a computer of the last ten
+years it is well above 60 at the normal window size; in a virtual machine
+without hardware support it can be only a few. A larger window means more
+pixels to draw, so the frame rate falls when you maximize it.</p>
+
+<h3 id="lanterns">The Lantern Valley screen saver</h3>
+<p>Lantern Valley glides up a winding valley at dusk while paper lanterns
+rise from the river and drift into the sky. Choose it like any other
+screen saver in <a href="screensaver.htm">Display Properties</a>. The
+valley and the lanterns are made up as it goes, so the flight never ends
+and never looks quite the same twice.</p>
+
+<h3 id="library">For the curious: the 3D library</h3>
+<p>The 3D library is a large part of OpenGL 1.3, the fixed-function 3D
+interface of games from the early 2000s: transformations, lighting with up
+to eight lights, textures with mipmaps and smooth filtering, two textures at
+once, fog, blending, the depth buffer, clipping, vertex arrays and display
+lists. Programs include <code>GL/gl.h</code>, <code>GL/glu.h</code> and
+<code>GL/hgl.h</code> (the link to a Halcyon window) and draw straight into
+their window. The pictures are drawn in squares of 64 by 64 pixels, four
+pixels at a time, with the processor's SSE2 instructions.</p>
+
+<p><b>Related topics:</b> <a href="screensaver.htm">Screen savers</a> &middot;
+<a href="sonar.htm">Sonar</a> &middot; <a href="sysinfo.htm">System Information</a></p>
+</body></html>

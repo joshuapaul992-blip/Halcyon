@@ -25,6 +25,7 @@ Programs
   Task Manager|taskmgr.htm
   System Information|sysinfo.htm
   Sonar|sonar.htm
+  Shards and 3D graphics|3d.htm
 Control Panel and settings
   Control Panel|control.htm
   Display Properties|display.htm
