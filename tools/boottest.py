@@ -533,7 +533,7 @@ def vnc_resize(sock, w, h, wait=10):
     vnc_ctl.resize(sock, w, h)
 
 
-def dual_test(log, polled=False):
+def dual_test(log, polled=False, accel=False):
     """two monitors on a virtio GPU (see the dual variant); polled: no
     interrupts (noirq), hotplug must be found by polling"""
     mon = os.path.join(BUILD, "mon.sock")
@@ -646,6 +646,10 @@ def dual_test(log, polled=False):
     for i, im in enumerate(ims):
         if im is None or dark_share(im) < 0.9:
             fails.append("screen saver does not cover monitor %d (%.0f%% dark)" % (i + 1, dark_share(im) * 100 if im else 0))
+    if accel:
+        # the accel check wants 100 updates through acceleration: on a slow
+        # host the saver's frames, not a fixed wait, decide when to end it
+        wait_log(log, "100 updates presented through acceleration (", 0, 15)
     start = offset()
     ctl(desk, "move:200,150", "move:600,500")
     if not wait_log(log, "screensaver: stopped", start, 8):
@@ -1904,7 +1908,7 @@ def run(cfg):
     saver_fails = []
     gpu_fails = []
     if "dual" in opts and p.poll() is None and "gui: desktop ready" in text:
-        gpu_fails = dual_test(log, "noirq" in opts)
+        gpu_fails = dual_test(log, "noirq" in opts, "accel" in opts)
         text = open(log, errors="replace").read()
     if "arrange" in opts and p.poll() is None and "gui: desktop ready" in text:
         if not wait_log(log, "guidemo: window client at", 0, 30):
