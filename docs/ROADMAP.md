@@ -64,6 +64,22 @@
    power-cut-safe `SETTINGS.INI`. Three sound schemes are available
    (Halcyon, Halcyon Dusk, Halcyon Tide). See docs/DESIGN-M8-*.md.
 
+11a. **Software 3D:** Halcyon's own 3D library for programs (not Mesa): a
+   large subset of OpenGL 1.3, the fixed-function pipeline (transforms,
+   up to eight lights, two texture units with mipmaps and every filter,
+   fog, blending, alpha test, depth buffer, near-plane and user clipping,
+   vertex arrays, display lists), GLU helpers and a window binding (like
+   WGL / GLX) that draws straight into the window's canvas through M9's
+   mapping, with no copy per frame. A software renderer written for speed
+   (sub-pixel set-up, perspective-correct attributes, 64 x 64 tiles, SSE2
+   four pixels at a time) reaches the target: a textured, mipmapped, lit
+   and fogged 640x480 scene at about 110-130 frames a second on one core
+   (about 4.5 in QEMU without KVM). The float math library (libm.a) came
+   with it. Demos: the Lantern Valley screen saver and the Shards game.
+   Tested without hardware: the library builds on the host (ASan, UBSan)
+   and 36 scenes are compared with reference pictures; two QEMU boot
+   variants check rendered frames. See docs/DESIGN-M11-3D.md.
+
 ## Planned (in recommended order)
 
 ### M10: NVIDIA graphics (Kelvin up to Pascal)
@@ -168,26 +184,6 @@ Order: after M5, which does the generic display work (EDID, mode list,
 resolution picker, write-combining) that M10 plugs into. Otherwise independent
 of M6-M9; it can move earlier if test cards are at hand, since real-hardware
 testing sets its pace.
-
-### M11a: Software 3D (in progress)
-
-- A 3D library for programs: a subset of OpenGL 1.3, the fixed-function
-  pipeline of early-2000s games (transforms and lighting, textures with
-  mipmaps and bilinear filtering, depth buffer, blending, fog).
-- A software renderer behind it, written for speed: perspective-correct
-  triangle setup, SSE2 inner loops, tiles. Target: textured scenes at 640x480
-  at interactive frame rates on one core.
-- Halcyon's own programs use it; Linux programs (M13) get their 3D from Mesa
-  instead (M15, or Mesa's own software renderer without a GPU driver).
-- Frames reach the window through M9's shared memory (no copy per frame).
-- Demos: a 3D screensaver (ties in with M8) and a small 3D game or viewer.
-- Fully testable without hardware: the renderer also builds on the host and
-  the CI compares rendered scenes with reference images.
-- Depends on M9 (threads, shared memory).
-- Status: in progress, see docs/DESIGN-M11-3D.md. Done: the float math
-  library (libm.a, tested on the host). Written but not yet built or
-  tested: most of the library's pipeline (vertices, clipping, set-up, the
-  SSE2 tile renderer, textures).
 
 ### M11b: Vulkan (later; not started)
 

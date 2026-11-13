@@ -34,10 +34,11 @@ when there is no sound card) behind a mixer that plays any number of streams at 
 | CD/DVD | ISO 9660 with Joliet (long Unicode names) and Rock Ridge names, multi-sector directories and multi-extent files, hardened against corrupt discs. Hybrid ISO images written to USB sticks or disks mount too. |
 | Keyboard | 20 layouts that follow Windows': US, US-International, UK, German, Swiss German, French, Belgian (AZERTY), Spanish, Italian, Portuguese, Brazilian (ABNT2), Swedish/Finnish, Norwegian, Danish, Dutch, Polish (Programmers), Czech, Turkish Q, Russian and Greek. AltGr (Right Alt, or Ctrl+Alt), dead keys (a dead key followed by a key it does not compose with gives the accent, then the key), Caps Lock per key, the ISO key next to left Shift and the ABNT2 keys. Ctrl shortcuts go by the letter on the key (Ctrl+A is the AZERTY "A"; US letters on Russian and Greek). Several layouts can be installed: Left Alt+Shift or the indicator on the taskbar switches; Keyboard settings in the Control Panel or the `KEYBOARD` command. Characters reach programs as Unicode code points. |
 | Unicode | File names and text are UTF-8 throughout; FAT long names are stored as UTF-16 (including characters outside the BMP), with Unicode case-insensitive lookup. The fonts cover Latin, Greek, Cyrillic and common symbols; other characters are kept and drawn as a replacement box. |
-| GUI | Compositing window manager (move, resize, minimize, maximize), drag and drop between windows of any program and the desktop (a drag image, copy / move / no-entry feedback, a right-drag menu), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Screen savers (Blank, Starfield, Drifting Lines, Halcyon Logo, Scrolling Text: `C:\PROGRAMS\*.SCR` programs started after a wait, ended by any key, click or real mouse movement, which never reaches the window underneath; kept away by full-screen programs and while Media Player plays). Every choice survives a restart in `C:\HALCYON\SETTINGS.INI`, written atomically (a temporary copy, a backup, recovery at boot, so a power cut cannot lose it) and coalesced: theme, wallpaper, the places, sizes and maximized state of windows, dragged desktop icons, the mouse, Paint's colours and tools, the last folder of Open / Save dialogs, Sonar's level and best times. See [docs/DESIGN-M8-SCREENSAVER-SETTINGS.md](docs/DESIGN-M8-SCREENSAVER-SETTINGS.md). |
+| GUI | Compositing window manager (move, resize, minimize, maximize), drag and drop between windows of any program and the desktop (a drag image, copy / move / no-entry feedback, a right-drag menu), menus, dialogs, widgets, three colour themes, four procedural wallpapers. Screen savers (Blank, Starfield, Drifting Lines, Halcyon Logo, Scrolling Text, Lantern Valley in 3D: `C:\PROGRAMS\*.SCR` programs started after a wait, ended by any key, click or real mouse movement, which never reaches the window underneath; kept away by full-screen programs and while Media Player plays). Every choice survives a restart in `C:\HALCYON\SETTINGS.INI`, written atomically (a temporary copy, a backup, recovery at boot, so a power cut cannot lose it) and coalesced: theme, wallpaper, the places, sizes and maximized state of windows, dragged desktop icons, the mouse, Paint's colours and tools, the last folder of Open / Save dialogs, Sonar's level and best times. See [docs/DESIGN-M8-SCREENSAVER-SETTINGS.md](docs/DESIGN-M8-SCREENSAVER-SETTINGS.md). |
 | Display | A display core for native drivers: adapters with several heads (each with its own mode, scanout buffers, hardware cursor and vertical blank), connectors with EDID monitors and hotplug, mode lists with full timings (EDID, DMT, CVT), page flips paced by the vertical blank, and the firmware frame buffer as the fallback whenever a driver fails (see [docs/DESIGN-M10-DISPLAY.md](docs/DESIGN-M10-DISPLAY.md)). Drivers: QEMU/Bochs/VirtualBox VGA and virtio GPU (up to 16 outputs, hardware cursor, page flips, hotplug). Several monitors make one extended desktop, arranged in Display Properties: the taskbar and icons on the primary one, windows on any of them, maximized to their own, the pointer crossing where they touch, the screen saver on all. The loaders read the monitor's EDID and start in its native resolution (a 4K panel gets an exact fraction such as 1920×1080, since the UI has no scaling), or in the resolution chosen in Display Properties. With the firmware frame buffer a new resolution applies at the next start; native adapters switch at once, with Windows' "keep these settings?" 15-second revert. Where the driver programs each mode's timing (NVIDIA), every refresh rate the monitor lists (base block, CEA-861 and DisplayID timings, de-duplicated, checked against the head's pixel clock and the DisplayPort link) is offered in a Refresh rate drop-down, per monitor, saved as `display.<connector>.hz` and restored at the start (a rate no longer offered gives the monitor's preferred one, noted in `BOOT.LOG`). Frame buffers in VRAM are write-combining (PAT). NVIDIA cards from the GeForce 256 to the GeForce 10 series are identified (M10a): chip and family, video memory, the PCI Express link, the video BIOS (read from the GPU's shadow, its flash chip or the ROM BAR, checked) with its output, I2C, connector and GPIO tables, and each connector's monitor (EDID over I2C or DisplayPort AUX), in System Information; `NVREPORT` saves a report, the video BIOS and the EDIDs. Native modesetting for NVIDIA cards from the GeForce 8 to the GeForce 10 series (M10b, the NV50 "EVO" display engine, ported from nouveau; runs on a GTX 1070): it takes the display over from the firmware, drives DisplayPort (link training), DVI / HDMI (TMDS, dual link) and VGA outputs at any EDID mode, and falls back to the firmware frame buffer with the reason in `BOOT.LOG` whenever a step fails; a start guard leaves the driver off after a start that did not finish, and a new configuration's picture must be confirmed (`nv.modeset=0` keeps the firmware frame buffer). M10d adds the hardware cursor, tear-free page flips at the vertical blank and up to four monitors at once (two on most of the GeForce 8 to 500 series), each on its own head and output, polled without interrupts and each falling back to the M10b behaviour on its own (`nv.hwcursor=0`, `nv.flip=0`, `nv.heads=1`; not yet run on a real card). M10e lets the GPU present: on Kepler to Pascal cards (GeForce 600 to 10) one of the card's copy engines, which needs no firmware, uploads the desktop's damaged rectangles into the scanout buffers, brings a page flip's back buffer up to date from the front one and fills new buffers, through one PFIFO channel with its own small GPU address space (the GP100 five-level page tables on Pascal), completion polled from a semaphore; the display core offers these operations to any driver, waits for them before every flip, and goes back to CPU copies for the session at the first timeout or error; a guard leaves only acceleration off after a bring-up that did not finish (`nv.accel=0` turns it off; NVREPORT compares CPU and copy engine speed and CPU time; not yet run on a real card; PGRAPH's 2D engine, which needs NVIDIA's signed firmware, is a later option). See [docs/DESIGN-M10-NVIDIA.md](docs/DESIGN-M10-NVIDIA.md). |
+| 3D graphics | Halcyon's own 3D library for programs (M11a; not Mesa): a large subset of OpenGL 1.3, the fixed-function pipeline (`GL/gl.h`, GLU helpers in `GL/glu.h`, the window binding in `GL/hgl.h`, like WGL or GLX): matrix stacks, immediate mode, vertex arrays and display lists, up to eight directional, point and spot lights with materials and colour material, two texture units with every filter, mipmaps and the five environment modes, texgen, fog, blending, the alpha test, a float depth buffer, culling, clipping at the near plane and by six user planes, polygon modes and offset, scissor, viewports. A software renderer draws it, written for speed: sub-pixel triangle set-up, perspective-correct attributes, 64 x 64 tiles, SSE2 four pixels at a time; frames go straight into the window's canvas (M9's mapping, no copy). A textured, mipmapped, lit and fogged 640 x 480 scene runs at about 110-130 frames a second on one core of a 2.1 GHz Xeon (`GLBENCH`; about 4.5 in QEMU without KVM). Shards (`SHARDS.EXE`, a hover-sled game) and the Lantern Valley screen saver show it off. See [docs/DESIGN-M11-3D.md](docs/DESIGN-M11-3D.md). |
 | Web | A web browser (Web Browser, `BROWSER.EXE`): HTTP/1.1 and HTTPS, pages with headings, lists, tables, forms and PNG / GIF / BMP images, history, error pages, local files; `WGET.EXE` on the command line. HTTPS through BearSSL (TLS 1.2) with certificates checked against Mozilla's root list. Both are user programs on libweb, a library for URLs, HTTP, TLS and gzip. They reach the network through the internet stack (see Network). See [docs/DESIGN-M6-WEB.md](docs/DESIGN-M6-WEB.md). |
-| Apps | Explorer (My Computer with drive properties and a padlock on read-only drives, file management; copies and deletes in a worker thread; multiple selection with Ctrl and Shift clicks, a rubber band and the keyboard; drag and drop between Explorer windows, the desktop, Notepad, Paint and Media Player; the Recycle Bin: per-drive, restore, empty, a size limit; view and sort order kept; see [docs/DESIGN-M8-EXPLORER.md](docs/DESIGN-M8-EXPLORER.md)), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB, multi-level undo and redo, word wrap, Replace, Go To, a choice of fonts), Help and Support (contents, index and full-text search of Halcyon's own help pages; F1 in every program), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Media Player (WAV files), Sonar (a mine-hunting puzzle), Control Panel (with Time Zone and Mouse), Display Properties (Screen Saver with a live preview; resolution, refresh rate and the monitors' arrangement, Identify), Keyboard settings, Network Connections, Sounds and Audio Devices, About. |
+| Apps | Explorer (My Computer with drive properties and a padlock on read-only drives, file management; copies and deletes in a worker thread; multiple selection with Ctrl and Shift clicks, a rubber band and the keyboard; drag and drop between Explorer windows, the desktop, Notepad, Paint and Media Player; the Recycle Bin: per-drive, restore, empty, a size limit; view and sort order kept; see [docs/DESIGN-M8-EXPLORER.md](docs/DESIGN-M8-EXPLORER.md)), Web Browser, Notepad (UTF-8 text in any keyboard layout, files up to 16 MB, multi-level undo and redo, word wrap, Replace, Go To, a choice of fonts), Help and Support (contents, index and full-text search of Halcyon's own help pages; F1 in every program), Command Prompt (DOS-style shell with redirection), System Information (device tree), Paint (BMP), Calculator, Media Player (WAV files), Sonar (a mine-hunting puzzle), Shards (a 3D game), Control Panel (with Time Zone and Mouse), Display Properties (Screen Saver with a live preview; resolution, refresh rate and the monitors' arrangement, Identify), Keyboard settings, Network Connections, Sounds and Audio Devices, About. |
 
 ## Building
 
@@ -246,10 +247,15 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   accelerated presentation through its software test hook on the virtio
   GPU (`vgpu+accel`, `dual+accel`: uploads and buffer-to-buffer copies,
   flips waiting for them; `vgpu+accelhang`: an accelerator that stops
-  answering is given up and the CPU presents); and the screen saver (`saver`): it
+  answering is given up and the CPU presents); the screen saver (`saver`): it
   starts after the test hook's wait, a screendump shows the stars, the click
   that ends it never reaches the window under it (`GUIDEMO.EXE` logs its
-  input), the next click does, a key and a mouse movement end it too
+  input), the next click does, a key and a mouse movement end it too; and
+  the 3D library (`game3d`: `SHARDS.EXE /demo` steers itself, its 50th frame
+  is waited for in the log and a screendump of its window must show the
+  textured platform, the sled and the sky; `saver3d`: Lantern Valley full
+  screen, its 20th frame logged, a screendump with the dusk sky, the valley
+  and the lanterns; both print the frame rates measured)
 - the network stack on the host (`tests/host/netsim.c`, run by `tests/host/run.sh`):
   kernel/net/ loaded once per simulated computer on a simulated Ethernet that
   loses, duplicates, reorders, delays and corrupts frames, against an
@@ -328,10 +334,19 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   every format against known values and encoders written independently from
   the standards (G.711, IMA ADPCM), mix-down, odd and truncated files, every
   rejection, 200,000 mutated files; and the system sounds made at build time
-- the float math library (`tests/gl/run.sh`), built for Linux with ASan/UBSan:
-  `sinf`, `cosf`, `tanf`, `atan2f`, `expf`, `logf`, `powf` and the rest
-  against the host's double-precision library over millions of values (within
-  1 ulp; the exact ones bit for bit) and the special values C defines
+- the float math library and the 3D library (`tests/gl/run.sh`), built for
+  Linux with ASan/UBSan: `sinf`, `cosf`, `tanf`, `atan2f`, `expf`, `logf`,
+  `powf` and the rest against the host's double-precision library over
+  millions of values (within 1 ulp; the exact ones bit for bit) and the
+  special values C defines; the 3D library from the same sources as on
+  Halcyon: 36 scenes (depth, every texture filter and mipmapping, the
+  texture environment, directional, point and spot lights, the fog modes,
+  blending and the alpha test, near-plane and user clipping, culling,
+  multitexture, viewports and scissor, and more) compared with reference
+  pictures in `tests/gl/ref` (each one looked at and checked, with a
+  tolerance for edge pixels), immediate mode, vertex arrays and display
+  lists giving bit-identical pictures, and API checks (errors, `glGet`, the
+  attribute stacks, GLU); `tests/gl/run.sh bench` times the benchmark scene
 - the web library and the browser's parser and decoders (`tests/web/run.sh`),
   built for Linux with ASan/UBSan: URLs, the CA list's conversion, inflate
   against Python's zlib/gzip and corrupt streams, PNG / GIF / BMP against
@@ -363,7 +378,9 @@ Programs live in `userland/programs/*.c`, one file each, and use the API in
 float math from `halmath.h`: `sqrtf`, `sinf`, `powf`...) and
 windows with drawing calls, standard controls (buttons, text boxes, list boxes),
 message boxes and file dialogs. `make` builds each into `build/user/NAME.exe` and
-puts it on the image as `C:\PROGRAMS\NAME.EXE`. Type its name in the Command Prompt
+puts it on the image as `C:\PROGRAMS\NAME.EXE`. 3D programs include `GL/gl.h`,
+`GL/glu.h` and `GL/hgl.h` and link `libgl.a` (see `SHARDS.EXE`'s rule in the
+Makefile; the API subset is in [docs/DESIGN-M11-3D.md](docs/DESIGN-M11-3D.md)). Type its name in the Command Prompt
 (console output and input go to that window) or double-click it in Explorer.
 `HELLO.EXE` is a console example; `CRASHME.EXE` (Crash Test) fails in nine
 different ways on purpose; `TASKMGR.EXE` is Task Manager; `EXPLORER.EXE` is
@@ -550,14 +567,14 @@ kernel/apps  applications built into the kernel
 userland/    user-mode runtime (crt0, C library subset, GUI calls), programs and
              screen savers (savers/);
              lib/web the web library, lib/wav.c the WAV library, lib/math.c
-             float math (libm.a), lib/gl the 3D library (M11a, in progress), third_party
+             float math (libm.a), lib/gl the 3D library (libgl.a), third_party
              BearSSL and the CA list
 help/        Help and Support's pages and contents (tools/mkhelp.py builds C:\HALCYON\HELP)
 tools/       image builder, font, icon and sound generators, help page checker, QEMU test harness
 tests/host   host-side storage, keyboard layout, USB HID, display and network tests, fuzzers
 tests/web    host tests of the web library and the browser's parser and decoders
 tests/sound  host tests of the WAV library
-tests/gl     host tests of the float math library (and later the 3D library)
+tests/gl     host tests of the float math library and the 3D library (scenes, reference pictures)
 ```
 
 ## Limitations
@@ -606,6 +623,11 @@ tests/gl     host tests of the float math library (and later the 3D library)
   real-time clock's time zone is unknown, so certificate dates are checked
   to within 14 hours unless `clock.utc_offset` (minutes) is set in
   `SETTINGS.INI`.
+- 3D is drawn by the processor, on one core (M11a): no graphics card
+  acceleration yet (M15), and of OpenGL 1.3 no stencil or accumulation
+  buffer, cube maps, `GL_COMBINE`, smoothing or stippling (see
+  docs/DESIGN-M11-3D.md). In QEMU without KVM it is about 25 times slower
+  than on the host.
 - The keyboard layout is one for the whole system (Windows keeps one per
   program). No input methods (IME), so no Chinese, Japanese or Korean input, and
   no Japanese or Korean layouts.
