@@ -328,6 +328,10 @@ This runs the following checks; `.github/workflows/ci.yml` runs the same script:
   every format against known values and encoders written independently from
   the standards (G.711, IMA ADPCM), mix-down, odd and truncated files, every
   rejection, 200,000 mutated files; and the system sounds made at build time
+- the float math library (`tests/gl/run.sh`), built for Linux with ASan/UBSan:
+  `sinf`, `cosf`, `tanf`, `atan2f`, `expf`, `logf`, `powf` and the rest
+  against the host's double-precision library over millions of values (within
+  1 ulp; the exact ones bit for bit) and the special values C defines
 - the web library and the browser's parser and decoders (`tests/web/run.sh`),
   built for Linux with ASan/UBSan: URLs, the CA list's conversion, inflate
   against Python's zlib/gzip and corrupt streams, PNG / GIF / BMP against
@@ -355,7 +359,8 @@ interrupt and QEMU must use under 40% of a host CPU at the idle desktop (it uses
 ## Writing programs
 
 Programs live in `userland/programs/*.c`, one file each, and use the API in
-`userland/include/hal.h`: a small C library (strings, `printf`, `malloc`, files) and
+`userland/include/hal.h`: a small C library (strings, `printf`, `malloc`, files,
+float math from `halmath.h`: `sqrtf`, `sinf`, `powf`...) and
 windows with drawing calls, standard controls (buttons, text boxes, list boxes),
 message boxes and file dialogs. `make` builds each into `build/user/NAME.exe` and
 puts it on the image as `C:\PROGRAMS\NAME.EXE`. Type its name in the Command Prompt
@@ -544,13 +549,15 @@ kernel/sound sound devices, the mixer and audio thread, the sound system calls,
 kernel/apps  applications built into the kernel
 userland/    user-mode runtime (crt0, C library subset, GUI calls), programs and
              screen savers (savers/);
-             lib/web the web library, lib/wav.c the WAV library, third_party
+             lib/web the web library, lib/wav.c the WAV library, lib/math.c
+             float math (libm.a), lib/gl the 3D library (M11a, in progress), third_party
              BearSSL and the CA list
 help/        Help and Support's pages and contents (tools/mkhelp.py builds C:\HALCYON\HELP)
 tools/       image builder, font, icon and sound generators, help page checker, QEMU test harness
 tests/host   host-side storage, keyboard layout, USB HID, display and network tests, fuzzers
 tests/web    host tests of the web library and the browser's parser and decoders
 tests/sound  host tests of the WAV library
+tests/gl     host tests of the float math library (and later the 3D library)
 ```
 
 ## Limitations

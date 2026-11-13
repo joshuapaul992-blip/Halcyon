@@ -169,7 +169,7 @@ resolution picker, write-combining) that M10 plugs into. Otherwise independent
 of M6-M9; it can move earlier if test cards are at hand, since real-hardware
 testing sets its pace.
 
-### M11: Software 3D
+### M11a: Software 3D (in progress)
 
 - A 3D library for programs: a subset of OpenGL 1.3, the fixed-function
   pipeline of early-2000s games (transforms and lighting, textures with
@@ -184,6 +184,15 @@ testing sets its pace.
 - Fully testable without hardware: the renderer also builds on the host and
   the CI compares rendered scenes with reference images.
 - Depends on M9 (threads, shared memory).
+- Status: in progress, see docs/DESIGN-M11-3D.md. Done: the float math
+  library (libm.a, tested on the host). Written but not yet built or
+  tested: most of the library's pipeline (vertices, clipping, set-up, the
+  SSE2 tile renderer, textures).
+
+### M11b: Vulkan (later; not started)
+
+A Vulkan driver for Halcyon's own programs after M11a. Not designed or
+started yet.
 
 ### M12: Intel and AMD graphics
 
@@ -270,6 +279,10 @@ Vulkan with programmable shaders, as M16 needs.
   can render on the GPU.
 - Tested on the GTX 1070 only (VFIO passthrough or bare metal).
 - Depends on M10 (10a, 10b) and M13.
+- If Mesa is ever built from source: the user has allowed running Mesa's
+  Python source generators only (with `python -I`, no network, in an
+  isolated directory; never Meson or other build scripts), with the
+  generated files committed.
 
 ### M16: Xenithium, a Roblox client for Halcyon (Sober-style)
 
