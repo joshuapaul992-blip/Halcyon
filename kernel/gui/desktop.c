@@ -260,6 +260,7 @@ static void l_calc(void) { run_or("C:/PROGRAMS/CALC.EXE", app_calc); }
 void desktop_launch_calculator(void) { l_calc(); }
 static void l_control(void) { app_control(); }
 static void l_mines(void) { run_or("C:/PROGRAMS/SONAR.EXE", app_mines); }
+static void l_shards(void) { shell_run("C:/PROGRAMS/SHARDS.EXE", NULL); }   /* the 3D game (M11a) */
 static void l_about(void) { app_about(); }
 static void l_taskmgr(void) { shell_run("C:/PROGRAMS/TASKMGR.EXE", NULL); }
 static void l_recycle(void) { shell_explorer("Recycle Bin"); }
@@ -278,6 +279,7 @@ static const dicon_t dicons[] = {
     { "Paint", ICON_PAINT, l_paint },
     { "Web Browser", ICON_WEB, l_browser },
     { "System Information", ICON_SYSINFO, l_sysinfo },
+    { "Shards", ICON_GAME, l_shards },
     { "Recycle Bin", ICON_RECYCLE, l_recycle },
 };
 #define NDICONS ((int)ARRAY_SIZE(dicons))
@@ -872,6 +874,7 @@ static const sitem_t left_items[] = {
     { "Calculator", NULL, ICON_CALC, l_calc },
     { "Media Player", NULL, ICON_MEDIA, l_mplayer },
     { "Sonar", NULL, ICON_GAME, l_mines },
+    { "Shards", "A 3D game", ICON_GAME, l_shards },
 };
 static const sitem_t right_items[] = {
     { "My Documents", NULL, ICON_DOCUMENTS, l_docs2 },
@@ -885,10 +888,10 @@ static const sitem_t right_items[] = {
     { "Install Halcyon", NULL, ICON_SETUP, app_installer },
 };
 #define SM_W 400
-#define SM_H 528                   /* 8 programs on the left */
+#define SM_H 528                   /* 9 programs on the left (the last ends at 464, the footer starts at 484) */
 #define SM_HEAD 62
 #define SM_FOOT 44
-static int sm_hover = -1;   /* 0..7 left, 10..18 right, 20 restart?, 21 shutdown */
+static int sm_hover = -1;   /* 0..8 left, 10..18 right, 20 restart?, 21 shutdown */
 
 static rect_t sm_item_rect(int id) {
     if (id < 10) return mkrect(6, SM_HEAD + 8 + id * 44, 196, 42);
@@ -973,7 +976,7 @@ static void sm_event(window_t *w, gui_event_t *e) {
     } else if (e->type == GE_KEY && e->key.pressed) {
         if (e->key.key == KEY_ESC) menu_close_all();
         else if (e->key.key == KEY_DOWN || e->key.key == KEY_UP) {
-            int order[] = { 0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 21 };
+            int order[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 21 };
             int n = ARRAY_SIZE(order), cur = -1;
             for (int i = 0; i < n; i++) if (order[i] == sm_hover) cur = i;
             cur = cur < 0 ? 0 : (cur + (e->key.key == KEY_DOWN ? 1 : n - 1)) % n;
